@@ -1,26 +1,42 @@
+<<<<<<< HEAD
 # Change app to a unique name, then: fly launch --no-deploy --copy-config
 app = "moopay"
 primary_region = "iad"
+=======
+# fly.toml app configuration file generated for moopay on 2026-11-01T20:51:20Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'moopay'
+primary_region = 'ams'
+>>>>>>> b2c049342246c7818da3517d4d6763935dd5dd96
 
 [build]
 
 [env]
+<<<<<<< HEAD
   MOOPAY_HOST = "0.0.0.0"
   MOOPAY_HTTP_PORT = "8080"
   STATE_FILE = "/data/moopay-state.json"
   MOOPAY_PUBLIC_HOST = "moopay.fly.dev"
+=======
+  MOOPAY_HOST = '0.0.0.0'
+  MOOPAY_HTTP_PORT = '8080'
+  STATE_FILE = '/data/moopay-state.json'
+>>>>>>> b2c049342246c7818da3517d4d6763935dd5dd96
 
-[mounts]
-  source = "moopay_data"
-  destination = "/data"
+[[mounts]]
+  source = 'moopay_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "off"      # the background worker must keep running
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
