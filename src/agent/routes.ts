@@ -4,24 +4,34 @@ import { fileURLToPath } from "node:url";
 import { asMoopayError, MoopayError } from "../lib/errors.js";
 import { toJson } from "../lib/json.js";
 import type { MooPayService } from "../lib/service.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { plain, runTurn, type Ctl, type Llm } from "./loop.js";
-import { AgentOps, type Sponsor } from "./ops.js";
+import { AgentOps, approvalCard, type Sponsor } from "./ops.js";
 import { spentToday } from "./policy.js";
-import { AgentStore, type UserRec } from "./store.js";
+import { alertOwner } from "../lib/alert.js";
+import { clientIp, pageHeaders, rateLimiter, withNonce } from "../lib/guard.js";
+import { AgentStore, SESSION_ENDED, SESSION_MS, type UserRec } from "./store.js";
 import { tick } from "./worker.js";
 
 const appFile = (name: string): Buffer => readFileSync(fileURLToPath(new URL(`../../app/${name}`, import.meta.url)));
 const IMAGES = new Set(["moopay-logo.png", "moopay-mark.png", "favicon.png"]);
 const MAX_BODY = 8 * 1024;
+/** Below this the wallet only holds gas dust, so the account can be deleted. */
+const DELETE_MAX_USD = 0.5;
 const MSGS_PER_MINUTE = 12;
 
-export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined }
+export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined;
+  /** AI messages allowed per day: per user, per IP, and across the whole server (a ceiling on what the AI can cost) */
+  aiDaily?: { user: number; ip: number; total: number } }
 
 export function makeAgent(d: AgentDeps) {
   const now = d.now ?? Date.now;
   const store = new AgentStore(`${d.stateFile}.agent.json`);
   const turns = new Map<string, Ctl>();
+  const apiLimit = rateLimiter(240, 60_000, now), strictLimit = rateLimiter(12, 60_000, now), chatLimit = rateLimiter(40, 60_000, now);
+  const day = 24 * 3_600_000, cap = d.aiDaily ?? { user: Number(process.env["AI_USER_DAILY"] ?? 100), ip: Number(process.env["AI_IP_DAILY"] ?? 300), total: Number(process.env["AI_TOTAL_DAILY"] ?? 5000) };
+  const userDay = rateLimiter(cap.user, day, now), ipDay = rateLimiter(cap.ip, day, now), totalDay = rateLimiter(cap.total, day, now);
+  const STRICT = new Set(["session", "reset", "delete", "signout", "export", "freeze"]);
   const ops = new AgentOps(d.svc, store, now, d.sponsor);
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
@@ -32,10 +42,13 @@ export function makeAgent(d: AgentDeps) {
     for await (const c of req) { size += (c as Buffer).length; if (size > MAX_BODY) throw new MoopayError("INVALID_INPUT", "request too large"); chunks.push(c as Buffer); }
     return chunks.length ? (JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>) : {};
   };
-  const userOf = (req: IncomingMessage): UserRec => {
+  const tokenOf = (req: IncomingMessage): string => {
     const t = req.headers["x-moopay-device"];
     if (typeof t !== "string") throw new MoopayError("INVALID_INPUT", "missing device token");
-    try { return store.open(t); } catch { throw new MoopayError("INVALID_INPUT", "bad device token"); }
+    return t;
+  };
+  const authOf = (req: IncomingMessage) => {
+    try { const a = store.auth(tokenOf(req), now()); store.settlePayout(a.u, now()); return a; } catch (e) { if (e instanceof MoopayError) throw e; throw new MoopayError("INVALID_INPUT", (e as Error).message); }
   };
   const contextOf = async (u: UserRec): Promise<string> => {
     const a = (await ops.account(u)).result;
@@ -48,6 +61,7 @@ export function makeAgent(d: AgentDeps) {
     const hit = key ? store.byKey(key) : undefined;
     if (!hit) throw new MoopayError("INVALID_INPUT", "send the agent key as 'Authorization: Bearer mpk_…'");
     const { u, ak } = hit;
+    if (ak.ips?.length && !ak.ips.includes(clientIp(req))) throw new MoopayError("INVALID_INPUT", "this key can't be used from this address");
     if (op === "me" && req.method === "GET") { json(res, 200, ops.listAgents(u).result["items"] && { agent: (ops.listAgents(u).result["items"] as { id: string }[]).find((x) => x.id === ak.id) }); return; }
     const b = await bodyOf(req);
     const str = (k: string) => (typeof b[k] === "string" ? (b[k] as string) : "");
@@ -63,7 +77,7 @@ export function makeAgent(d: AgentDeps) {
   function failText(e: unknown): string {
     const status = (e as { status?: number }).status;
     if (typeof status === "number") {
-      console.error(`[moopay] AI error ${status}: ${(e as Error).message?.slice(0, 200)}`);
+      console.error(`[moopay] AI error ${status}` + (process.env["MOOPAY_DEBUG"] ? `: ${(e as Error).message?.slice(0, 200)}` : ""));
       if (status === 401 || status === 403) return "My AI key was rejected. The owner needs to check ANTHROPIC_API_KEY.";
       if (status === 404) return "The AI model set on the server was not found. The owner needs to check AGENT_MODEL.";
       if (status === 429 || status === 529 || status >= 500) return "The AI is busy right now. Please try again in a few seconds.";
@@ -75,27 +89,80 @@ export function makeAgent(d: AgentDeps) {
 
   async function handle(req: IncomingMessage, res: ServerResponse, url: URL, origin: string): Promise<boolean> {
     const p = url.pathname;
-    if (req.method === "GET" && (p === "/" || p === "/agent" || p === "/agent/" || p === "/app" || p === "/app/")) { res.setHeader("content-type", "text/html; charset=utf-8"); res.end(appFile(p === "/" ? "landing.html" : "index.html")); return true; }
-    if (req.method === "GET" && (p === "/guide" || p === "/guide/")) { res.setHeader("content-type", "text/html; charset=utf-8"); res.end(appFile("guide.html")); return true; }
+    const page = req.method === "GET" ? ({ "/": "landing.html", "/agent": "index.html", "/agent/": "index.html", "/app": "index.html", "/app/": "index.html", "/guide": "guide.html", "/guide/": "guide.html" } as Record<string, string>)[p] : undefined;
+    if (page) {
+      const nonce = randomBytes(16).toString("base64url");
+      res.setHeader("content-type", "text/html; charset=utf-8"); pageHeaders(res, nonce);
+      res.end(withNonce(appFile(page), nonce));
+      return true;
+    }
     const img = /^\/app\/assets\/([a-z-]+\.png)$/.exec(p);
     if (req.method === "GET" && img && IMAGES.has(img[1]!)) { res.setHeader("content-type", "image/png"); res.setHeader("cache-control", "public, max-age=3600"); res.end(appFile(`assets/${img[1]}`)); return true; }
     if (!p.startsWith("/agent/api/")) return false;
     lastOrigin = origin;
+    const ip = clientIp(req), op0 = p.slice("/agent/api/".length);
+    if (!apiLimit(ip) || (STRICT.has(op0) && !strictLimit(ip + "|" + op0)) || (op0 === "chat" && !chatLimit(ip))) { json(res, 429, { code: "UPSTREAM_TIMEOUT", message: "Slow down a little and try again in a moment." }); return true; }
     const ctx = { origin };
     try {
       const op = p.slice("/agent/api/".length);
       if (op.startsWith("delegate/")) { await delegate(req, res, op.slice(9), ctx); return true; }
-      const u = userOf(req);
+      const { u, master } = authOf(req);
+      const needMaster = (what: string) => { if (!master) throw new MoopayError("INVALID_INPUT", `${what} needs your recovery code. Type /restore, paste it, and choose "My device".`); };
       if (op === "state" && req.method === "GET") {
         for (let i = 0; i < u.chat.length; i++) { const m = u.chat[i]!; if (!m.id) { m.id = randomUUID(); const n = u.chat[i + 1]; if (m.role === "user" && n && n.role === "assistant" && !n.id) n.id = m.id; } }
         const a = await ops.account(u).catch(() => undefined);
         const lastId = u.events.at(-1)?.id ?? 0;
-        json(res, 200, { account: a?.result ?? { address: u.accountId }, chat: u.chat.slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map((x) => ({ kind: "approval", id: x.id, summary: x.summary, reason: x.reason })), live: Boolean(d.llm), ai: d.ai ?? null });
+        json(res, 200, { frozen: Boolean(u.frozen), account: a?.result ?? { address: u.accountId }, saveChat: !u.noHistory, chat: (u.noHistory ? [] : u.chat).slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map(approvalCard), live: Boolean(d.llm), ai: d.ai ?? null });
         return true;
       }
       if (op === "export" && req.method === "POST") {
+        needMaster("Showing your wallet key");
+        if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
         const k = store.keyOf(u);
         json(res, 200, { accountId: k.accountId, secretKey: k.secretKey });
+        return true;
+      }
+      if (op === "session" && req.method === "POST") {
+        needMaster("A temporary session");
+        store.event(u, "A temporary session was opened from another browser. It ends after an hour. If this wasn't you, type /reset.");
+        json(res, 200, { token: store.startSession(u, now()), expiresAt: now() + SESSION_MS });
+        return true;
+      }
+      if (op === "freeze" && req.method === "POST") {
+        const b = await bodyOf(req), on = b["on"] !== false;
+        if (!on) needMaster("Unfreezing");
+        u.frozen = on || undefined;
+        store.event(u, on ? "Your account is frozen. Nothing can leave it until you type /unfreeze." : "Your account is unfrozen."); store.save();
+        json(res, 200, { frozen: on });
+        return true;
+      }
+      if (op === "history" && req.method === "POST") {
+        const b = await bodyOf(req), save = b["save"] !== false;
+        u.noHistory = save ? undefined : true;
+        if (!save) u.chat = [];
+        store.save();
+        json(res, 200, { saveChat: save });
+        return true;
+      }
+      if (op === "signout" && req.method === "POST") {
+        if (!master) store.endSession(tokenOf(req));
+        json(res, 200, { ok: true });
+        return true;
+      }
+      if (op === "reset" && req.method === "POST") {
+        needMaster("Making a new code");
+        store.event(u, "Your recovery code was reset and every other browser was signed out.");
+        json(res, 200, { recovery: store.reset(u) });
+        return true;
+      }
+      if (op === "delete" && req.method === "POST") {
+        if (u.payments.some((x) => !x.settled && x.kind !== "sweep")) throw new MoopayError("INVALID_INPUT", "A payment is still on its way. Delete again once it lands.");
+        const a = await ops.account(u).catch(() => undefined);
+        if (!a) throw new MoopayError("UPSTREAM_TIMEOUT", "I can't check your balance right now. Try again in a moment.");
+        const left = Number(a.result["balanceUsd"]);
+        if (left >= DELETE_MAX_USD) throw new MoopayError("INVALID_INPUT", `You still have $${left.toFixed(2)} in your agent wallet. Withdraw it first (say "withdraw everything"), then delete.`);
+        turns.delete(u.id); store.remove(u);
+        json(res, 200, { ok: true });
         return true;
       }
       if (op === "events" && req.method === "GET") {
@@ -133,6 +200,8 @@ export function makeAgent(d: AgentDeps) {
         u.msgTimes = u.msgTimes.filter((t) => now() - t < 60_000);
         if (u.msgTimes.length >= MSGS_PER_MINUTE) { json(res, 429, { code: "UPSTREAM_TIMEOUT", message: "Slow down a little and try again in a moment." }); return true; }
         u.msgTimes.push(now());
+        if (!totalDay("all")) { void alertOwner("ai-total", `the server-wide daily AI limit (${cap.total} messages) was reached.`, now()); json(res, 429, { code: "UPSTREAM_TIMEOUT", message: "MooPay is very busy today and has reached its daily limit. Please try again tomorrow." }); return true; }
+        if (!userDay(u.id) || !ipDay(ip)) { json(res, 429, { code: "UPSTREAM_TIMEOUT", message: "You've reached today's message limit. It opens up again within a day." }); return true; }
         res.statusCode = 200; res.setHeader("content-type", "application/x-ndjson"); res.setHeader("cache-control", "no-store");
         const id = randomUUID(), ctl: Ctl = { cancelled: false, ran: false };
         turns.set(u.id, ctl);
@@ -150,7 +219,7 @@ export function makeAgent(d: AgentDeps) {
       json(res, 404, { code: "NOTE_NOT_FOUND", message: "not found" });
     } catch (e) {
       const err = asMoopayError(e);
-      if (!res.headersSent) json(res, err.code === "INTERNAL" ? 500 : 400, { code: err.code, message: err.message }); else res.end();
+      if (!res.headersSent) json(res, err.code === "INTERNAL" ? 500 : err.message === SESSION_ENDED ? 401 : 400, { code: err.code, message: err.message }); else res.end();
     }
     return true;
   }

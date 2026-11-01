@@ -1,0 +1,22 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, so a newly found problem in an unchanged dependency still shows up
+permissions: { contents: read }
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      # blocks on critical problems in what ships (dev-only tools are not part of the server)
+      - run: npm audit --omit=dev --audit-level=critical
+      # high ones are listed but do not block: today they all come from the Meteor wallet option in the browser pay pages
+      # (a denial-of-service in client-side helper libraries; the fix npm offers is an older version). None are in the server.
+      - run: npm audit --omit=dev || true

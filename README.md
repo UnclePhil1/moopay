@@ -175,3 +175,15 @@ Not tested on mainnet with real funds. The stake call attaches 200 Tgas as Rhea'
 # moopay
 Money that moves in private.
 >>>>>>> bb59739e2d526a3eb8db3a16af64424c2eb1f43f
+
+## Security settings (hosting)
+
+| Setting | What it does |
+| --- | --- |
+| `SEED_KEY` | Encrypts the server seed files on disk. Back it up separately: without it the wallets cannot be recovered. |
+| `MOOPAY_PUBLIC_HOST` | Links always use this domain, never a request header. |
+| `MOOPAY_TRUST_PROXY=1` | Behind Fly.io only: rate limits use the real client IP. |
+| `CHAT_RETENTION_DAYS`, `AI_USER_DAILY`, `AI_IP_DAILY`, `AI_TOTAL_DAILY` | Chat expiry and daily AI message caps. |
+| `ALERT_WEBHOOK_URL` | Slack/Discord webhook for owner alerts (gas sponsor low, daily AI limit reached). |
+
+In the chat, users have `/signout`, `/reset`, `/delete`, `/freeze`, `/unfreeze`, `/history` and `/lock`. Payout wallet changes wait 24 hours, and agent keys expire after 7 days unless set otherwise. `scripts/backup.mjs` makes and restores encrypted backups of the state files (`BACKUP_KEY`).

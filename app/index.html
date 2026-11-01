@@ -20,6 +20,7 @@
   header img { height:22px; }
   .spacer { flex:1; }
   .how { color:var(--muted); font-size:13.5px; text-decoration:none; } .how:hover { color:#fff; }
+  .pill[hidden] { display:none; }
   .pill { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid var(--line); border-radius:999px; font-size:12.5px; color:var(--muted); }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); } .dot.work { background:var(--warn); animation:pulse 1s infinite; }
   @keyframes pulse { 50% { opacity:.3; } }
@@ -102,6 +103,9 @@
     <img src="/app/assets/moopay-logo.png" alt="MooPay">
     <span class="spacer"></span>
     <a class="how" href="/guide" target="_blank" rel="noopener">How it works</a>
+    <span class="pill" id="nohist" hidden title="Your chat is not saved. Type /history to change that">Chat not saved</span>
+    <span class="pill" id="frozen" hidden title="Nothing can leave this account. Type /unfreeze to lift it">Frozen</span>
+    <span class="pill" id="temp" hidden title="Ends after an hour of not using it, or when you sign out">Temporary session</span>
     <span class="pill"><span class="dot" id="dot"></span><span id="state">Ready</span></span>
   </header>
   <div id="scroll"><div class="wrap" id="chat"></div></div>
@@ -133,7 +137,7 @@ function ask({ title, text, confirm = "Confirm", cancel = "Cancel", danger = fal
   return new Promise((resolve) => {
     const prev = document.activeElement;
     const err = h("div", { class: "err", role: "alert" });
-    const inp = field ? h("input", { type: "text", placeholder: field.placeholder || "", autocomplete: "off", spellcheck: "false" }) : null;
+    const inp = field ? h("input", { type: field.type || "text", placeholder: field.placeholder || "", autocomplete: "off", spellcheck: "false" }) : null;
     const ok = h("button", { class: "btn" + (danger ? " danger" : "") }, confirm), no = h("button", { class: "btn ghost" }, cancel);
     // reveal: show a value (like a key) inside the popup only, with a Copy button; there is just one button, Done
     const shown = reveal ? h("div", { class: "code", style: "margin-top:14px" }, h("code", {}, reveal), h("button", { onclick: (e) => copy(reveal, e.target) }, "Copy")) : null;
@@ -159,13 +163,53 @@ function ask({ title, text, confirm = "Confirm", cancel = "Cancel", danger = fal
 }
 function copy(t, btn) { try { navigator.clipboard.writeText(t); } catch {} const o = btn.textContent; btn.textContent = "Copied"; setTimeout(() => (btn.textContent = o), 1400); }
 
-/* this device's private key-less identity: a random token. Losing it means losing access, so the guide says to keep your payout wallet set. */
-function deviceToken() {
-  try { let t = localStorage.getItem("moopay.device"); if (!t) { t = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, ""); localStorage.setItem("moopay.device", t); } return t; }
-  catch { return (window.__t ||= btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/[+/=]/g, "x")); }
+/* This browser's identity: the recovery code (kept for good) or, on someone else's device, a temporary session token (kept until the tab closes). */
+const ID_KEY = "moopay.device", SAVED_KEY = "moopay.saved";
+const rand = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+const isTemp = () => { try { return !!sessionStorage.getItem(ID_KEY); } catch { return false; } };
+/* Optional passphrase lock: the recovery code is kept encrypted in this browser (PBKDF2 + AES-GCM) and only decrypted in memory after unlocking. */
+const VAULT_KEY = "moopay.vault", enc = new TextEncoder(), dec = new TextDecoder();
+let held = null, vaultKey = null, vaultSalt = null; // the decrypted code, and what is needed to re-encrypt it
+const b64 = (u) => btoa(String.fromCharCode(...u)), unb64 = (t) => Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+const vaultOn = () => { try { return !!localStorage.getItem(VAULT_KEY); } catch { return false; } };
+async function derive(pass, salt) {
+  const base = await crypto.subtle.importKey("raw", enc.encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 310000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
+async function seal(code) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)), ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, vaultKey, enc.encode(code)));
+  localStorage.setItem(VAULT_KEY, JSON.stringify({ s: b64(vaultSalt), i: b64(iv), c: b64(ct) })); held = code;
+}
+async function unlockWith(pass) { // throws when the passphrase is wrong
+  const v = JSON.parse(localStorage.getItem(VAULT_KEY)), salt = unb64(v.s), key = await derive(pass, salt);
+  held = dec.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(v.i) }, key, unb64(v.c))); vaultKey = key; vaultSalt = salt;
+}
+/** Keeps a (new) recovery code in this browser: in the lock if there is one, otherwise as before. */
+async function keepCode(code) { if (vaultKey) await seal(code); else localStorage.setItem(ID_KEY, code); }
+
+function deviceToken() {
+  try {
+    const t = sessionStorage.getItem(ID_KEY) || held || localStorage.getItem(ID_KEY);
+    if (t) return t;
+    if (vaultOn()) throw new Error("MooPay is locked. Reload the page and enter your passphrase.");
+    const n = rand(); localStorage.setItem(ID_KEY, n); return n;
+  } catch (e) { if (/locked/.test(e.message)) throw e; return (window.__t ||= rand().replace(/[-_]/g, "x")); }
+}
+async function unlockOnBoot() {
+  if (!vaultOn() || isTemp() || held) return true;
+  let note = "Enter the passphrase you chose for this browser.";
+  for (;;) {
+    const pass = await ask({ title: "Unlock MooPay", text: note, confirm: "Unlock", cancel: "Not now", input: { placeholder: "Passphrase", type: "password", check: (v) => (v ? "" : "Enter your passphrase.") } });
+    if (!pass) return false;
+    try { await unlockWith(pass); return true; } catch { note = "That passphrase didn't work. Try again."; }
+  }
+}
+/* a temporary session only clears itself, so the device owner's own account on this browser is never touched */
+const forgetDevice = () => { for (const s of isTemp() ? [sessionStorage] : [localStorage, sessionStorage]) try { s.removeItem(ID_KEY); s.removeItem(SAVED_KEY); s.removeItem(VAULT_KEY); } catch {} held = vaultKey = null; };
+const leave = () => { forgetDevice(); location.replace("/?home"); };
 async function api(path, opts = {}) {
   const res = await fetch("/agent/api/" + path, { ...opts, headers: { ...(opts.headers || {}), "x-moopay-device": deviceToken(), "content-type": "application/json" } });
+  if (res.status === 401) { leave(); throw new Error("Session ended"); }
   if (!res.ok && !res.body) throw new Error("Request failed");
   return res;
 }
@@ -214,10 +258,11 @@ function card(c) {
       h("div", { class: "sub", style: "margin-top:10px" }, c.note));
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("a", { class: "btn", href: c.url, target: "_blank", rel: "noopener noreferrer", style: "text-decoration:none;color:#000" }, c.button)));
     case "recovery": {
+      if (isTemp()) return h("div", { class: "card" }, h("div", { class: "sub" }, "This is a temporary session, so no recovery code is kept on this device. Use the one you saved on your own device."));
       const code = deviceToken(), el = h("div", { class: "card" }, h("div", { class: "sub" }, "Your recovery code. Save it somewhere safe, like a password manager."),
         h("div", { class: "code" }, h("code", {}, code), h("button", { onclick: (e) => copy(code, e.target) }, "Copy")),
         h("div", { class: "sub", style: "margin-top:10px" }, "If you clear this browser or change computer, type /restore and paste it to get your account back. Anyone with this code can use your account, so keep it private."));
-      if (c.ask) el.append(h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => { try { localStorage.setItem("moopay.saved", "1"); } catch {} el.querySelector(".btns").remove(); } }, "I saved it")));
+      if (c.ask) el.append(h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => { try { localStorage.setItem(SAVED_KEY, "1"); } catch {} el.querySelector(".btns").remove(); } }, "I saved it")));
       return el;
     }
     case "privacy": {
@@ -239,11 +284,11 @@ function card(c) {
       h("div", { class: "sub", style: "margin-top:10px" }, h("a", { href: c.unstakeAt, target: "_blank", rel: "noopener noreferrer" }, "Unstake or withdraw on Rhea"), " (delayed unstake takes about 30 hours)."));
     case "approval": return approvalCard(c);
     case "list": return c.items.length ? h("div", { class: "list" }, c.items.map((i) => h("div", { class: "li" }, h("b", {}, (i.kind === "claim" ? "Claim for " : i.kind === "sweep" ? "Sent to your wallet " : "Sent to ") + short(i.to) + " · " + usd(i.amountUsd)), h("span", {}, new Date(i.at).toLocaleString() + " · " + i.status.replaceAll("_", " ").toLowerCase())))) : h("div", { class: "sub" }, "Nothing yet.");
-    case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);
+    case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.pendingPayout ? row("Changing to", short(c.rules.pendingPayout.address) + " on " + new Date(c.rules.pendingPayout.at).toLocaleString()) : null, c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);
     case "agentkey": return h("div", { class: "card" }, h("div", { class: "sub" }, "Agent key for " + c.name + ". Copy it now; it is not shown again."),
       h("div", { class: "code" }, h("code", {}, c.key), h("button", { onclick: (e) => copy(c.key, e.target) }, "Copy")),
       c.dailyUsd ? row("Daily limit", usd(c.dailyUsd)) : null, c.totalUsd ? row("Total budget", usd(c.totalUsd)) : null, c.perPaymentUsd ? row("Per payment", usd(c.perPaymentUsd)) : null,
-      c.chains ? row("Only chains", c.chains.join(", ").toUpperCase()) : null, c.assets ? row("Only assets", c.assets.join(", ")) : null, c.recipients ? row("Only to", c.recipients.map(short).join(", ")) : null,
+      c.chains ? row("Only chains", c.chains.join(", ").toUpperCase()) : null, c.assets ? row("Only assets", c.assets.join(", ")) : null, c.recipients ? row("Only to", c.recipients.map(short).join(", ")) : null, c.ips ? row("Only from IP", c.ips.join(", ")) : null,
       c.expiresAt ? row("Expires", new Date(c.expiresAt).toLocaleString()) : null);
     case "agents": return c.items.length ? h("div", { class: "list" }, c.items.map((a) => h("div", { class: "li" }, h("b", {}, a.name + (a.revoked ? " (off)" : a.expired ? " (expired)" : "")),
       h("span", {}, [a.leftToday !== null ? usd(a.leftToday) + " left today" : "no daily limit", a.leftTotal !== null ? usd(a.leftTotal) + " left in total" : null].filter(Boolean).join(" · "))))) : h("div", { class: "sub" }, "No agent keys yet.");
@@ -252,7 +297,7 @@ function card(c) {
 }
 function approvalCard(c) {
   const ok = h("button", { class: "btn" }, "Approve"), no = h("button", { class: "btn ghost" }, "Decline");
-  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), h("div", { class: "btns" }, ok, no));
+  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), (c.details || []).map(([k, v]) => h("div", { class: "row" }, h("span", {}, k), h("b", { style: "word-break:break-all;text-align:right;max-width:70%" }, v))), h("div", { class: "btns" }, ok, no));
   const act = async (yes) => {
     ok.disabled = no.disabled = true; el.style.opacity = ".7"; work(true, yes ? "Working…" : "Cancelling");
     try {
@@ -338,6 +383,13 @@ const COMMANDS = [
   { name: "/stake", desc: "Earn with Rhea (rNEAR)", ex: "Stake $20 into rNEAR" },
   { name: "/rules", desc: "Your limits and payout wallet", run: "What are my rules?" },
   { name: "/help", desc: "What I can do", run: "What can you do?" },
+  { name: "/lock", desc: "Protect your recovery code with a passphrase", act: toggleLock },
+  { name: "/history", desc: "Choose whether your chat is saved", act: toggleHistory },
+  { name: "/freeze", desc: "Stop all spending right now", act: () => setFrozen(true) },
+  { name: "/unfreeze", desc: "Lift the freeze (needs your recovery code)", act: () => setFrozen(false) },
+  { name: "/signout", desc: "Remove this browser's access", act: signOut },
+  { name: "/reset", desc: "New recovery code, signs out all other browsers", act: resetCode },
+  { name: "/delete", desc: "Erase your data from MooPay", act: deleteData },
   { name: "/clear", desc: "Clear this chat", clear: true },
 ];
 let sel = 0, shown = []; const input = $("input"), pal = $("palette");
@@ -356,15 +408,70 @@ async function exportKey() {
   } catch (e) { clearEmpty(); await say(agent(), e.message || "I couldn't get the key."); }
 }
 function showRecovery(ask) { clearEmpty(); agent().append(card({ kind: "recovery", ask })); down(); }
+const post = async (path, body) => { const j = await (await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) })).json(); if (j.code) throw new Error(j.message); return j; };
+const fail = async (e, fallback) => { clearEmpty(); await say(agent(), e.message || fallback); };
 async function restore() {
   const code = await ask({ title: "Restore your account", text: "Paste your recovery code. This browser will switch to that account. If this browser's account holds money, save its own code first (/recovery).", confirm: "Restore",
     input: { placeholder: "Recovery code", check: (v) => (/^[A-Za-z0-9_-]{32,64}$/.test(v) ? "" : "That doesn't look like a recovery code. It's one long string of letters and numbers.") } });
   if (!code) return;
-  try { localStorage.setItem("moopay.device", code); localStorage.setItem("moopay.saved", "1"); location.reload(); } catch { void say(agent(), "This browser won't let me save it. Allow site storage and try again."); }
+  const own = await ask({ title: "Is this your own device?", text: "On a friend's or shared device choose Temporary. It never keeps your recovery code, can't show your wallet key, and ends after an hour of not using it.", confirm: "My device", cancel: "Temporary" });
+  try {
+    if (own) { localStorage.setItem(ID_KEY, code); localStorage.setItem(SAVED_KEY, "1"); localStorage.removeItem(VAULT_KEY); sessionStorage.removeItem(ID_KEY); }
+    else { const j = await (await fetch("/agent/api/session", { method: "POST", headers: { "x-moopay-device": code } })).json(); if (j.code) throw new Error(j.message); sessionStorage.setItem(ID_KEY, j.token); }
+    location.reload();
+  } catch (e) { await fail(e, "This browser won't let me save it. Allow site storage and try again."); }
+}
+async function toggleLock() {
+  if (isTemp()) return void (clearEmpty(), await say(agent(), "A temporary session has no recovery code to lock."));
+  if (vaultKey) {
+    if (!(await ask({ title: "Remove the passphrase?", text: "Your recovery code will be stored in this browser without a lock again.", confirm: "Remove", danger: true }))) return;
+    localStorage.setItem(ID_KEY, held); localStorage.removeItem(VAULT_KEY); held = vaultKey = null;
+    clearEmpty(); return void (await say(agent(), "The passphrase is removed."));
+  }
+  const pass = await ask({ title: "Choose a passphrase", confirm: "Next", input: { placeholder: "At least 8 characters", type: "password", check: (v) => (v.length >= 8 ? "" : "Use at least 8 characters.") },
+    text: "Your recovery code will be kept locked in this browser, and you'll enter this passphrase each time you open MooPay here. It keeps casual snoopers out; it is not a replacement for a strong device lock. If you forget it, your recovery code still gets you back in." });
+  if (!pass) return;
+  const again = await ask({ title: "Type it again", confirm: "Lock", input: { placeholder: "Passphrase", type: "password", check: (v) => (v === pass ? "" : "That doesn't match.") } });
+  if (!again) return;
+  try {
+    const code = deviceToken(); vaultSalt = crypto.getRandomValues(new Uint8Array(16)); vaultKey = await derive(pass, vaultSalt);
+    await seal(code); localStorage.removeItem(ID_KEY);
+    clearEmpty(); await say(agent(), "Locked. You'll be asked for your passphrase when you open MooPay in this browser.");
+  } catch (e) { vaultKey = null; await fail(e, "I couldn't lock it."); }
+}
+let saveChat = true;
+async function toggleHistory() {
+  const off = saveChat;
+  if (!(await ask({ title: off ? "Stop saving your chat?" : "Save your chat again?", danger: off, confirm: off ? "Stop saving" : "Save chat",
+    text: off ? "I'll forget this conversation now and won't keep new ones after you close or reload the page. Your payments and activity are still recorded." : "Your conversations will be kept for 30 days so they are here when you come back." }))) return;
+  try { const j = await post("history", { save: !off }); saveChat = j.saveChat; $("nohist").hidden = saveChat; if (off) start(); else { clearEmpty(); await say(agent(), "Saving your chat again."); } } catch (e) { await fail(e, "I couldn't change that."); }
+}
+async function setFrozen(on) {
+  if (!(await ask({ title: on ? "Freeze your account?" : "Unfreeze your account?", text: on ? "Nothing can leave your agent wallet and no rules can change until you unfreeze it with your recovery code. Money that arrives is still swept to your own wallet." : "Payments and rule changes work again.", confirm: on ? "Freeze" : "Unfreeze", danger: on }))) return;
+  try { await post("freeze", { on }); $("frozen").hidden = !on; clearEmpty(); await say(agent(), on ? "Frozen. Nothing can leave your account." : "Unfrozen. You're back in business."); } catch (e) { await fail(e, "I couldn't change that."); }
+}
+async function signOut() {
+  const temp = isTemp(), unsaved = !temp && !localStorage.getItem(SAVED_KEY);
+  if (!(await ask({ title: "Sign out of this browser?", danger: true, confirm: "Sign out",
+    text: temp ? "This ends your temporary session and clears it from this browser." : "This removes your account from this browser. You need your recovery code to come back." + (unsaved ? " You haven't saved it yet. Type /recovery first." : "") }))) return;
+  try { await post("signout"); } catch {}
+  leave();
+}
+async function resetCode() {
+  if (!(await ask({ title: "Make a new recovery code?", text: "The old code stops working and every other browser is signed out. Your wallet and money stay the same.", confirm: "Make new code", danger: true }))) return;
+  try {
+    const { recovery } = await post("reset");
+    await keepCode(recovery); localStorage.removeItem(SAVED_KEY);
+    await ask({ title: "Your new recovery code", text: "Copy it and keep it somewhere safe. The old one no longer works.", reveal: recovery, confirm: "Done" });
+  } catch (e) { await fail(e, "I couldn't reset it."); }
+}
+async function deleteData() {
+  if (!(await ask({ title: "Erase your data?", text: "This removes your chat, activity, schedules and agent keys from MooPay and signs out every browser. Move your money out first: I won't erase an account that still holds money.", confirm: "Erase", danger: true }))) return;
+  try { await post("delete"); leave(); } catch (e) { await fail(e, "I couldn't erase that."); }
 }
 /* once there is money in the account, ask them to keep the code */
-function nudge(balance) { try { if (Number(balance) > 0 && !localStorage.getItem("moopay.saved")) showRecovery(true); } catch {} }
-function pick(c) { pal.hidden = true; if (c.privacy) { input.value = ""; sync(); clearEmpty(); agent().append(card({ kind: "privacy" })); down(); return; } if (c.recovery) { input.value = ""; sync(); return showRecovery(false); } if (c.restore) { input.value = ""; sync(); return restore(); } if (c.exportKey) { input.value = ""; sync(); return void exportKey(); } if (c.clear) { input.value = ""; sync(); void api("chat/delete", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => undefined); return start(); } if (c.ex) { input.value = c.ex; input.focus(); sync(); } else { input.value = ""; sync(); void submit(c.run); } }
+function nudge(balance) { try { if (!isTemp() && Number(balance) > 0 && !localStorage.getItem(SAVED_KEY)) showRecovery(true); } catch {} }
+function pick(c) { pal.hidden = true; if (c.act) { input.value = ""; sync(); return void c.act(); } if (c.privacy) { input.value = ""; sync(); clearEmpty(); agent().append(card({ kind: "privacy" })); down(); return; } if (c.recovery) { input.value = ""; sync(); return showRecovery(false); } if (c.restore) { input.value = ""; sync(); return restore(); } if (c.exportKey) { input.value = ""; sync(); return void exportKey(); } if (c.clear) { input.value = ""; sync(); void api("chat/delete", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => undefined); return start(); } if (c.ex) { input.value = c.ex; input.focus(); sync(); } else { input.value = ""; sync(); void submit(c.run); } }
 const SEND = "M12 19V5m0 0-6 6m6-6 6 6", STOP = "M7 7h10v10H7z";
 function sync() { const s = $("send"); s.classList.toggle("stop", busy); s.setAttribute("aria-label", busy ? "Stop" : "Send"); s.querySelector("path").setAttribute("d", busy ? STOP : SEND); s.disabled = busy ? false : !input.value.trim(); }
 input.addEventListener("input", () => { sel = 0; paletteFor(input.value); sync(); });
@@ -386,11 +493,12 @@ function start() {
 }
 
 async function boot() {
-  start();
+  start(); $("temp").hidden = !isTemp();
+  if (!(await unlockOnBoot())) { await say(agent(), "MooPay is locked. Reload the page to enter your passphrase, or type /restore and paste your recovery code."); return; }
   try {
     const s = await (await api("state")).json();
     if (s.code) throw new Error(s.message);
-    lastEvent = s.lastEventId || 0; aiInfo = s.ai;
+    lastEvent = s.lastEventId || 0; aiInfo = s.ai; $("frozen").hidden = !s.frozen; saveChat = s.saveChat !== false; $("nohist").hidden = saveChat;
     if (!s.live) { $("dot").style.background = "var(--warn)"; $("state").textContent = "AI not connected"; }
     if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); b.append(h("div", { class: "txt" }, m.content)); } } }
     else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }

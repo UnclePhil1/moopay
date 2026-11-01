@@ -7,7 +7,7 @@
 <meta name="description" content="Tell an agent where the money should go. No sign-up, no wallet to connect. Private by default.">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="/app/assets/favicon.png" type="image/png">
-<script>try { if (localStorage.getItem("moopay.device") && !location.search) location.replace("/agent"); } catch {}</script>
+<script>try { if ((localStorage.getItem("moopay.device") || localStorage.getItem("moopay.vault")) && !location.search) location.replace("/agent"); } catch {}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Xmind:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">

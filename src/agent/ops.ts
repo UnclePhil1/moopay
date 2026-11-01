@@ -6,7 +6,8 @@ import { isNearAccountId, parseDecimal } from "../lib/pay.js";
 import { isClaimChain, validAddress } from "../lib/sign.js";
 import { RNEAR, RNEAR_APP, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, WRAP } from "./rhea.js";
 import type { MooPayService } from "../lib/service.js";
-import { agentDeny, decide, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
+import { alertOwner } from "../lib/alert.js";
+import { agentDeny, decide, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
 import type { AgentKey, Approval, AgentStore, Payment, Rules, Task, UserRec } from "./store.js";
 import { hashKey } from "./store.js";
 
@@ -35,10 +36,23 @@ const id = () => randomBytes(6).toString("base64url");
 
 export interface Sponsor { accountId: string; secretKey: string; dailyMax: number }
 const SPONSOR_AMOUNT = 50_000_000_000_000_000_000_000n; // 0.05 NEAR, enough for a few dozen transfers
+const AGENT_KEY_DEFAULT_HOURS = 24 * 7;
+const SPONSOR_LOW = 2_000_000_000_000_000_000_000_000n; // alert below 2 NEAR
 const LOW_GAS = 20_000_000_000_000_000_000_000n; // 0.02 NEAR
 const KEEP_NEAR = 5_000_000_000_000_000_000_000n;
 const STAKE_GAS_ROOM = 300_000_000_000_000_000_000_000n; // 0.3 NEAR must sit in the wallet while staking; the unused gas comes back
 const KEEP_GAS = 80_000_000_000_000_000_000_000n; // 0.08 NEAR is never swapped away: it pays the fees // 0.005 NEAR stays to pay for the last transfer
+
+/** The card shown for an approval. The full destination and amount are always listed, so nothing the user approves is hidden behind a short name. */
+export function approvalCard(a: Approval): Record<string, unknown> {
+  const p = a.params, str = (k: string) => (typeof p[k] === "string" || typeof p[k] === "number" ? String(p[k]) : undefined);
+  const rows: [string, string | undefined][] = [
+    ["To", str("recipient") ?? str("receiver") ?? str("to")], ["New payout wallet", str("payoutAddress")],
+    ["Amount", str("amountUsd") ? `$${str("amountUsd")}` : str("amount") ? `${str("amount")} ${str("assetSymbol") ?? ""}`.trim() : undefined],
+    ["Chain", (str("chain") ?? str("assetSymbol"))?.toUpperCase()],
+  ];
+  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: rows.filter((r): r is [string, string] => Boolean(r[1])) };
+}
 
 export class AgentOps {
   constructor(private readonly svc: MooPayService, private readonly store: AgentStore, private readonly now: () => number = Date.now, private readonly sponsor?: Sponsor) {}
@@ -109,7 +123,9 @@ export class AgentOps {
     else if (chain === "btc" || chain === "sol" || chain === "eth") assertRecipient(chain as DestChain, recipient);
     else throw new MoopayError("INVALID_INPUT", "chain must be btc, sol, eth or near");
   }
-  private recipientKey = (chain: string, r: string) => `${chain}:${chain === "eth" || chain === "near" ? r.toLowerCase() : r}`;
+  private recipientKey = recipientKey;
+  /** Refuses anything that moves money or loosens rules while the account is frozen. */
+  private active(u: UserRec): void { if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze (it needs your recovery code) to use it again."); }
 
   /* ---- account ---- */
   async account(u: UserRec): Promise<Out> {
@@ -127,6 +143,7 @@ export class AgentOps {
 
   /* ---- sending ---- */
   async send(u: UserRec, p: SendParams, approved = false, who: Who = {}): Promise<Out> {
+    this.active(u);
     const chain = p.chain.toLowerCase();
     this.validate(chain, p.recipient);
     const sym = (p.assetSymbol ?? (chain === "near" ? "USDC" : NATIVE[chain] ?? "")).toUpperCase();
@@ -229,6 +246,7 @@ export class AgentOps {
 
   /* ---- private claims ---- */
   async claim(u: UserRec, p: { amountUsd: string; receiver: string; chain?: string | undefined }, ctx: Ctx, approved = false, who: Who = {}): Promise<Out> {
+    this.active(u);
     const chain = (p.chain ?? "near").toLowerCase();
     if (!isClaimChain(chain)) throw new MoopayError("INVALID_INPUT", "private claims can go to a NEAR, Solana or EVM wallet (eth, base, arb, op, pol, bsc, avax, gnosis, monad, xlayer). Bitcoin and other chains can't prove wallet ownership yet; send normally instead.");
     if (chain === "near" ? !isNearAccountId(p.receiver) : !validAddress(chain, p.receiver)) throw new MoopayError("BAD_RECIPIENT", chain === "near" ? "the receiver must be a NEAR wallet address, like alice.near" : `that is not a valid ${chain.toUpperCase()} wallet address`);
@@ -260,6 +278,7 @@ export class AgentOps {
 
   /* ---- rules, schedules, approvals ---- */
   async rules(u: UserRec, patch: Partial<Rules>, approved = false): Promise<Out> {
+    this.active(u);
     const next: Rules = { ...u.rules };
     for (const k of ["floatUsd", "dailyCapUsd", "newRecipientLimitUsd", "approveAboveUsd"] as const) {
       if (patch[k] !== undefined) { if (!(Number(patch[k]) > 0)) throw new MoopayError("INVALID_INPUT", `${k} must be above zero`); next[k] = Number(patch[k]); }
@@ -269,16 +288,22 @@ export class AgentOps {
     }
     if (patch.payoutAddress !== undefined) {
       if (!isNearAccountId(patch.payoutAddress)) throw new MoopayError("BAD_RECIPIENT", "the payout wallet must be a NEAR address");
-      next.payoutAddress = patch.payoutAddress;
+      if (!u.rules.payoutAddress) next.payoutAddress = patch.payoutAddress; // first one takes effect now
+      else if (patch.payoutAddress === u.rules.payoutAddress) delete next.pendingPayout; // setting the current one again cancels a pending change
+      else if (!approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", "changing your payout wallet");
+      else next.pendingPayout = { address: patch.payoutAddress, at: this.now() + PAYOUT_HOLD_MS };
     }
     if (next.payoutAddress && !u.known.includes(this.recipientKey("near", next.payoutAddress))) u.known.push(this.recipientKey("near", next.payoutAddress)); // your own wallet is never a "new recipient"
     const why = rulesNeedApproval(u.rules, next);
     if (why && !approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", why);
-    u.rules = next; this.store.save();
+    u.rules = next;
+    if (next.pendingPayout && next.pendingPayout.address === patch.payoutAddress) this.store.event(u, `Payout wallet change to ${patch.payoutAddress} starts on ${new Date(next.pendingPayout.at).toUTCString()}. Until then I keep using your current one. If this wasn't you, set your current payout wallet again to cancel it.`);
+    this.store.save();
     return { result: { status: "updated", rules: next }, card: { kind: "rules", rules: next } };
   }
 
   async schedule(u: UserRec, p: SendParams & { every: "day" | "week" | "month" }): Promise<Out> {
+    this.active(u);
     const chain = p.chain.toLowerCase(); this.validate(chain, p.recipient);
     if (!(Number(p.amountUsd) > 0) || !(p.every in EVERY_MS)) throw new MoopayError("INVALID_INPUT", "give an amount and every: day, week or month");
     const t: Task = { id: id(), amountUsd: Number(p.amountUsd), chain, recipient: p.recipient, ...(p.assetSymbol ? { assetSymbol: p.assetSymbol } : {}), every: p.every, nextAt: this.now() + EVERY_MS[p.every], text: `${usd(Number(p.amountUsd))} to ${p.recipient} (${chain.toUpperCase()}) every ${p.every}` };
@@ -290,10 +315,11 @@ export class AgentOps {
   private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string): Out {
     const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending" };
     u.approvals.push(a); this.store.save();
-    return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: { kind: "approval", id: a.id, summary, reason } };
+    return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: approvalCard(a) };
   }
 
   async resolve(u: UserRec, approvalId: string, yes: boolean, ctx: Ctx): Promise<Out> {
+    this.active(u);
     const a = u.approvals.find((x) => x.id === approvalId);
     if (!a || a.status !== "pending") throw new MoopayError("NOTE_NOT_FOUND", "that approval is not pending");
     if (this.now() - a.createdAt > APPROVAL_TTL) { a.status = "expired"; this.store.save(); throw new MoopayError("NOTE_EXPIRED", "that approval expired; ask again"); }
@@ -308,14 +334,16 @@ export class AgentOps {
   }
 
   /* ---- agent keys: a leash for outside AI agents (and short sessions) ---- */
-  createAgent(u: UserRec, p: { name: string; dailyUsd?: number; perPaymentUsd?: number; totalUsd?: number; hours?: number; chains?: string[]; assets?: string[]; recipients?: string[] }): Out {
+  createAgent(u: UserRec, p: { name: string; dailyUsd?: number; perPaymentUsd?: number; totalUsd?: number; hours?: number; chains?: string[]; assets?: string[]; recipients?: string[]; ips?: string[] }): Out {
+    this.active(u);
     if (u.agents.filter((a) => !a.revoked).length >= 10) throw new MoopayError("INVALID_INPUT", "10 active agent keys is the limit; revoke one first");
     const key = "mpk_" + randomBytes(24).toString("base64url");
     const lower = (v?: string[]) => (v?.length ? v.map((x) => x.trim().toLowerCase()) : undefined);
     const ak: AgentKey = {
       id: id(), name: p.name.trim().slice(0, 40), hash: hashKey(key), prefix: key.slice(0, 9), createdAt: this.now(), spent: { day: today(this.now()), usd: 0 }, totalSpent: 0,
       ...(p.dailyUsd ? { dailyUsd: p.dailyUsd } : {}), ...(p.perPaymentUsd ? { perPaymentUsd: p.perPaymentUsd } : {}), ...(p.totalUsd ? { totalUsd: p.totalUsd } : {}),
-      ...(p.hours ? { expiresAt: this.now() + p.hours * 3_600_000 } : {}),
+      expiresAt: this.now() + (p.hours ?? AGENT_KEY_DEFAULT_HOURS) * 3_600_000, // a key always ends: 7 days unless the user picks another time
+      ...(p.ips?.length ? { ips: p.ips.map((x) => x.trim()) } : {}),
       ...(lower(p.chains) ? { chains: lower(p.chains)! } : {}), ...(p.assets?.length ? { assets: p.assets.map((x) => x.trim().toUpperCase()) } : {}), ...(p.recipients?.length ? { recipients: p.recipients.map((x) => x.trim()) } : {}),
     };
     u.agents.push(ak); this.store.save();
@@ -323,7 +351,7 @@ export class AgentOps {
   }
   private agentView(ak: AgentKey) {
     const r = remaining(ak, this.now());
-    return { id: ak.id, name: ak.name, prefix: ak.prefix, dailyUsd: ak.dailyUsd ?? null, perPaymentUsd: ak.perPaymentUsd ?? null, totalUsd: ak.totalUsd ?? null, leftToday: r.today, leftTotal: r.total, chains: ak.chains ?? null, assets: ak.assets ?? null, recipients: ak.recipients ?? null, expiresAt: ak.expiresAt ? new Date(ak.expiresAt).toISOString() : null, revoked: !!ak.revoked, expired: !!ak.expiresAt && this.now() > ak.expiresAt };
+    return { id: ak.id, name: ak.name, prefix: ak.prefix, dailyUsd: ak.dailyUsd ?? null, perPaymentUsd: ak.perPaymentUsd ?? null, totalUsd: ak.totalUsd ?? null, leftToday: r.today, leftTotal: r.total, ips: ak.ips ?? null, chains: ak.chains ?? null, assets: ak.assets ?? null, recipients: ak.recipients ?? null, expiresAt: ak.expiresAt ? new Date(ak.expiresAt).toISOString() : null, revoked: !!ak.revoked, expired: !!ak.expiresAt && this.now() > ak.expiresAt };
   }
   listAgents(u: UserRec): Out { const items = u.agents.map((a) => this.agentView(a)); return { result: { items }, card: { kind: "agents", items } }; }
   revokeAgent(u: UserRec, agentId: string): Out {
@@ -360,6 +388,7 @@ export class AgentOps {
   }
 
   async stakeRnear(u: UserRec, p: { amount?: string | undefined; amountUsd?: string | undefined }, approved = false, who: Who = {}): Promise<Out> {
+    this.active(u);
     const payout = u.rules.payoutAddress;
     if (!payout) throw new MoopayError("INVALID_INPUT", "Set your payout wallet first (tell me your own NEAR wallet). Your rNEAR is sent there, so you hold it yourself.");
     const b = await this.balances(u);
@@ -451,6 +480,7 @@ export class AgentOps {
 
   /* ---- withdraw: the user's money is always theirs to take back ---- */
   async withdraw(u: UserRec, p: { amountUsd?: string | undefined; asset?: "USDC" | "NEAR" | undefined; to?: string | undefined }, approved = false): Promise<Out> {
+    this.active(u);
     const to = p.to ?? u.rules.payoutAddress;
     if (!to) throw new MoopayError("INVALID_INPUT", "Tell me your own NEAR wallet first, then I can send your money there.");
     if (!isNearAccountId(to)) throw new MoopayError("BAD_RECIPIENT", "withdrawals go to a NEAR wallet; to reach another chain, use a payment instead");
@@ -541,8 +571,12 @@ export class AgentOps {
     const day = today(this.now());
     if (this.store.all().filter((x) => x.sponsoredAt && today(x.sponsoredAt) === day).length >= s.dailyMax) return false;
     u.sponsoredAt = this.now();
-    try { await this.near.sendNear({ accountId: s.accountId, secretKey: s.secretKey, to: u.accountId, amount: SPONSOR_AMOUNT }); } catch { u.sponsoredAt = undefined; return false; }
+    try { await this.near.sendNear({ accountId: s.accountId, secretKey: s.secretKey, to: u.accountId, amount: SPONSOR_AMOUNT }); }
+    catch { u.sponsoredAt = undefined; void alertOwner("sponsor-failed", "the gas sponsor could not send a top-up. Its balance may be empty.", this.now()); return false; }
     this.store.save();
+    const used = this.store.all().filter((x) => x.sponsoredAt && today(x.sponsoredAt) === day).length;
+    if (used >= s.dailyMax * 0.8) void alertOwner("sponsor-daily", `the gas sponsor used ${used} of its ${s.dailyMax} daily top-ups. Is someone farming new accounts?`, this.now());
+    void this.near.nearBalance(s.accountId).then((b) => { if (b < SPONSOR_LOW) void alertOwner("sponsor-low", `the gas sponsor wallet is running low (${(Number(b) / 1e24).toFixed(2)} NEAR left).`, this.now()); }).catch(() => undefined);
     return true;
   }
 

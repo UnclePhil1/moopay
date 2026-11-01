@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { test } from "node:test";
+import { alertOwner, resetAlerts } from "../src/lib/alert.js";
+import { makeAgent } from "../src/agent/routes.js";
 import { runTurn, type Llm } from "../src/agent/loop.js";
 import { AgentOps, type Sponsor } from "../src/agent/ops.js";
 import { decide, rulesNeedApproval } from "../src/agent/policy.js";
@@ -464,4 +467,220 @@ test("plain: markdown is stripped and bullets become a numbered list", () => {
   assert.equal(plain(raw), "I can do these things:\n\n1. Send money to wallets, in dollars.\n2. Create private claims that expire.\n3. Withdraw any time\n\nUse bold and italic and a * b. # not a heading\nNext steps\n1. keep this\n2. and this");
   assert.equal(plain("Sent $5 to bob.near."), "Sent $5 to bob.near.");
   assert.equal(plain("Costs 2*3 and 5 * 4 = 20"), "Costs 2*3 and 5 * 4 = 20");
+});
+
+/** The agent's real routes on a local port, backed by the fake chain of `agent()`. */
+async function serve(a: ReturnType<typeof agent>, extra: Partial<Parameters<typeof makeAgent>[0]> = {}) {
+  const m = makeAgent({ ...extra, svc: a.svc, stateFile: join(mkdtempSync(join(tmpdir(), "moopay-routes-")), "r"), now: a.now });
+  const server = createServer((req, res) => void m.handle(req, res, new URL(req.url ?? "/", "http://x"), "http://x").then((ok) => { if (!ok) { res.statusCode = 404; res.end(); } }));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const root = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const call = async (op: string, token: string, body?: object) => {
+    const r = await fetch(`${root}/agent/api/${op}`, { method: op === "state" ? "GET" : "POST", headers: { "x-moopay-device": token, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: r.status, body: (await r.json()) as Record<string, string> };
+  };
+  return { m, call, root, close: () => server.close() };
+}
+
+test("sessions: temporary tokens can pay but not export or reset; reset kills old code and sessions; delete needs an empty wallet", async () => {
+  const a = agent();
+  const { m, call, close } = await serve(a);
+  try {
+    const master = "m".repeat(43);
+    const st = await call("state", master);
+    assert.equal(st.status, 200);
+    assert.equal((await call("export", master)).status, 200, "the recovery code can export");
+
+    const { body: { token } } = await call("session", master);
+    assert.match(token!, /^mps\./);
+    assert.equal((await call("state", token!)).status, 200, "a session opens the same account");
+    for (const op of ["export", "reset", "session"]) { const r = await call(op, token!); assert.equal(r.status, 400, op); assert.match(r.body["message"]!, /recovery code/); }
+
+    assert.equal((await call("signout", token!)).status, 200);
+    assert.equal((await call("state", token!)).status, 401, "a signed-out session is over");
+
+    const second = (await call("session", master)).body["token"]!;
+    const expired = (await call("session", master)).body["token"]!;
+    a.advance(2 * 60 * 60 * 1000);
+    assert.equal((await call("state", expired)).status, 401, "idle sessions end after an hour");
+    const third = (await call("session", master)).body["token"]!;
+
+    const before = (await call("state", master)).body["account"] as unknown as { address: string };
+    const reset = await call("reset", master);
+    const fresh = reset.body["recovery"]!;
+    assert.ok(fresh && fresh !== master);
+    const old = await call("state", master);
+    assert.equal(old.status, 400); assert.match(old.body["message"]!, /reset/);
+    assert.equal((await call("state", third)).status, 401, "reset ends every session");
+    assert.equal((await call("state", second)).status, 401);
+    const after = (await call("state", fresh)).body["account"] as unknown as { address: string };
+    assert.equal(after.address, before.address, "same wallet, new code");
+
+    const u = m.store.auth(fresh).u;
+    a.near.tokenBalances.set(u.accountId, 20_000_000n);
+    const rich = await call("delete", fresh);
+    assert.equal(rich.status, 400); assert.match(rich.body["message"]!, /Withdraw/);
+    a.near.tokenBalances.set(u.accountId, 0n);
+    u.payments.push({ id: "p1", kind: "send", amountUsd: 1, chain: "near", recipient: BOB, status: "PENDING", createdAt: 1 });
+    assert.equal((await call("delete", fresh)).status, 400, "a payment in flight blocks it");
+    u.payments[0]!.settled = true;
+    assert.equal((await call("delete", fresh)).status, 200);
+    assert.equal(m.store.all().length, 0, "the record is gone");
+  } finally { close(); }
+});
+
+test("payout wallet change: needs a yes, then waits 24 hours, can be cancelled", async () => {
+  const a = agent();
+  const ctx = { origin: "https://x" };
+  await a.ops.rules(a.u, { payoutAddress: "me.near" });
+  assert.equal(a.u.rules.payoutAddress, "me.near", "the first one is immediate");
+  const ask = await a.ops.rules(a.u, { payoutAddress: "new.near" });
+  assert.equal(ask.result["status"], "needs_approval");
+  await a.ops.resolve(a.u, ask.result["approvalId"] as string, true, ctx);
+  assert.equal(a.u.rules.payoutAddress, "me.near", "the old wallet stays in charge");
+  assert.equal(a.u.rules.pendingPayout?.address, "new.near");
+  a.store.settlePayout(a.u, a.now() + 23 * 3_600_000);
+  assert.equal(a.u.rules.payoutAddress, "me.near", "not yet after 23 hours");
+  a.store.settlePayout(a.u, a.now() + 25 * 3_600_000);
+  assert.equal(a.u.rules.payoutAddress, "new.near");
+  assert.equal(a.u.rules.pendingPayout, undefined);
+  assert.ok(a.u.known.includes("near:new.near"));
+  assert.match(a.u.events.at(-1)!.text, /now active/);
+
+  const again = await a.ops.rules(a.u, { payoutAddress: "third.near" });
+  await a.ops.resolve(a.u, again.result["approvalId"] as string, true, ctx);
+  assert.ok(a.u.rules.pendingPayout);
+  await a.ops.rules(a.u, { payoutAddress: "new.near" });
+  assert.equal(a.u.rules.pendingPayout, undefined, "setting the current wallet again cancels it");
+});
+
+test("freeze: nothing leaves and no rules change until it is lifted", async () => {
+  const a = agent();
+  a.fund(50);
+  a.u.frozen = true;
+  const blocked = (e: unknown) => /frozen/.test((e as Error).message);
+  await assert.rejects(a.ops.send(a.u, { amountUsd: "1", chain: "near", recipient: BOB }), blocked);
+  await assert.rejects(a.ops.claim(a.u, { amountUsd: "1", receiver: BOB }, { origin: "https://x" }), blocked);
+  await assert.rejects(a.ops.withdraw(a.u, {}), blocked);
+  await assert.rejects(a.ops.rules(a.u, { dailyCapUsd: 500 }), blocked);
+  await assert.rejects(a.ops.schedule(a.u, { amountUsd: "1", chain: "near", recipient: BOB, every: "week" }), blocked);
+  assert.equal(a.near.transfers.length, 0);
+  a.u.frozen = false;
+  assert.equal((await a.ops.send(a.u, { amountUsd: "1", chain: "near", recipient: BOB })).result["status"], "sent");
+});
+
+test("routes: freeze needs the recovery code to lift, pages carry a nonce policy, and abuse is rate limited", async () => {
+  const a = agent();
+  const { call, root, close } = await serve(a);
+  try {
+    const master = "f".repeat(43);
+    const session = (await call("session", master)).body["token"]!;
+    assert.equal((await call("freeze", session, { on: true })).status, 200, "anyone in the account can hit the panic button");
+    assert.equal((await call("state", master)).body["frozen"] as unknown, true);
+    assert.equal((await call("export", master)).status, 400, "no key export while frozen");
+    const lift = await call("freeze", session, { on: false });
+    assert.equal(lift.status, 400); assert.match(lift.body["message"]!, /recovery code/);
+    assert.equal((await call("freeze", master, { on: false })).status, 200);
+    assert.equal((await call("state", master)).body["frozen"] as unknown, false);
+
+    const page = await fetch(`${root}/agent`);
+    const html = await page.text(), csp = page.headers.get("content-security-policy")!;
+    const nonce = /script-src 'nonce-([\w-]+)'/.exec(csp)?.[1];
+    assert.ok(nonce && html.includes(`<script nonce="${nonce}"`), "inline scripts carry this page's nonce");
+    assert.equal(page.headers.get("x-frame-options"), "DENY");
+    assert.match(csp, /frame-ancestors 'none'/);
+
+    let last = 200;
+    for (let i = 0; i < 14; i++) last = (await call("signout", master)).status;
+    assert.equal(last, 429, "sensitive endpoints allow only a few tries a minute");
+  } finally { close(); }
+});
+
+test("chat history: old messages expire, and 'don't save' keeps chat out of the file and out of reloads", async () => {
+  const a = agent();
+  const day = 86_400_000, t = a.now();
+  a.u.chat.push({ id: "old", at: t - 31 * day, role: "user", content: "old" }, { id: "new", at: t - day, role: "user", content: "new" });
+  assert.deepEqual(a.store.auth(TOKEN, t).u.chat.map((m) => m.id), ["new"], "past 30 days is gone");
+  const file = join(mkdtempSync(join(tmpdir(), "moopay-hist-")), "h.json");
+  const store = new AgentStore(file);
+  const u = store.open(TOKEN);
+  u.chat.push({ id: "x", at: t, role: "user", content: "secret words" });
+  store.save();
+  assert.ok(readFileSync(file, "utf8").includes("secret words"));
+  u.noHistory = true; store.save();
+  assert.ok(!readFileSync(file, "utf8").includes("secret words"), "never written once history is off");
+  assert.equal(u.chat.length, 1, "still there in memory, so the agent keeps its context");
+
+  const { call, close } = await serve(agent());
+  try {
+    const m = "h".repeat(43);
+    assert.equal((await call("history", m, { save: false })).body["saveChat"] as unknown, false);
+    assert.equal((await call("state", m)).body["saveChat"] as unknown, false);
+    assert.equal((await call("history", m, { save: true })).body["saveChat"] as unknown, true);
+  } finally { close(); }
+});
+
+test("AI caps: per user, per IP and across the server", async () => {
+  const chatIn = async (cap: { user: number; ip: number; total: number }, tokens: string[]) => {
+    const { root, close } = await serve(agent(), { aiDaily: cap });
+    try {
+      const out: number[] = [];
+      for (const t of tokens) out.push((await fetch(`${root}/agent/api/chat`, { method: "POST", headers: { "x-moopay-device": t, "content-type": "application/json" }, body: JSON.stringify({ message: "hi" }) })).status);
+      return out;
+    } finally { close(); }
+  };
+  const a = "a".repeat(43), b = "b".repeat(43);
+  assert.deepEqual(await chatIn({ user: 2, ip: 100, total: 100 }, [a, a, a, b]), [200, 200, 429, 200], "a user's third message is refused, others are fine");
+  assert.deepEqual(await chatIn({ user: 100, ip: 2, total: 100 }, [a, b, a]), [200, 200, 429], "one IP cannot farm accounts");
+  assert.deepEqual(await chatIn({ user: 100, ip: 100, total: 2 }, [a, b, "c".repeat(43)]), [200, 200, 429], "the whole server has a ceiling");
+});
+
+test("approval cards list the full destination and amount", async () => {
+  const a = agent();
+  a.fund(100);
+  const r = await a.ops.send(a.u, { amountUsd: "30", chain: "near", recipient: BOB });
+  assert.equal(r.result["status"], "needs_approval");
+  const details = (r.card as { details: [string, string][] }).details;
+  assert.deepEqual(details, [["To", BOB], ["Amount", "$30"], ["Chain", "NEAR"]]);
+  const rules = await a.ops.rules(a.u, { payoutAddress: "me.near" });
+  assert.equal(rules.result["status"], "updated");
+  const change = await a.ops.rules(a.u, { payoutAddress: "someone-else-with-a-long-name.near" });
+  assert.deepEqual((change.card as { details: [string, string][] }).details, [["New payout wallet", "someone-else-with-a-long-name.near"]]);
+});
+
+test("owner alerts: logged, posted to the webhook, and not repeated within the hour", async () => {
+  resetAlerts();
+  const sent: { url: string; body: string }[] = [];
+  const fake = (async (url: string, init: { body: string }) => { sent.push({ url, body: init.body }); return new Response("ok"); }) as unknown as typeof fetch;
+  const was = process.env["ALERT_WEBHOOK_URL"], log = console.error; console.error = () => undefined;
+  process.env["ALERT_WEBHOOK_URL"] = "https://hooks.example/x";
+  try {
+    await alertOwner("k", "sponsor low", 1000, fake);
+    await alertOwner("k", "sponsor low", 2000, fake);
+    await alertOwner("other", "something else", 2000, fake);
+    await alertOwner("k", "sponsor low", 1000 + 3_700_000, fake);
+  } finally { console.error = log; if (was === undefined) delete process.env["ALERT_WEBHOOK_URL"]; else process.env["ALERT_WEBHOOK_URL"] = was; resetAlerts(); }
+  assert.equal(sent.length, 3, "the repeat inside the hour was skipped");
+  assert.equal(sent[0]!.url, "https://hooks.example/x");
+  assert.match(sent[0]!.body, /MooPay: sponsor low/);
+});
+
+test("agent keys: expire after 7 days by default, and can be pinned to IP addresses", async () => {
+  const a = agent();
+  a.ops.createAgent(a.u, { name: "plain" });
+  assert.equal(a.u.agents[0]!.expiresAt, a.now() + 7 * 86_400_000);
+  a.ops.createAgent(a.u, { name: "short", hours: 2 });
+  assert.equal(a.u.agents[1]!.expiresAt, a.now() + 2 * 3_600_000);
+
+  const { m, root, close } = await serve(a);
+  try {
+    const owner = m.store.open("k".repeat(43));
+    const keyOf = (p: { name: string; ips?: string[] }) => (m.ops.createAgent(owner, p).card as { key: string }).key;
+    const me = (key: string) => fetch(`${root}/agent/api/delegate/me`, { headers: { authorization: `Bearer ${key}` } });
+    assert.equal((await me(keyOf({ name: "open" }))).status, 200, "no IP list means any address");
+    assert.equal((await me(keyOf({ name: "local", ips: ["127.0.0.1", "::ffff:127.0.0.1"] }))).status, 200);
+    const wrong = await me(keyOf({ name: "elsewhere", ips: ["203.0.113.9"] }));
+    assert.equal(wrong.status, 400);
+    assert.match(((await wrong.json()) as { message: string }).message, /can't be used from this address/);
+  } finally { close(); }
 });

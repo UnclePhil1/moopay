@@ -5,6 +5,7 @@ import { MoopayError } from "./errors.js";
 import type { NearOps } from "./origin.js";
 import { isNearAccountId, parseDecimal } from "./pay.js";
 import { isClaimChain, validAddress, verifyWalletSignature } from "./sign.js";
+import { loadSeed } from "./seedfile.js";
 
 /*
  * Private claim links. The sender funds a per-claim NEAR account from their own wallet; the receiver
@@ -79,12 +80,7 @@ export class ClaimDesk {
   constructor(private readonly d: ClaimDeps) {
     this.now = d.now ?? Date.now;
     if (existsSync(d.file)) this.claims = (JSON.parse(readFileSync(d.file, "utf8")) as { claims: Claim[] }).claims ?? [];
-    const seedFile = `${d.file}.seed`;
-    if (existsSync(seedFile)) this.seed = Buffer.from(readFileSync(seedFile, "utf8").trim(), "hex");
-    else {
-      this.seed = randomBytes(32);
-      writeFileSync(seedFile, this.seed.toString("hex"), { mode: 0o600 });
-    }
+    this.seed = loadSeed(`${d.file}.seed`);
   }
 
   private save(): void {

@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { clientIp, rateLimiter, securityHeaders } from "./lib/guard.js";
 import { buildServer, createService, loadDotEnv } from "./app.js";
 import { loadConfig } from "./lib/config.js";
 import { asMoopayError, MoopayError } from "./lib/errors.js";
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
   const port = Number(process.env["MOOPAY_HTTP_PORT"] ?? 3333);
   const token = process.env["MOOPAY_HTTP_TOKEN"]?.trim() || randomBytes(24).toString("hex");
   if (token.length < 24) throw new MoopayError("INVALID_INPUT", "MOOPAY_HTTP_TOKEN must be at least 24 characters");
+  if (!process.env["SEED_KEY"]?.trim()) console.error("[moopay] warning: SEED_KEY is not set, so the seed files are stored unencrypted");
   const service = createService(cfg);
   const agent = makeAgent({
     svc: service, stateFile: cfg.stateFile,
@@ -111,14 +113,15 @@ async function main(): Promise<void> {
     }
   }
 
+  const perIp = rateLimiter(600, 60_000);
   const http = createServer(async (req, res) => {
     const send = (code: number, body: unknown): void => {
       res.statusCode = code;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(body));
     };
-    res.setHeader("referrer-policy", "no-referrer"); // the secret token is in the URL path
-    res.setHeader("x-content-type-options", "nosniff");
+    securityHeaders(req, res);
+    if (!perIp(clientIp(req))) return send(429, { code: "UPSTREAM_TIMEOUT", message: "Too many requests. Please slow down." });
     try {
       const url = new URL(req.url ?? "/", "http://x");
       if (await agent.handle(req, res, url, publicOrigin(req))) return;
@@ -236,8 +239,11 @@ async function main(): Promise<void> {
   const bind = process.env["MOOPAY_HOST"]?.trim() || "127.0.0.1";
   http.listen(port, bind, () => {
     console.error(`[moopay] HTTP MCP ready on ${bind}:${port} (non-custodial, ${cfg.nearNetwork})`);
-    console.error(`[moopay] connector path: /mcp/${token}`);
-    console.error("[moopay] Put an HTTPS tunnel in front, then use https://<tunnel-host>/mcp/<token> as the connector URL.");
+    // the connector path is a secret: only print it on a local run, never into hosted logs
+    if (bind === "127.0.0.1") {
+      console.error(`[moopay] connector path: /mcp/${token}`);
+      console.error("[moopay] Put an HTTPS tunnel in front, then use https://<tunnel-host>/mcp/<token> as the connector URL.");
+    } else console.error("[moopay] connector path hidden (set MOOPAY_HTTP_TOKEN to choose it)");
   });
 }
 

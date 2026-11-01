@@ -17,6 +17,10 @@ export function decide(u: UserRec, amountUsd: number, recipientKey: string, now:
   return { action: "auto" };
 }
 
+/** A new payout wallet only takes over this long after it was approved, so a thief with brief access cannot redirect the sweep at once. */
+export const PAYOUT_HOLD_MS = 24 * 60 * 60 * 1000;
+export const recipientKey = (chain: string, r: string): string => `${chain}:${chain === "eth" || chain === "near" ? r.toLowerCase() : r}`;
+
 /** Loosening a limit or changing the payout wallet needs a human; tightening or first-time setup does not. */
 export function rulesNeedApproval(old: Rules, next: Rules): string | undefined {
   if (old.payoutAddress && next.payoutAddress !== old.payoutAddress) return "changing your payout wallet";

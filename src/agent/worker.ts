@@ -8,6 +8,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : "something went wr
 
 export async function tick(ops: AgentOps, store: AgentStore, origin: string, now: number): Promise<void> {
   for (const u of store.all()) {
+    store.settlePayout(u, now);
     try { await one(ops, store, u, origin, now); } catch { /* try again next round */ }
   }
 }
