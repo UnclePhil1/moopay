@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # MooPay
 
 A private cross-chain payment agent delivered as an **MCP server** (TypeScript, stdio). Any MCP-capable agent can
@@ -170,3 +171,7 @@ Limits are checked in code before any money moves. Base and other EVM chains are
 Say "stake $20 into rNEAR" (or "stake 5 NEAR"). MooPay converts what the wallet holds (NEAR, wNEAR, USDC, USDT; money added from any chain works too) into plain NEAR, calls `deposit_and_stake` on `lst.rhealab.near` (the call Rhea's rnear-sdk builds), and sends the rNEAR to the user's own payout wallet, which has to be set first. The worker forwards any rNEAR left in the agent wallet. Spending limits and approvals apply (the amount is counted in dollars). Ask "my rNEAR" to see the position and yield. Unstaking is done by the user from their own wallet on Rhea's page, since MooPay never keeps their rNEAR.
 
 Not tested on mainnet with real funds. The stake call attaches 200 Tgas as Rhea's SDK does; at current gas prices that needs about 0.3 NEAR free in the wallet while it runs (the unused part is refunded), so very small wallets can't stake.
+=======
+# moopay
+Money that moves in private.
+>>>>>>> bb59739e2d526a3eb8db3a16af64424c2eb1f43f
