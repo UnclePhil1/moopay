@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>How MooPay works</title>
+<link rel="icon" href="/app/assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0a0a0a; --card:#161616; --line:rgba(255,255,255,.10); --text:#fff; --muted:#a3a3a3; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 "Inter",system-ui,sans-serif; }
+  .wrap { width:min(680px,100%); margin:0 auto; padding:28px 20px 80px; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:34px; }
+  .top img { height:24px; }
+  a.btn { background:#fff; color:#000; text-decoration:none; font-weight:700; padding:11px 22px; border-radius:999px; display:inline-block; }
+  h1 { font-size:38px; line-height:1.1; margin:0 0 10px; font-weight:800; letter-spacing:-.02em; }
+  h2 { font-size:22px; margin:44px 0 14px; font-weight:800; letter-spacing:-.01em; }
+  p { margin:0 0 12px; color:var(--muted); } p.lead { font-size:18px; color:#d4d4d4; }
+  ol.steps { list-style:none; counter-reset:s; padding:0; margin:0; }
+  ol.steps li { counter-increment:s; position:relative; padding:0 0 22px 52px; }
+  ol.steps li::before { content:counter(s); position:absolute; left:0; top:0; width:34px; height:34px; border-radius:50%; background:#fff; color:#000; font-weight:800; display:grid; place-items:center; }
+  ol.steps li > b:first-child { display:block; font-size:17px; color:#fff; margin-bottom:2px; }
+  ol.steps li b { color:#fff; }
+  .say { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 16px; margin:8px 0; color:#fff; font-weight:500; }
+  .say span { display:block; color:var(--muted); font-size:13px; font-weight:400; margin-bottom:2px; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:18px 20px; }
+  .box p:last-child { margin:0; } .box b { color:#fff; }
+  ul { padding-left:20px; color:var(--muted); margin:0; } li { margin:6px 0; } li b { color:#fff; }
+  .foot { margin-top:48px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><img src="/app/assets/moopay-logo.png" alt="MooPay"><a class="btn" href="/agent">Open MooPay</a></div>
+
+  <h1>Send money by chatting.</h1>
+  <p class="lead">MooPay is an agent that moves money between wallets on Bitcoin, Solana, Ethereum and NEAR. You say what you want. It finds the route, sends it, and tells you when it lands.</p>
+
+  <h2>Set up in 3 steps</h2>
+  <ol class="steps">
+    <li><b>Open MooPay</b>That's your account. There's no sign-up, no email and no wallet to connect.</li>
+    <li><b>Add some money</b>Say "Add $20 from my Solana wallet" (or Ethereum, Bitcoin and more). MooPay gives you an address and the exact amount to send from your own wallet. It arrives as USDC. You can also send USDC on the NEAR network straight to your agent wallet. $20 to $25 is plenty.</li>
+    <li><b>Tell it your own wallet</b>Say: "My wallet is you.near." Anything above your working float gets sent back to that wallet automatically.</li>
+  </ol>
+  <p>No NEAR? No problem. Adding from another chain needs none. If you send USDC on NEAR yourself, pick <b>NEAR</b> as the network (not Ethereum).</p>
+
+  <h2>Where your money is</h2>
+  <div class="box">
+    <p><b>In a real NEAR wallet, made for you.</b> Its address is shown in the chat, and you can look it up on the blockchain at any time. MooPay keeps only a small working float there. Anything above it goes to your own wallet.</p>
+  </div>
+  <ul style="margin-top:14px">
+    <li><b>Take it out any time:</b> type <b>/withdraw</b>. It goes to your payout wallet.</li>
+    <li><b>Own the wallet:</b> type <b>/export</b> to see its key and import it into any NEAR wallet.</li>
+    <li><b>Honest note:</b> MooPay's server can use the wallet to make the payments you ask for. That's why we keep the amount small.</li>
+  </ul>
+
+  <h2>Don't want to deposit?</h2>
+  <p>You don't have to. Ask for a payment and say you'll pay from your own wallet. MooPay gives you either a link to sign in your NEAR wallet, or an address and exact amount to send from Solana, Ethereum or Bitcoin. The money goes straight to the receiver and nothing is stored with MooPay.</p>
+  <div class="say"><span>Pay without depositing</span>Pay $20 to 0xAbc… on Ethereum from my own wallet</div>
+
+  <h2>How to use it</h2>
+  <p>Just type. Or press <b>/</b> to see shortcuts.</p>
+  <div class="say"><span>Send money to anyone, on any chain</span>Send $20 to 0xAbc… on Ethereum</div>
+  <div class="say"><span>Send something only one wallet can open</span>Create a private claim of $50 for maria.near</div>
+  <div class="say"><span>Check on things</span>Did it arrive? / Show my recent activity</div>
+  <div class="say"><span>Set it and forget it</span>Pay $30 to rent.near every month</div>
+  <p style="margin-top:12px">MooPay does the work and updates you in the chat. You only step in when it asks.</p>
+
+  <h2>Getting a private claim</h2>
+  <ol class="steps">
+    <li><b>Open the link you were sent</b>It shows the amount and the one wallet that can claim it.</li>
+    <li><b>Connect that wallet and sign</b>Only the wallet named in the claim works. Signing is free.</li>
+    <li><b>Done</b>The money lands in your wallet. If a claim isn't opened in 24 hours, it goes back to the sender.</li>
+  </ol>
+
+  <h2>Using other AI agents?</h2>
+  <div class="box">
+    <p>Say: <b>"Give my research bot $20 a day, Solana USDC only"</b> or <b>"Let this agent pay up to $50 to bob.near for 2 hours."</b> MooPay makes a key with its own limits, expiry and allowed chains or recipients. Your own rules still apply on top, and big payments ask you first. Type <b>/agents</b> to see them. Say "revoke research bot" to switch one off.</p>
+  </div>
+
+  <h2>You stay in control</h2>
+  <div class="box">
+    <p><b>MooPay acts on its own</b> for everyday payments inside your limits. <b>It asks you first</b> for a big payment, a first payment to a new person above a small amount, or any change that raises your limits or switches your payout wallet. It never goes over your daily limit.</p>
+  </div>
+  <ul style="margin-top:14px">
+    <li><b>Float:</b> MooPay holds only the small working balance you put in. The rest goes to your own wallet.</li>
+    <li><b>Fees:</b> shown before you approve. Very small payments lose a bigger share to fixed network fees, so start with $5 or more.</li>
+    <li><b>Save your recovery code:</b> your account lives in this browser. Type <b>/recovery</b> to see your code and keep it somewhere safe. On a new browser or computer, type <b>/restore</b> and paste it to get everything back. Anything already swept to your own wallet is safe either way.</li>
+    <li><b>Private:</b> a fresh one-time address for every payment, and no personal details collected.</li>
+  </ul>
+
+  <div class="foot"><a class="btn" href="/agent">Open MooPay</a></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+# Change app to a unique name, then: fly launch --no-deploy --copy-config
+app = "moopay-test"
+primary_region = "iad"
+
+[build]
+
+[env]
+  MOOPAY_HOST = "0.0.0.0"
+  MOOPAY_HTTP_PORT = "8080"
+  STATE_FILE = "/data/moopay-state.json"
+  # MOOPAY_PUBLIC_HOST = "yourdomain.com"   # set once your domain is connected
+
+[mounts]
+  source = "moopay_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"      # the background worker must keep running
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

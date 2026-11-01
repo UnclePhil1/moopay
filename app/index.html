@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>MooPay Agent</title>
+<link rel="icon" href="/app/assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0a0a0a; --panel:#111; --card:#161616; --line:rgba(255,255,255,.10); --line2:rgba(255,255,255,.18); --text:#fff; --muted:#a3a3a3; --dim:#6b6b6b; --ok:#7ee0a8; --warn:#f2c36b; --bad:#ff8a8a; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 "Inter",system-ui,sans-serif; overflow:hidden; }
+  button,input { font:inherit; color:inherit; } button { cursor:pointer; }
+  .app { display:flex; flex-direction:column; height:100dvh; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 22px; border-bottom:1px solid var(--line); }
+  header img { height:22px; }
+  .spacer { flex:1; }
+  .how { color:var(--muted); font-size:13.5px; text-decoration:none; } .how:hover { color:#fff; }
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid var(--line); border-radius:999px; font-size:12.5px; color:var(--muted); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); } .dot.work { background:var(--warn); animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity:.3; } }
+  #scroll { flex:1; min-height:0; overflow-y:auto; }
+  .wrap { width:min(720px,100%); margin:0 auto; padding:22px 20px 16px; }
+  .empty { text-align:center; padding:12vh 0 20px; }
+  .empty img { height:50px; margin-bottom:18px; }
+  .empty h2 { font-size:30px; line-height:1.15; margin:0 0 8px; font-weight:800; letter-spacing:-.02em; }
+  .empty p { color:var(--muted); margin:0 auto 22px; max-width:420px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
+  .chip { background:none; border:1px solid var(--line); border-radius:999px; padding:9px 15px; color:var(--muted); font-size:14px; }
+  .chip:hover { border-color:var(--line2); color:var(--text); }
+  .msg { display:flex; gap:12px; margin:18px 0; animation:in .25s ease; }
+  @keyframes in { from { opacity:0; transform:translateY(6px); } }
+  .msg.me { justify-content:flex-end; align-items:center; gap:6px; }
+  .msg .del { background:none; border:0; color:var(--mute,#888); font-size:18px; line-height:1; padding:4px 6px; opacity:0; cursor:pointer; } .msg.me:hover .del, .msg .del:focus { opacity:.8; } @media (hover:none) { .msg .del { opacity:.45; } }
+  #send.stop svg { stroke:none; fill:#000; }
+  .msg.me .bubble { background:#fff; color:#000; border-radius:18px 18px 4px 18px; padding:10px 15px; max-width:82%; font-weight:500; word-break:break-word; }
+  .av { width:30px; height:30px; flex:none; border-radius:50%; border:1px solid var(--line); display:grid; place-items:center; background:var(--panel); }
+  .av img { width:19px; }
+  .body { min-width:0; flex:1; } .body > * + * { margin-top:10px; }
+  .txt { white-space:pre-wrap; word-break:break-word; }
+  .steps { border:1px solid var(--line); border-radius:16px; padding:6px 14px; background:var(--panel); }
+  .step { display:flex; align-items:center; gap:10px; padding:7px 0; color:var(--muted); font-size:14px; } .step.done { color:var(--text); }
+  .step .i { width:16px; height:16px; flex:none; display:grid; place-items:center; }
+  .dots { display:flex; gap:5px; align-items:center; height:22px; } .dots i { width:7px; height:7px; border-radius:50%; background:var(--muted); animation:wave 1.2s ease-in-out infinite; } .dots i:nth-child(2) { animation-delay:.15s; } .dots i:nth-child(3) { animation-delay:.3s; }
+  @keyframes wave { 0%,60%,100% { transform:translateY(0); opacity:.35; } 30% { transform:translateY(-6px); opacity:1; } }
+  @media (prefers-reduced-motion: reduce) { .dots i { animation:none; opacity:.6; } }
+  .spin { width:13px; height:13px; border:2px solid var(--line2); border-top-color:#fff; border-radius:50%; animation:sp .7s linear infinite; } @keyframes sp { to { transform:rotate(360deg); } }
+  .tick { color:var(--ok); font-weight:700; }
+  .card { border:1px solid var(--line); background:var(--card); border-radius:20px; padding:18px; }
+  .card h3 { margin:0 0 2px; font-size:17px; font-weight:700; } .sub { color:var(--muted); font-size:13.5px; }
+  .row { display:flex; justify-content:space-between; gap:14px; padding:10px 0; border-top:1px solid var(--line); font-size:14.5px; }
+  .row span:first-child { color:var(--muted); } .row b { font-weight:600; text-align:right; word-break:break-all; }
+  .big { font-size:34px; font-weight:800; letter-spacing:-.02em; line-height:1.1; margin:2px 0 8px; }
+  .modal { position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(0,0,0,.62); animation:fade .15s ease; }
+  .modal .box { width:100%; max-width:420px; background:var(--panel); border:1px solid var(--line2); border-radius:18px; padding:22px; box-shadow:0 20px 60px rgba(0,0,0,.5); animation:in .18s ease; }
+  .modal h3 { margin:0 0 8px; font-size:18px; font-weight:700; } .modal p { margin:0; color:var(--muted); font-size:14.5px; line-height:1.5; }
+  .modal input { width:100%; margin-top:14px; background:var(--card); border:1px solid var(--line2); border-radius:12px; padding:12px 14px; color:var(--text); font-size:14.5px; outline:none; } .modal input:focus { border-color:#fff; }
+  .modal .code code { white-space:normal; word-break:break-all; }
+  .modal .err { color:var(--bad); font-size:13px; margin-top:8px; min-height:0; }
+  .modal .btns { justify-content:flex-end; margin-top:18px; } .btn.danger { background:var(--bad); }
+  @keyframes fade { from { opacity:0; } }
+  .btns { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .btn { border:0; border-radius:999px; background:#fff; color:#000; padding:11px 22px; font-weight:700; }
+  .btn.ghost { background:none; color:var(--text); border:1px solid var(--line2); } .btn:disabled { opacity:.45; cursor:default; }
+  .tag { display:inline-block; font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line2); color:var(--muted); }
+  .tag.ok { color:var(--ok); border-color:rgba(126,224,168,.4); } .tag.bad { color:var(--bad); border-color:rgba(255,138,138,.4); }
+  .track { display:flex; align-items:center; margin:14px 0 4px; }
+  .tn { display:flex; flex-direction:column; align-items:center; gap:6px; font-size:12.5px; color:var(--dim); min-width:70px; }
+  .tn i { width:12px; height:12px; border-radius:50%; border:2px solid var(--line2); background:var(--bg); }
+  .tn.on { color:var(--text); } .tn.on i { background:#fff; border-color:#fff; } .tn.cur i { animation:pulse 1s infinite; }
+  .tl { flex:1; height:2px; background:var(--line2); margin-bottom:20px; } .tl.on { background:#fff; }
+  .code { display:flex; gap:8px; margin-top:8px; }
+  .code code { flex:1; min-width:0; overflow-x:auto; white-space:nowrap; padding:11px 12px; border-radius:12px; background:#0a0a0a; border:1px solid var(--line); font-size:12.5px; }
+  .code button { padding:0 14px; border-radius:12px; border:1px solid var(--line); background:none; font-size:13px; font-weight:600; }
+  a { color:#fff; }
+  .list { border:1px solid var(--line); border-radius:16px; overflow:hidden; background:var(--card); }
+  .li { padding:12px 16px; border-top:1px solid var(--line); } .li:first-child { border-top:0; }
+  .li b { font-weight:600; } .li span { color:var(--muted); font-size:13.5px; display:block; }
+  .composer { padding:10px 20px 18px; position:relative; }
+  .cbox { width:min(720px,100%); margin:0 auto; display:flex; gap:10px; align-items:center; border:1px solid var(--line2); border-radius:999px; background:var(--panel); padding:6px 6px 6px 20px; }
+  .cbox:focus-within { border-color:#fff; }
+  #input { flex:1; min-width:0; background:none; border:0; outline:0; padding:10px 0; } #input::placeholder { color:var(--dim); }
+  #send { width:42px; height:42px; border-radius:50%; border:0; background:#fff; display:grid; place-items:center; flex:none; } #send:disabled { opacity:.35; cursor:default; }
+  #send svg { width:18px; height:18px; stroke:#000; fill:none; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+  .note { text-align:center; font-size:12px; color:var(--dim); margin-top:8px; }
+  #palette { position:absolute; left:50%; bottom:72px; transform:translateX(-50%); width:min(680px,calc(100% - 40px)); background:var(--card); border:1px solid var(--line2); border-radius:18px; padding:6px; box-shadow:0 20px 60px rgba(0,0,0,.6); z-index:5; }
+  #palette[hidden] { display:none; }
+  .cmd { display:flex; gap:14px; align-items:baseline; padding:10px 14px; border-radius:12px; width:100%; background:none; border:0; text-align:left; }
+  .cmd.sel,.cmd:hover { background:rgba(255,255,255,.08); } .cmd b { min-width:84px; font-weight:700; } .cmd span { color:var(--muted); font-size:13.5px; }
+  .toast { position:fixed; left:50%; bottom:100px; transform:translateX(-50%); background:#fff; color:#000; padding:10px 18px; border-radius:999px; font-weight:600; font-size:14px; z-index:30; }
+  @media (max-width:640px) { header { padding:12px 14px; } .wrap { padding:16px 14px; } .composer { padding:8px 12px 12px; } .note { display:none; } }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <img src="/app/assets/moopay-logo.png" alt="MooPay">
+    <span class="spacer"></span>
+    <a class="how" href="/guide" target="_blank" rel="noopener">How it works</a>
+    <span class="pill"><span class="dot" id="dot"></span><span id="state">Ready</span></span>
+  </header>
+  <div id="scroll"><div class="wrap" id="chat"></div></div>
+  <div class="composer">
+    <div id="palette" hidden></div>
+    <form class="cbox" id="form" autocomplete="off">
+      <input id="input" placeholder="Tell MooPay what to do, or type / for shortcuts" aria-label="Message">
+      <button id="send" type="submit" aria-label="Send" disabled><svg viewBox="0 0 24 24"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg></button>
+    </form>
+    <div class="note">MooPay keeps only a small working float. Everything above it goes to your own wallet.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v); }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return e;
+}
+const usd = (n) => "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const short = (a) => (String(a).length > 20 ? String(a).slice(0, 9) + "…" + String(a).slice(-6) : String(a));
+/* One popup for every confirmation. ask({ title, text, confirm, cancel, danger, input: { placeholder, check(v) -> error text or "" } })
+   resolves to true (confirmed), the typed text (when there is an input), or null (cancelled: Cancel, Esc or a click outside). */
+function ask({ title, text, confirm = "Confirm", cancel = "Cancel", danger = false, input: field, reveal } = {}) {
+  return new Promise((resolve) => {
+    const prev = document.activeElement;
+    const err = h("div", { class: "err", role: "alert" });
+    const inp = field ? h("input", { type: "text", placeholder: field.placeholder || "", autocomplete: "off", spellcheck: "false" }) : null;
+    const ok = h("button", { class: "btn" + (danger ? " danger" : "") }, confirm), no = h("button", { class: "btn ghost" }, cancel);
+    // reveal: show a value (like a key) inside the popup only, with a Copy button; there is just one button, Done
+    const shown = reveal ? h("div", { class: "code", style: "margin-top:14px" }, h("code", {}, reveal), h("button", { onclick: (e) => copy(reveal, e.target) }, "Copy")) : null;
+    const box = h("div", { class: "box", role: "dialog", "aria-modal": "true", "aria-label": title || "Confirm" }, h("h3", {}, title || "Are you sure?"), text ? h("p", {}, text) : null, inp, shown, inp ? err : null, h("div", { class: "btns" }, reveal ? null : no, ok));
+    const wrap = h("div", { class: "modal" }, box);
+    const close = (v) => { wrap.remove(); document.removeEventListener("keydown", key, true); if (prev && prev.focus) prev.focus(); resolve(v); };
+    const submit = () => {
+      if (!inp) return close(true);
+      const v = inp.value.trim(), bad = field.check ? field.check(v) : v ? "" : "Enter a value.";
+      if (bad) { err.textContent = bad; inp.focus(); return; }
+      close(v);
+    };
+    const key = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(null); }
+      else if (e.key === "Enter" && e.target !== no) { e.preventDefault(); submit(); }
+      else if (e.key === "Tab") { const f = [...box.querySelectorAll("input,button")]; const i = f.indexOf(document.activeElement); e.preventDefault(); f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus(); }
+    };
+    ok.addEventListener("click", submit); no.addEventListener("click", () => close(null));
+    wrap.addEventListener("mousedown", (e) => { if (e.target === wrap) close(null); });
+    document.addEventListener("keydown", key, true);
+    document.body.append(wrap); (inp || ok).focus();
+  });
+}
+function copy(t, btn) { try { navigator.clipboard.writeText(t); } catch {} const o = btn.textContent; btn.textContent = "Copied"; setTimeout(() => (btn.textContent = o), 1400); }
+
+/* this device's private key-less identity: a random token. Losing it means losing access, so the guide says to keep your payout wallet set. */
+function deviceToken() {
+  try { let t = localStorage.getItem("moopay.device"); if (!t) { t = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, ""); localStorage.setItem("moopay.device", t); } return t; }
+  catch { return (window.__t ||= btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/[+/=]/g, "x")); }
+}
+async function api(path, opts = {}) {
+  const res = await fetch("/agent/api/" + path, { ...opts, headers: { ...(opts.headers || {}), "x-moopay-device": deviceToken(), "content-type": "application/json" } });
+  if (!res.ok && !res.body) throw new Error("Request failed");
+  return res;
+}
+
+const chat = $("chat"), scroller = $("scroll");
+const down = () => (scroller.scrollTop = scroller.scrollHeight);
+const work = (on, t) => { $("dot").classList.toggle("work", on); $("state").textContent = on ? t || "Working…" : "Ready"; };
+const clearEmpty = () => $("empty")?.remove();
+function userMsg(t, id) {
+  clearEmpty(); const m = h("div", { class: "msg me" }, h("div", { class: "bubble" }, t)); if (id) m.dataset.turn = id;
+  m.prepend(h("button", { class: "del", type: "button", title: "Delete this message", "aria-label": "Delete this message", onclick: () => removeTurn(m) }, "×"));
+  chat.append(m); down(); return m;
+}
+async function removeTurn(m) {
+  const id = m.dataset.turn; if (busy && !id) return;
+  if (!(await ask({ title: "Delete this message?", text: "This removes it and my reply from the chat.", confirm: "Delete", danger: true }))) return;
+  if (id) { await api("chat/delete", { method: "POST", body: JSON.stringify({ id }) }).catch(() => undefined); chat.querySelectorAll('[data-turn="' + id + '"]').forEach((x) => x.remove()); } else m.remove();
+  if (!chat.children.length) start();
+}
+function agent(id) { clearEmpty(); const body = h("div", { class: "body" }); chat.append(h("div", { class: "msg", ...(id ? { "data-turn": id } : {}) }, h("div", { class: "av" }, h("img", { src: "/app/assets/moopay-mark.png", alt: "" })), body)); down(); return body; }
+async function say(b, text) { const t = h("div", { class: "txt" }); b.append(t); for (let i = 0; i < text.length; i += 3) { t.textContent = text.slice(0, i + 3); down(); await sleep(8); } t.textContent = text; }
+const row = (k, v) => h("div", { class: "row" }, h("span", {}, k), h("b", {}, v));
+const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
+
+/* cards */
+function card(c) {
+  switch (c.kind) {
+    case "account": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your agent wallet"),
+      h("div", { class: "sub" }, "Balance"), h("div", { class: "big" }, "$" + Number(c.balanceUsd).toFixed(2)), row("Spent today", usd(c.spentToday || 0)),
+      h("div", { class: "sub", style: "margin-top:10px" }, "Deposit address (NEAR network)"), h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
+      h("div", { class: "sub", style: "margin-top:10px" }, "It's a real NEAR wallet. ", h("a", { href: c.explorer, target: "_blank", rel: "noopener noreferrer" }, "See it on the blockchain"), ". Take your money out any time with /withdraw."),
+      c.setupSteps?.length ? h("div", { style: "margin-top:12px" }, c.setupSteps.map((s, i) => h("div", { class: "step" }, h("span", { class: "i" }, (i + 1) + "."), s))) : h("div", { style: "margin-top:10px" }, h("span", { class: "tag ok" }, "Ready")));
+    case "payment": {
+      const tone = /DELIVERED|CLAIMED/.test(c.status) ? "ok" : /FAIL|REFUND/.test(c.status) ? "bad" : "";
+      return h("div", { class: "card" }, h("div", { class: "sub" }, "Payment"), h("div", { class: "big" }, c.unit ? c.amountUsd + " " + c.unit : usd(c.amountUsd)),
+        row("To", short(c.recipient)), row("Network", CHAIN[c.chain] || c.chain), c.expected ? row("They get", "≈ " + c.expected) : null,
+        row("Status", h("span", { class: "tag " + tone }, c.status.replaceAll("_", " ").toLowerCase())), c.tx ? row("Transaction", h("a", { href: c.tx, target: "_blank", rel: "noopener noreferrer" }, "View")) : null);
+    }
+    case "claim": return h("div", { class: "card" }, h("div", { class: "sub" }, "Private claim"), h("div", { class: "big" }, usd(c.amountUsd)),
+      h("div", { class: "code" }, h("code", {}, c.link), h("button", { onclick: (e) => copy(c.link, e.target) }, "Copy")),
+      row("Only this wallet can claim", short(c.receiver) + (c.chain && c.chain !== "near" ? " (" + c.chain.toUpperCase() + ")" : "")), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
+    case "deposit": return h("div", { class: "card" }, h("div", { class: "sub" }, "Send from your own wallet"),
+      h("div", { class: "big" }, c.amount + " " + c.symbol), row("Network", CHAIN[c.chain] || c.chain.toUpperCase()), row("You send to", short(c.address)),
+      h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
+      c.memo ? row("Memo (required)", c.memo) : null, c.expected ? row("Result", c.expected) : null, c.expires ? row("Send before", new Date(c.expires).toLocaleTimeString()) : null,
+      h("div", { class: "sub", style: "margin-top:10px" }, c.note));
+    case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("a", { class: "btn", href: c.url, target: "_blank", rel: "noopener noreferrer", style: "text-decoration:none;color:#000" }, c.button)));
+    case "recovery": {
+      const code = deviceToken(), el = h("div", { class: "card" }, h("div", { class: "sub" }, "Your recovery code. Save it somewhere safe, like a password manager."),
+        h("div", { class: "code" }, h("code", {}, code), h("button", { onclick: (e) => copy(code, e.target) }, "Copy")),
+        h("div", { class: "sub", style: "margin-top:10px" }, "If you clear this browser or change computer, type /restore and paste it to get your account back. Anyone with this code can use your account, so keep it private."));
+      if (c.ask) el.append(h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => { try { localStorage.setItem("moopay.saved", "1"); } catch {} el.querySelector(".btns").remove(); } }, "I saved it")));
+      return el;
+    }
+    case "privacy": {
+      const sealed = aiInfo?.tier === "Confidential TEE";
+      return h("div", { class: "card" }, h("div", { class: "sub" }, "Privacy"),
+        h("h3", {}, sealed ? "Your chat is read inside a sealed enclave" : aiInfo ? "Your chat goes to " + aiInfo.name : "The AI is not connected"),
+        row("AI", aiInfo ? aiInfo.name + " · " + aiInfo.tier : "none"),
+        h("div", { class: "sub", style: "margin-top:10px" }, sealed
+          ? "The AI runs on hardware-sealed chips (a TEE). The AI host, the model company and NEAR AI cannot read your messages, and the chip can prove it."
+          : "This AI provider can read your messages. Ask the owner to switch MooPay to a sealed model (NEAR AI)."),
+        h("div", { class: "sub", style: "margin-top:8px" }, "MooPay itself keeps your account, balance and payment history to do its job. It never asks for your name, email or a wallet connection, and limits are enforced by code, not by the AI."),
+        h("div", { class: "btns" }, h("a", { class: "btn", href: "https://docs.near.ai/cloud/verification/verification-center.md", target: "_blank", rel: "noopener noreferrer", style: "text-decoration:none;color:#000" }, "How to verify")));
+    }
+    case "stake": return h("div", { class: "card" }, h("div", { class: "sub" }, "Staked with Rhea"), h("div", { class: "big" }, c.staked + " NEAR"),
+      row("You receive", "≈ " + c.rnear + " rNEAR"), row("Sent to your wallet", short(c.to)), c.apy ? row("Yield now", c.apy + "% a year") : null,
+      h("div", { class: "sub", style: "margin-top:10px" }, "rNEAR grows against NEAR as rewards come in. It's in your own wallet, not MooPay's. ", h("a", { href: c.tx, target: "_blank", rel: "noopener noreferrer" }, "View transaction"), " · ", h("a", { href: c.link, target: "_blank", rel: "noopener noreferrer" }, "Unstake on Rhea")));
+    case "position": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rNEAR"), h("div", { class: "big" }, c.rnear + " rNEAR"),
+      row("Worth", c.worthNear + " NEAR" + (c.worthUsd ? " · " + usd(c.worthUsd) : "")), row("1 rNEAR =", c.priceNearPerRnear + " NEAR"), c.apyPercent ? row("Yield now", c.apyPercent + "% a year") : null, c.wallet ? row("Held in", short(c.wallet)) : null,
+      h("div", { class: "sub", style: "margin-top:10px" }, h("a", { href: c.unstakeAt, target: "_blank", rel: "noopener noreferrer" }, "Unstake or withdraw on Rhea"), " (delayed unstake takes about 30 hours)."));
+    case "approval": return approvalCard(c);
+    case "list": return c.items.length ? h("div", { class: "list" }, c.items.map((i) => h("div", { class: "li" }, h("b", {}, (i.kind === "claim" ? "Claim for " : i.kind === "sweep" ? "Sent to your wallet " : "Sent to ") + short(i.to) + " · " + usd(i.amountUsd)), h("span", {}, new Date(i.at).toLocaleString() + " · " + i.status.replaceAll("_", " ").toLowerCase())))) : h("div", { class: "sub" }, "Nothing yet.");
+    case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);
+    case "agentkey": return h("div", { class: "card" }, h("div", { class: "sub" }, "Agent key for " + c.name + ". Copy it now; it is not shown again."),
+      h("div", { class: "code" }, h("code", {}, c.key), h("button", { onclick: (e) => copy(c.key, e.target) }, "Copy")),
+      c.dailyUsd ? row("Daily limit", usd(c.dailyUsd)) : null, c.totalUsd ? row("Total budget", usd(c.totalUsd)) : null, c.perPaymentUsd ? row("Per payment", usd(c.perPaymentUsd)) : null,
+      c.chains ? row("Only chains", c.chains.join(", ").toUpperCase()) : null, c.assets ? row("Only assets", c.assets.join(", ")) : null, c.recipients ? row("Only to", c.recipients.map(short).join(", ")) : null,
+      c.expiresAt ? row("Expires", new Date(c.expiresAt).toLocaleString()) : null);
+    case "agents": return c.items.length ? h("div", { class: "list" }, c.items.map((a) => h("div", { class: "li" }, h("b", {}, a.name + (a.revoked ? " (off)" : a.expired ? " (expired)" : "")),
+      h("span", {}, [a.leftToday !== null ? usd(a.leftToday) + " left today" : "no daily limit", a.leftTotal !== null ? usd(a.leftTotal) + " left in total" : null].filter(Boolean).join(" · "))))) : h("div", { class: "sub" }, "No agent keys yet.");
+    default: return h("div", { class: "sub" }, c.text || "");
+  }
+}
+function approvalCard(c) {
+  const ok = h("button", { class: "btn" }, "Approve"), no = h("button", { class: "btn ghost" }, "Decline");
+  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), h("div", { class: "btns" }, ok, no));
+  const act = async (yes) => {
+    ok.disabled = no.disabled = true; el.style.opacity = ".7"; work(true, yes ? "Working…" : "Cancelling");
+    try {
+      const r = await (await api("approve", { method: "POST", body: JSON.stringify({ id: c.id, approve: yes }) })).json();
+      if (r.code) throw new Error(r.message);
+      const b = agent(); if (r.card) b.append(card(r.card));
+      const st = r.result?.status; if (st === "sent" || st === "created" || st === "updated" || st === "declined") await say(b, st === "declined" ? "Cancelled. Nothing was sent." : st === "updated" ? "Done. Your rules are updated." : "Done.");
+      else if (r.result?.reason) await say(b, r.result.reason);
+    } catch (e) { await say(agent(), e.message || "That didn't work. Please try again."); }
+    work(false);
+  };
+  ok.onclick = () => void act(true); no.onclick = () => void act(false);
+  return el;
+}
+
+/* talking to the agent */
+let busy = false;
+async function submit(raw) {
+  const text = (raw ?? $("input").value).trim(); if (!text || busy) return;
+  $("input").value = ""; $("palette").hidden = true; busy = true; sync(); const um = userMsg(text); work(true, "Thinking");
+  const b = agent(); let steps = null; const rows = new Map(); let said = false;
+  const dots = h("div", { class: "dots", "aria-label": "Thinking" }, h("i"), h("i"), h("i")); b.append(dots); down();
+  const bm = b.parentNode; cur = { um, bm, text, cancelled: false };
+  try {
+    const res = await api("chat", { method: "POST", body: JSON.stringify({ message: text }) });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.message || "Something went wrong."); }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true }); let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line) continue;
+        const e = JSON.parse(line);
+        if (e.type === "turn") { um.dataset.turn = e.id; bm.dataset.turn = e.id; }
+        else if (e.type === "cancelled") { cur.cancelled = true; um.remove(); bm.remove(); $("input").value = text; sync(); if (!chat.children.length) start(); }
+        else if (e.type === "step") {
+          if (!steps) { steps = h("div", { class: "steps" }); b.append(steps); }
+          b.append(dots);
+          let r = rows.get(e.id);
+          if (!r) { r = { ic: h("span", { class: "i" }), el: h("div", { class: "step" }) }; r.el.append(r.ic, e.label); steps.append(r.el); rows.set(e.id, r); }
+          r.ic.replaceChildren(e.state === "running" ? h("span", { class: "spin" }) : h("span", { class: e.state === "done" ? "tick" : "", style: e.state === "failed" ? "color:var(--bad)" : "" }, e.state === "done" ? "✓" : "!"));
+          r.el.classList.toggle("done", e.state === "done"); work(true, e.label);
+        } else if (e.type === "card") { b.append(card(e.card)); b.append(dots); }
+        else if (e.type === "text") { dots.remove(); said = true; await say(b, e.text); }
+        down();
+      }
+    }
+    dots.remove();
+    if (cur.cancelled) return;
+    if (!said && !b.children.length) await say(b, "Done.");
+  } catch (err) { dots.remove(); await say(b, err.message || "I couldn't reach the server. Please try again."); }
+  finally { dots.remove(); busy = false; cur = null; sync(); work(false); down(); }
+}
+let cur = null;
+async function stop() {
+  if (!cur) return;
+  const r = await (await api("chat/cancel", { method: "POST" })).json().catch(() => ({}));
+  if (!r.ok) { $("send").disabled = true; $("state").textContent = "Already on it"; }
+}
+
+/* things that happen while you're away */
+let lastEvent = 0, aiInfo = null;
+async function poll() {
+  try {
+    const r = await (await api("events?since=" + lastEvent)).json();
+    for (const e of r.events || []) { lastEvent = Math.max(lastEvent, e.id); const b = agent(); await say(b, e.text); if (e.card) b.append(card(e.card)); down(); if (/funded|arrived/.test(e.text)) nudge(1); }
+  } catch {}
+}
+
+/* shortcuts */
+const COMMANDS = [
+  { name: "/send", desc: "Send to any wallet address", ex: "Send $20 to " },
+  { name: "/claim", desc: "Private claim only one wallet can open", ex: "Create a private claim of $20 for " },
+  { name: "/account", desc: "Balance and deposit address", run: "Show my account" },
+  { name: "/status", desc: "Recent payments and claims", run: "Show my recent activity" },
+  { name: "/add", desc: "Add money from any chain", ex: "Add $20 from my Solana wallet. My address is " },
+  { name: "/withdraw", desc: "Take your money out", run: "Withdraw everything to my wallet" },
+  { name: "/privacy", desc: "Who can read your chat", privacy: true },
+  { name: "/recovery", desc: "Show your recovery code", recovery: true },
+  { name: "/restore", desc: "Get your account back on a new browser", restore: true },
+  { name: "/export", desc: "Show your wallet key", exportKey: true },
+  { name: "/agents", desc: "Keys for other AI agents, with limits", run: "Show my agent keys" },
+  { name: "/stake", desc: "Earn with Rhea (rNEAR)", ex: "Stake $20 into rNEAR" },
+  { name: "/rules", desc: "Your limits and payout wallet", run: "What are my rules?" },
+  { name: "/help", desc: "What I can do", run: "What can you do?" },
+  { name: "/clear", desc: "Clear this chat", clear: true },
+];
+let sel = 0, shown = []; const input = $("input"), pal = $("palette");
+function paletteFor(v) {
+  if (!v.startsWith("/") || v.includes(" ")) { pal.hidden = true; return; }
+  shown = COMMANDS.filter((c) => c.name.startsWith(v.toLowerCase())); if (!shown.length) { pal.hidden = true; return; }
+  sel = Math.min(sel, shown.length - 1);
+  pal.replaceChildren(...shown.map((c, i) => h("button", { type: "button", class: "cmd" + (i === sel ? " sel" : ""), onmousedown: (e) => { e.preventDefault(); pick(c); } }, h("b", {}, c.name), h("span", {}, c.desc))));
+  pal.hidden = false;
+}
+async function exportKey() {
+  if (!(await ask({ title: "Show your wallet key?", text: "Anyone who sees this key can take the money in your agent wallet. Only show it when nobody is watching.", confirm: "Show key", danger: true }))) return;
+  try {
+    const r = await (await api("export", { method: "POST" })).json(); if (r.code) throw new Error(r.message);
+    await ask({ title: "Your wallet key", text: "Copy it and keep it somewhere safe. It opens the wallet " + short(r.accountId) + " in any NEAR wallet.", reveal: r.secretKey, confirm: "Done" });
+  } catch (e) { clearEmpty(); await say(agent(), e.message || "I couldn't get the key."); }
+}
+function showRecovery(ask) { clearEmpty(); agent().append(card({ kind: "recovery", ask })); down(); }
+async function restore() {
+  const code = await ask({ title: "Restore your account", text: "Paste your recovery code. This browser will switch to that account. If this browser's account holds money, save its own code first (/recovery).", confirm: "Restore",
+    input: { placeholder: "Recovery code", check: (v) => (/^[A-Za-z0-9_-]{32,64}$/.test(v) ? "" : "That doesn't look like a recovery code. It's one long string of letters and numbers.") } });
+  if (!code) return;
+  try { localStorage.setItem("moopay.device", code); localStorage.setItem("moopay.saved", "1"); location.reload(); } catch { void say(agent(), "This browser won't let me save it. Allow site storage and try again."); }
+}
+/* once there is money in the account, ask them to keep the code */
+function nudge(balance) { try { if (Number(balance) > 0 && !localStorage.getItem("moopay.saved")) showRecovery(true); } catch {} }
+function pick(c) { pal.hidden = true; if (c.privacy) { input.value = ""; sync(); clearEmpty(); agent().append(card({ kind: "privacy" })); down(); return; } if (c.recovery) { input.value = ""; sync(); return showRecovery(false); } if (c.restore) { input.value = ""; sync(); return restore(); } if (c.exportKey) { input.value = ""; sync(); return void exportKey(); } if (c.clear) { input.value = ""; sync(); void api("chat/delete", { method: "POST", body: JSON.stringify({ all: true }) }).catch(() => undefined); return start(); } if (c.ex) { input.value = c.ex; input.focus(); sync(); } else { input.value = ""; sync(); void submit(c.run); } }
+const SEND = "M12 19V5m0 0-6 6m6-6 6 6", STOP = "M7 7h10v10H7z";
+function sync() { const s = $("send"); s.classList.toggle("stop", busy); s.setAttribute("aria-label", busy ? "Stop" : "Send"); s.querySelector("path").setAttribute("d", busy ? STOP : SEND); s.disabled = busy ? false : !input.value.trim(); }
+input.addEventListener("input", () => { sel = 0; paletteFor(input.value); sync(); });
+input.addEventListener("keydown", (e) => {
+  if (pal.hidden) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); sel = (sel + 1) % shown.length; paletteFor(input.value); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); sel = (sel - 1 + shown.length) % shown.length; paletteFor(input.value); }
+  else if (e.key === "Tab" || (e.key === "Enter" && shown[sel] && input.value.toLowerCase() !== shown[sel].name)) { e.preventDefault(); pick(shown[sel]); }
+  else if (e.key === "Escape") pal.hidden = true;
+});
+document.addEventListener("keydown", (e) => { if (e.key === "/" && document.activeElement !== input) { e.preventDefault(); input.focus(); input.value = "/"; paletteFor("/"); sync(); } });
+$("form").addEventListener("submit", (e) => { e.preventDefault(); if (busy) void stop(); else void submit(); });
+
+function start() {
+  chat.replaceChildren(h("div", { id: "empty", class: "empty" }, h("img", { src: "/app/assets/moopay-mark.png", alt: "" }), h("h2", {}, "Where should the money go?"),
+    h("p", {}, "Tell me in plain words. I find the route, send it, and follow it until it lands."),
+    h("div", { class: "chips" }, [["Show my account", "Show my account"], ["Add money", "Add $20 from my Solana wallet. My address is "], ["Send money", "Send $20 to "], ["Private claim", "Create a private claim of $20 for "]].map(([l, c]) => h("button", { class: "chip", onclick: () => { if (c.endsWith(" ")) { input.value = c; input.focus(); sync(); } else void submit(c); } }, l)),
+      h("a", { class: "chip", href: "/guide", target: "_blank", rel: "noopener", style: "text-decoration:none" }, "How it works"))));
+}
+
+async function boot() {
+  start();
+  try {
+    const s = await (await api("state")).json();
+    if (s.code) throw new Error(s.message);
+    lastEvent = s.lastEventId || 0; aiInfo = s.ai;
+    if (!s.live) { $("dot").style.background = "var(--warn)"; $("state").textContent = "AI not connected"; }
+    if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); b.append(h("div", { class: "txt" }, m.content)); } } }
+    else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }
+    for (const a of s.approvals || []) agent().append(card(a));
+    nudge(s.account?.balanceUsd);
+  } catch (e) { $("state").textContent = "Offline"; }
+  setInterval(() => { if (!busy) void poll(); }, 6000);
+}
+void boot();
+</script>
+</body>
+</html>

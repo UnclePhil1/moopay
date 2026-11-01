@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<title>Pay with MooPay</title>
+<link rel="icon" href="/p/assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/p/assets/modal-ui.css">
+<style>
+  :root { --bg:#0a0a0a; --card:#141414; --line:rgba(255,255,255,.1); --text:#ffffff; --muted:#a3a3a3; --accent:#ffffff; --accent-2:#d4d4d4; --ok:#ffffff; --bad:#ff8a8a; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.55 "Inter",system-ui,sans-serif; display:grid; place-items:start center; padding:32px 16px;
+     }
+  main { width:min(460px,100%); }
+  .logo { display:block; height:28px; margin:0 auto 28px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:24px; padding:26px; box-shadow:0 30px 80px rgba(0,0,0,.5); }
+  h1 { font:800 34px/1.1 "Inter",sans-serif; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 22px; font-size:15px; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:12px 0; border-top:1px solid var(--line); font-size:15px; }
+  .row span:first-child { color:var(--muted); }
+  .row b { font-weight:600; text-align:right; word-break:break-all; }
+  .card { overflow:hidden; }
+  .msg { overflow-wrap:anywhere; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:18px 0 6px; }
+  select { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; }
+  .btn { width:100%; margin-top:22px; padding:16px; border:0; border-radius:999px; background:var(--accent); color:#000; font:700 17px "Inter",sans-serif; cursor:pointer;  }
+  .btn:hover:not(:disabled) { background:var(--accent-2); }
+  .btn:disabled { opacity:.55; cursor:default; }
+  .btn.ghost { background:transparent; border:1px solid var(--line); box-shadow:none; margin-top:10px; padding:11px; font-size:14px; }
+  .msg { margin-top:16px; font-size:14px; color:var(--muted); min-height:20px; }
+  .msg.err { color:var(--bad); } .msg.ok { color:var(--ok); }
+  .addr { display:flex; gap:8px; margin-top:8px; }
+  .addr code { flex:1; min-width:0; overflow-x:auto; white-space:nowrap; padding:11px 12px; border-radius:12px; background:#0a0a0a; border:1px solid var(--line); font-size:12.5px; }
+  .addr button { padding:0 14px; border-radius:12px; border:1px solid var(--line); background:transparent; color:var(--text); font:600 13px "Inter",sans-serif; cursor:pointer; }
+  .okline { font-size:18px; font-weight:600; margin:4px 0 0; }
+  .linkbtn { display:block; text-align:center; text-decoration:none; color:#000; box-sizing:border-box; }
+  .hidden { display:none !important; }
+  .foot { text-align:center; color:var(--muted); font-size:12.5px; margin-top:18px; }
+  a:not(.btn) { color:var(--accent-2); }
+</style>
+</head>
+<body>
+<main>
+  <img class="logo" src="/p/assets/moopay-logo.png" alt="MooPay">
+  <div class="card" id="card">
+    <h1 id="title">Loading…</h1>
+    <p class="sub" id="sub"></p>
+
+    <div id="summary"></div>
+
+    <div id="form" class="hidden">
+      <label for="asset">Pay with</label>
+      <select id="asset"></select>
+      <div class="row" style="margin-top:18px"><span>You pay</span><b id="pay">…</b></div>
+      <div class="row"><span>They get about</span><b id="est">…</b></div>
+      <button class="btn" id="send" type="button">Send</button>
+      <div class="msg" id="msg"></div>
+    </div>
+
+    <div id="deposit" class="hidden">
+      <label>Deposit address (you don't need to copy this)</label>
+      <div class="addr"><code id="addr"></code><button id="copy" type="button">Copy</button></div>
+      <div class="msg" id="dmsg"></div>
+    </div>
+    <div id="done" class="hidden">
+      <p class="okline">Your money has arrived.</p>
+      <a id="tx" class="btn linkbtn" target="_blank" rel="noopener noreferrer"></a>
+      <p class="msg">Go back to your chat and say "done". Your AI can confirm it with MooPay.</p>
+    </div>
+    <div class="msg" id="top-msg"></div>
+  </div>
+  <p class="foot">MooPay never holds your money. You sign from your own wallet.</p>
+</main>
+<script src="/p/assets/pay.js"></script>
+</body>
+</html>

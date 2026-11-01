@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+*.state.json
+moopay-state.json
+
+*.seed
+moopay-state.json*
+*.key
+*.pem
+.env.*
+!.env.example

@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Where MooPay publishes its public numbers. Point this at your server (or tunnel) /stats.json. -->
+<meta name="moopay-stats" content="http://localhost:3333/stats.json">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MooPay: send money across chains with your AI</title>
+<meta name="description" content="Ask your AI assistant to send money to anyone on Bitcoin, Solana or Ethereum. MooPay never holds your funds.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="assets/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg-2: #111111;
+    --card: #141414;
+    --line: rgba(255,255,255,.09);
+    --text: #ffffff;
+    --muted: #a3a3a3;
+    --accent: #ffffff;
+    --accent-2: #d4d4d4;
+    --ok: #ffffff;
+    --font-primary: "Inter", system-ui, sans-serif;
+    --font-secondary: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-secondary); font-size: 16px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  .wrap { width: min(1080px, 100% - 32px); margin-inline: auto; }
+
+  /* nav */
+  header { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); background: rgba(9,9,13,.72); border-bottom: 1px solid var(--line); }
+  nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  nav img { height: 26px; display: block; }
+  nav ul { display: flex; gap: 28px; list-style: none; margin: 0; padding: 0; font-size: 14px; font-weight: 500; color: var(--muted); }
+  nav ul a { text-decoration: none; transition: color .15s; }
+  nav ul a:hover { color: var(--text); }
+  @media (max-width: 640px) { nav ul { display: none; } }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 14px 28px; border-radius: 999px; border: 0; cursor: pointer;
+    background: var(--accent); color: #000; font: 600 16px var(--font-secondary); text-decoration: none;
+    transition: transform .15s, background .15s;
+  }
+  .btn:hover { background: var(--accent-2); transform: translateY(-1px); }
+  .btn.ghost { background: transparent; box-shadow: none; border: 1px solid var(--line); color: var(--text); }
+  .btn.ghost:hover { background: rgba(255,255,255,.05); }
+  .btn.sm { padding: 9px 18px; font-size: 14px; }
+
+  .stats { display:flex; justify-content:center; gap:48px; margin:44px 0 0; flex-wrap:wrap; }
+  .stats div { text-align:center; } .stats b { display:block; font:800 32px var(--font-primary); }
+  .stats span { color:var(--muted); font-size:14px; }
+  /* hero */
+  .hero { position: relative; text-align: center; padding: 96px 0 0; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -20% -10% auto; height: 560px; z-index: -1;
+    
+  }
+  .pill { display: inline-block; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; color: var(--muted); margin-bottom: 28px; background: rgba(255,255,255,.03); }
+  .pill b { color: var(--ok); font-weight: 600; }
+  h1, h2, h3 { font-family: var(--font-primary); font-weight: 800; letter-spacing: -.01em; margin: 0; }
+  h1 { font-size: clamp(48px, 9vw, 104px); line-height: .98; }
+  .lede { max-width: 640px; margin: 28px auto 36px; color: #c9c9d8; font-size: clamp(16px, 2vw, 19px); }
+  .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+  .stage { position: relative; height: 300px; margin-top: 64px; perspective: 900px; }
+  .qcard {
+    position: absolute; left: 50%; top: 0; width: min(420px, 82vw); padding: 20px 22px; text-align: left;
+    background: #141414; border: 1px solid var(--line); border-radius: 22px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  }
+  .qcard.c { transform: translateX(-50%) translateY(10px); z-index: 3; }
+  .qcard.l { transform: translateX(-130%) translateY(50px) rotateY(24deg) rotateZ(-4deg); opacity: .5; z-index: 1; }
+  .qcard.r { transform: translateX(30%) translateY(50px) rotateY(-24deg) rotateZ(4deg); opacity: .5; z-index: 1; }
+  @media (max-width: 760px) { .qcard.l, .qcard.r { display: none; } }
+  .qlabel { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .qrow { display: flex; justify-content: space-between; align-items: baseline; margin-top: 4px; }
+  .qamt { font: 600 30px var(--font-secondary); }
+  .qchip { padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,.07); font-size: 13px; font-weight: 600; }
+  .qsep { height: 1px; background: var(--line); margin: 16px 0; }
+  .qfoot { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); margin-top: 14px; }
+  .globe {
+    position: absolute; left: 50%; bottom: -170px; width: 460px; height: 460px; transform: translateX(-50%); z-index: 0; border-radius: 50%;
+    background: #111;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.12);
+  }
+  .globe::after {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
+    background:
+      repeating-linear-gradient(0deg, transparent 0 38px, rgba(255,255,255,.07) 38px 39px),
+      repeating-linear-gradient(90deg, transparent 0 50px, rgba(255,255,255,.05) 50px 51px);
+    mask: radial-gradient(circle, #000 60%, transparent 71%); -webkit-mask: radial-gradient(circle, #000 60%, transparent 71%);
+  }
+
+  /* sections */
+  section { padding: 96px 0; }
+  .eyebrow { color: var(--accent-2); font-weight: 700; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 14px; }
+  h2 { font-size: clamp(34px, 5vw, 56px); line-height: 1.05; max-width: 720px; }
+  .sub { color: var(--muted); max-width: 620px; margin: 16px 0 0; }
+  .grid { display: grid; gap: 16px; margin-top: 48px; }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 28px; }
+  .card .n { font: 800 40px var(--font-primary); color: var(--accent-2); line-height: 1; }
+  .card h3 { font-size: 24px; margin: 18px 0 8px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  code { background: rgba(255,255,255,.07); padding: 2px 7px; border-radius: 6px; font-size: .88em; }
+
+  /* setup */
+  #setup { background: var(--bg-2); border-block: 1px solid var(--line); }
+  .setup { display: grid; grid-template-columns: 340px 1fr; gap: 24px; margin-top: 48px; align-items: start; }
+  .setup > div { min-width: 0; }
+  @media (max-width: 860px) { .setup { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 6px; }
+  input[type=text] {
+    width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: #0a0a0a; color: var(--text); font: 500 14px ui-monospace, Menlo, monospace; margin-bottom: 18px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .hint { font-size: 13px; color: var(--muted); margin: -8px 0 18px; }
+  .tabs { display: flex; gap: 6px; padding: 6px; background: #0a0a0a; border: 1px solid var(--line); border-radius: 14px 14px 0 0; border-bottom: 0; }
+  .tab { padding: 8px 14px; border-radius: 9px; border: 0; background: transparent; color: var(--muted); font: 600 13px var(--font-secondary); cursor: pointer; }
+  .tab[aria-selected=true] { background: rgba(255,255,255,.09); color: var(--text); }
+  .codebox { position: relative; background: #07070b; border: 1px solid var(--line); border-radius: 0 0 14px 14px; }
+  pre { margin: 0; padding: 22px; overflow-x: auto; font-size: 13px; line-height: 1.7; color: #d7d7ea; }
+  .copy { position: absolute; top: 12px; right: 12px; }
+  .steps { margin: 20px 0 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+  .steps li { margin-bottom: 6px; }
+
+  .field { display: flex; gap: 8px; align-items: stretch; margin-bottom: 14px; }
+  .field .val { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: #0a0a0a; font: 500 14px ui-monospace, Menlo, monospace; overflow-x: auto; white-space: nowrap; }
+  .note { font-size: 14px; color: var(--muted); margin: 14px 0 0; }
+  .steplist { list-style: none; margin: 0; padding: 0; counter-reset: s; }
+  .steplist li { counter-increment: s; position: relative; padding: 0 0 22px 48px; }
+  .steplist li::before { content: counter(s); position: absolute; left: 0; top: -2px; width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: #000; font: 700 14px var(--font-secondary); display: grid; place-items: center; }
+  .steplist h3 { font: 700 17px var(--font-secondary); margin: 0 0 4px; }
+  .steplist p { margin: 0 0 12px; color: var(--muted); font-size: 15px; }
+
+  .limits { border-left: 3px solid var(--accent); padding: 4px 0 4px 24px; max-width: 760px; }
+  .limits p { color: #c9c9d8; margin: 0 0 14px; }
+  footer { border-top: 1px solid var(--line); padding: 36px 0; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+  footer img { height: 22px; opacity: .85; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav aria-label="Primary">
+      <a href="#top" aria-label="MooPay home"><img src="assets/moopay-logo.png" alt="MooPay"></a>
+      <ul>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#ways">Ways to send</a></li>
+        <li><a href="#setup">Get started</a></li>
+        <li><a href="#know">Good to know</a></li>
+      </ul>
+      <a class="btn sm" href="#setup">Get started</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="hero">
+    <div class="wrap">
+      <span class="pill"><b>●</b> Works inside your AI assistant</span>
+      <h1>Send money<br>to anyone, anywhere</h1>
+      <p class="lede">Just tell your AI who to pay and how much. MooPay sends it to their Bitcoin, Solana or Ethereum wallet. We never hold your money, and the person getting paid doesn't pay any fees.</p>
+      <div class="cta">
+        <a class="btn" href="#setup">Get started</a>
+        <a class="btn ghost" href="#how">See how it works</a>
+      </div>
+
+      <div class="stats" id="stats" hidden>
+        <div><b id="s-vol">$0</b><span>sent so far</span></div>
+        <div><b id="s-pay">0</b><span>payments</span></div>
+        <div><b id="s-usr">0</b><span>people</span></div>
+      </div>
+
+      <div class="stage" aria-hidden="true">
+        <div class="globe"></div>
+        <div class="qcard l"><div class="qlabel">Example · you pay</div><div class="qrow"><span class="qamt">25.00</span><span class="qchip">USDC</span></div></div>
+        <div class="qcard r"><div class="qlabel">Example · they get</div><div class="qrow"><span class="qamt">0.00041</span><span class="qchip">BTC</span></div></div>
+        <div class="qcard c">
+          <div class="qlabel">Example · your payment</div>
+          <div class="qrow"><span class="qamt">100.00</span><span class="qchip">USDC</span></div>
+          <div class="qsep"></div>
+          <div class="qlabel">Sent to</div>
+          <div class="qrow"><span class="qamt" style="font-size:20px">Ethereum · 0x5aAe…eAed</span></div>
+          <div class="qfoot"><span>Their fees: none</span><span>Takes about 30 seconds</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="eyebrow">How it works</div>
+      <h2>Three easy steps</h2>
+      <p class="sub">You don't need to learn anything new. Your AI assistant does the work.</p>
+      <div class="grid g3">
+        <div class="card"><div class="n">1</div><h3>Ask your AI</h3><p>Say who you want to pay, how much, and which network they use. For example: "Send 5 USDC to my friend's Ethereum wallet."</p></div>
+        <div class="card"><div class="n">2</div><h3>Pay from your wallet</h3><p>Your AI gives you a link. Open it, pick USDC or USDT, press Send, and approve in your wallet (Meteor, Nightly or MyNearWallet). MooPay never holds your money.</p></div>
+        <div class="card"><div class="n">3</div><h3>They get paid</h3><p>The money lands in their wallet on Bitcoin, Solana or Ethereum. They don't pay any fees to receive it.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ways" style="padding-top:0">
+    <div class="wrap">
+      <div class="eyebrow">Ways to send</div>
+      <h2>Pick what fits</h2>
+      <div class="grid g2">
+        <div class="card"><h3 style="margin-top:0">Send it now</h3><p>You know where the money should go. Give your AI their wallet address and open the pay link it gives you. This is the simplest way.</p></div>
+        <div class="card"><h3 style="margin-top:0">Send a claim code</h3><p>You don't know their wallet yet. Your AI makes a secret claim code and you share it. They choose where the money goes when they use it.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="setup">
+    <div class="wrap">
+      <div class="eyebrow">Get started</div>
+      <h2>Add MooPay to your AI app</h2>
+      <p class="sub">MooPay works with Claude and other AI apps that let you add tools (this is called MCP). It runs on your own computer.</p>
+
+      <div style="margin-top:48px; max-width: 760px">
+        <ol class="steplist">
+          <li>
+            <h3>Install MooPay</h3>
+            <p>You need Node.js 20 or newer. Open a terminal in the MooPay folder and run this once.</p>
+            <div class="field"><div class="val" id="installCmd">npm install &amp;&amp; npm run build</div><button class="btn ghost sm" type="button" data-copy="installCmd">Copy</button></div>
+          </li>
+          <li>
+            <h3>Tell us where MooPay is</h3>
+            <p>Paste the full path to the MooPay folder on your computer.</p>
+            <input type="text" id="path" value="/home/you/moopay" spellcheck="false" autocomplete="off" aria-label="Path to the MooPay folder">
+          </li>
+          <li>
+            <h3>Add it to your AI app</h3>
+            <div class="tabs" role="tablist" aria-label="App">
+              <button class="tab" role="tab" aria-selected="true" data-tab="claude">Claude Desktop</button>
+              <button class="tab" role="tab" aria-selected="false" data-tab="other">Other apps</button>
+            </div>
+            <div class="codebox" id="panel-claude" style="border-radius:0 0 14px 14px">
+              <div style="padding:20px 22px 4px">
+                <p style="margin:0 0 12px;color:var(--muted);font-size:15px">Open Claude Desktop, go to <strong style="color:var(--text)">Settings → Developer → Edit Config</strong>, and paste this. Then restart Claude.</p>
+              </div>
+              <button class="btn ghost sm copy" id="copy" type="button" style="top:auto;bottom:14px">Copy</button>
+              <pre id="snippet" tabindex="0"></pre>
+            </div>
+            <div class="codebox" id="panel-other" hidden style="padding:22px">
+              <p style="margin:0 0 16px;color:var(--muted);font-size:15px">In your app's tools or MCP settings, add a new local server and fill in these two boxes.</p>
+              <label>Name</label>
+              <div class="field"><div class="val">moopay</div></div>
+              <label>Command</label>
+              <div class="field"><div class="val" id="cmdVal">node</div><button class="btn ghost sm" type="button" data-copy="cmdVal">Copy</button></div>
+              <label>Arguments</label>
+              <div class="field"><div class="val" id="argVal"></div><button class="btn ghost sm" type="button" data-copy="argVal">Copy</button></div>
+              <p class="note">Apps that only accept a web link (some versions of ChatGPT) can't use MooPay yet.</p>
+            </div>
+          </li>
+          <li>
+            <h3>Try it</h3>
+            <p>Ask your AI: "Use MooPay to send 2 USDC to my Solana address." Then open the pay link it gives you and press Send.</p>
+            <p class="note" style="margin-top:0">Optional: for lower fees, get a free key from the <a href="https://partners.near-intents.org/home" rel="noopener" style="color:var(--accent-2)">NEAR Intents partner page</a> and ask your AI app to add it as <code>ONECLICK_JWT</code>.</p>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section id="know">
+    <div class="wrap">
+      <div class="eyebrow">Good to know</div>
+      <h2>Please read this first</h2>
+      <div class="limits" style="margin-top:36px">
+        <p><strong>It's real money.</strong> There is no practice mode. Start with a small amount, like 2 or 3 USDC.</p>
+        <p><strong>Keep claim codes safe.</strong> Anyone who has the code can take the money. If you lose it, the money is lost.</p>
+        <p><strong>Not a perfect privacy tool.</strong> MooPay makes it harder to link the sender and the receiver, but it can't hide everything.</p>
+        <p><strong>Small fees apply.</strong> There is a network fee of about 0.3 USDC on each payment, so tiny payments aren't worth it. Your AI shows you the price before you pay.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <img src="assets/moopay-logo.png" alt="MooPay">
+    <span>Built for the NEAR hackathon</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var pathEl = document.getElementById('path');
+  var out = document.getElementById('snippet');
+  var argVal = document.getElementById('argVal');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+
+  function entry() {
+    var dir = (pathEl.value || '').trim().replace(/\/+$/, '') || '/path/to/moopay';
+    return dir + '/dist/server.js';
+  }
+  function render() {
+    var e = entry();
+    out.textContent = JSON.stringify({ mcpServers: { moopay: { command: 'node', args: [e] } } }, null, 2);
+    argVal.textContent = e;
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      var which = t.getAttribute('data-tab');
+      tabs.forEach(function (x) { x.setAttribute('aria-selected', String(x === t)); });
+      document.getElementById('panel-claude').hidden = which !== 'claude';
+      document.getElementById('panel-other').hidden = which !== 'other';
+    });
+  });
+  pathEl.addEventListener('input', render);
+
+  function copyText(text, btn) {
+    var label = btn.textContent;
+    var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = label; }, 1500); };
+    var fallback = function () {
+      var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Press Ctrl+C'; }
+      document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+  }
+  document.getElementById('copy').addEventListener('click', function () { copyText(out.textContent, this); });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (b) {
+    b.addEventListener('click', function () { copyText(document.getElementById(b.getAttribute('data-copy')).textContent, b); });
+  });
+  render();
+})();
+</script>
+<script>
+(function () {
+  var m = document.querySelector('meta[name="moopay-stats"]');
+  if (!m) return;
+  fetch(m.content).then(function (r) { return r.json(); }).then(function (d) {
+    document.getElementById("s-vol").textContent = "$" + Number(d.volumeUsd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    document.getElementById("s-pay").textContent = Number(d.payments).toLocaleString();
+    document.getElementById("s-usr").textContent = Number(d.users).toLocaleString();
+    document.getElementById("stats").hidden = false;
+  }).catch(function () {});
+})();
+</script>
+</body>
+</html>
