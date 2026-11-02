@@ -17,6 +17,10 @@ export interface PayIntent {
   /** Which wallet the page should offer first, e.g. the user said "send my SOL". */
   fromChain?: string;
   fromSymbol?: string;
+  /** Same chain and same coin: the payer's wallet sends straight to the recipient, no swap and no 1Click. */
+  direct?: boolean;
+  /** The transaction the payer's wallet reported for a direct payment. */
+  sig?: string;
 }
 
 const TTL_MS = 30 * 60 * 1000;
@@ -48,6 +52,17 @@ export class PayHub {
     i.payer = payer;
     i.createdAt = this.now();
   }
+
+  /** Marks a pay link as a straight transfer; the recipient plays the part of the deposit address. */
+  direct(id: string, payer: string): void {
+    const i = this.get(id);
+    i.direct = true;
+    i.depositAddress = i.recipient;
+    i.payer = payer;
+    i.createdAt = this.now();
+  }
+
+  setSig(id: string, sig: string): void { this.get(id).sig = sig; }
 
   private sweep(): void {
     const cutoff = this.now() - TTL_MS;

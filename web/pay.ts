@@ -15,7 +15,7 @@ interface Intent {
   recipient: string; payAmount: string; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string;
 }
 interface Quote {
-  depositAddress: string; depositMemo?: string; chain: string;
+  depositAddress: string; depositMemo?: string; chain: string; direct?: boolean;
   transfer: { kind: "near" | "evm" | "sol"; amount: string; native: boolean; contract: string; receiverId: string; needsRegistration: boolean; wrapDeposit?: string; to: string; chainId?: number };
 }
 type Eip1193 = { request(a: { method: string; params?: unknown[] }): Promise<unknown> };
@@ -235,17 +235,17 @@ async function findSolWallet(): Promise<WsWallet | undefined> {
   return undefined;
 }
 
-type SolSigner = { account: string; send(tx: Uint8Array, bh: string): Promise<void> };
+type SolSigner = { account: string; send(tx: Uint8Array, bh: string): Promise<string | undefined> };
 async function solSigner(): Promise<SolSigner> {
   const ws = await findSolWallet();
   if (ws) {
     const { accounts } = (await ws.features["standard:connect"].connect()) as { accounts: readonly WsAccount[] };
     const acc = accounts[0] ?? ws.accounts[0];
     if (!acc) throw new Error(`${ws.name} did not share an account. Unlock it and try again.`);
-    return { account: acc.address, send: async (tx) => { await ws.features["solana:signAndSendTransaction"].signAndSendTransaction({ account: acc, chain: "solana:mainnet", transaction: tx }); } };
+    return { account: acc.address, send: async (tx) => { const r = (await ws.features["solana:signAndSendTransaction"].signAndSendTransaction({ account: acc, chain: "solana:mainnet", transaction: tx })) as { signature?: Uint8Array }[]; return r?.[0]?.signature ? b58encode(r[0].signature) : undefined; } };
   }
   const ph = w.phantom?.solana ?? w.solana;
-  if (ph) return { account: (await ph.connect()).publicKey.toString(), send: async (tx) => { await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } }); } };
+  if (ph) return { account: (await ph.connect()).publicKey.toString(), send: async (tx) => { const r = (await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } })) as { signature?: string } | undefined; return r?.signature; } };
   const conn = await wcConnect("sol");
   return {
     account: conn.account,
@@ -255,7 +255,7 @@ async function solSigner(): Promise<SolSigner> {
       let signed = res.transaction;
       if (!signed && res.signature) { const t = Uint8Array.from(tx); t.set(b58decode(res.signature), 1); signed = btoa(String.fromCharCode(...t)); }
       if (!signed) throw new Error("no signature");
-      await api(`${base}/sol-send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx: signed }) });
+      return (await api<{ signature: string }>(`${base}/sol-send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx: signed }) })).signature;
     },
   };
 }
@@ -274,15 +274,17 @@ async function sendOther(a: Asset) {
       if (!a.native && BigInt(have.token) < lamports) throw new Error(`This wallet holds ${short(BigInt(have.token))} ${a.symbol} and this payment needs ${short(lamports)}. Add ${a.symbol} to it, or pick another asset.`);
       if (BigInt(have.sol) < (a.native ? lamports : 0n) + fees) throw new Error(`This wallet needs about ${(Number((a.native ? lamports : 0n) + fees) / 1e9).toFixed(4)} SOL for this payment and the network fee, and holds ${(Number(have.sol) / 1e9).toFixed(4)}. Add a little SOL and try again.`);
     }
+    let sig: string | undefined;
     try {
       say("msg", "Approve the payment in your wallet…");
       const bh = await api<{ blockhash: string }>(`${base}/blockhash`);
-      await signer.send(a.native ? solTransfer(signer.account, q.transfer.to, lamports, bh.blockhash) : solTokenTransfer(signer.account, q.transfer.to, a.contract, lamports, a.decimals, bh.blockhash, have?.destHasAccount), bh.blockhash);
+      sig = await signer.send(a.native ? solTransfer(signer.account, q.transfer.to, lamports, bh.blockhash) : solTokenTransfer(signer.account, q.transfer.to, a.contract, lamports, a.decimals, bh.blockhash, have?.destHasAccount), bh.blockhash);
     } catch {
       showManual(q, a);
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
       throw new Error("manual");
     }
+    if (q.direct && sig) await api(`${base}/sol-done`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ signature: sig }) });
     return q;
   }
   const eth = w.ethereum;

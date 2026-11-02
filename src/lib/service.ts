@@ -363,15 +363,17 @@ export class MooPayService {
     return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}) }).id;
   }
 
+  private async solRpc(method: string, params: unknown[]): Promise<any> { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+    const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(8000) });
+    return ((await r.json()) as { result?: unknown }).result;
+  }
+
   /** What a Solana wallet holds, so the page can say what is missing before the wallet shows a failed simulation. */
   async solCheck(owner: string, mint?: string, to?: string): Promise<{ sol: string; token: string; destHasAccount: boolean }> {
     const b58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
     if (!b58.test(owner) || (mint && !b58.test(mint)) || (to && !b58.test(to))) throw new MoopayError("INVALID_INPUT", "that does not look like a Solana address");
-    const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
-    const call = async (method: string, params: unknown[]) => {
-      const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(8000) });
-      return ((await r.json()) as { result?: any }).result; // eslint-disable-line @typescript-eslint/no-explicit-any
-    };
+    const call = (method: string, params: unknown[]) => this.solRpc(method, params);
     const accounts = async (who: string) => ((await call("getTokenAccountsByOwner", [who, { mint }, { encoding: "jsonParsed" }])) ?? { value: [] }).value as { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[];
     const [bal, mine, theirs] = await Promise.all([call("getBalance", [owner]), mint ? accounts(owner) : [], mint && to ? accounts(to) : []]);
     const token = mine.reduce((n, a) => n + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
@@ -446,6 +448,7 @@ export class MooPayService {
   /** Price preview for the page. Dry quote: no deposit address, nothing reserved. */
   async payEstimate(id: string, originAssetId: string) {
     const { i, out, asset } = await this.payInputs(id, originAssetId);
+    if (this.isDirect(i, asset)) return { amountIn: out, payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: { amountOut: out.toString() }, withdrawFee: undefined, timeEstimate: 2 };
     const r = (await this.routeDirect(this.directFor(i, originAssetId, out, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true))) as {
       amountIn: string;
       expectedOutput: { amountOut?: string; minAmountOut?: string };
@@ -455,11 +458,49 @@ export class MooPayService {
     return { amountIn: BigInt(r.amountIn), payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: r.expectedOutput, withdrawFee: r.quote["withdrawFee"], timeEstimate: r.quote["timeEstimate"] };
   }
 
+  private isDirect(i: PayIntent, a: PayAsset): boolean { return a.chain === "sol" && i.destinationChain === "sol" && a.assetId === i.destinationAssetId; }
+
+  /** The page reports the signature of a direct payment; payStatus then checks the chain for it. */
+  solDone(id: string, signature: string): { ok: true } {
+    if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(signature)) throw new MoopayError("INVALID_INPUT", "that does not look like a transaction signature");
+    if (!this.pay.get(id).direct) throw new MoopayError("INVALID_INPUT", "this payment is not a direct transfer");
+    this.pay.setSig(id, signature);
+    return { ok: true };
+  }
+
+  /** A direct payment is delivered once the chain shows the recipient received the amount. Nothing the page says is trusted. */
+  private async directStatus(i: PayIntent) {
+    const base = { depositAddress: i.recipient, recipient: i.recipient, chain: i.destinationChain };
+    if (!i.sig) return { state: "PROCESSING", ...base };
+    const asset = (await this.payAssetsAll()).find((a) => a.assetId === i.destinationAssetId);
+    if (!asset) throw new MoopayError("UNKNOWN_ASSET", "that asset is not offered for payment");
+    const want = await this.receiverUnits(i);
+    const tx = await this.solRpc("getTransaction", [i.sig, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
+    if (!tx) return { state: "PROCESSING", ...base };
+    if (tx.meta?.err) return { state: "FAILED", ...base };
+    let got = 0n;
+    if (asset.native) {
+      const keys = (tx.transaction.message.accountKeys as ({ pubkey?: string } | string)[]).map((k) => (typeof k === "string" ? k : k.pubkey));
+      const n = keys.indexOf(i.recipient);
+      if (n >= 0) got = BigInt(tx.meta.postBalances[n]) - BigInt(tx.meta.preBalances[n]);
+    } else {
+      const sum = (rows: { owner?: string; mint: string; uiTokenAmount: { amount: string } }[] | undefined) => (rows ?? []).filter((r) => r.owner === i.recipient && r.mint === asset.contract).reduce((t, r) => t + BigInt(r.uiTokenAmount.amount), 0n);
+      got = sum(tx.meta.postTokenBalances) - sum(tx.meta.preTokenBalances);
+    }
+    if (got < want) return { state: "FAILED", ...base };
+    this.d.stats?.record(i.sig, Number(i.payAmount), i.payer ?? i.recipient);
+    return { state: "SUCCESS", ...base, txHash: i.sig, explorerUrl: this.explorerUrl("sol", i.sig) };
+  }
+
   /** Creates the real 1Click deposit address and the exact transfer for the user's wallet to sign. */
   async payQuote(id: string, originAssetId: string, refundTo: string) {
     const { i, out, asset } = await this.payInputs(id, originAssetId);
     const okRefund = asset.chain === "near" ? isNearAccountId(refundTo) : asset.chain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(refundTo) : EVM_ADDR.test(refundTo);
     if (!okRefund) throw new MoopayError("INVALID_INPUT", `refundTo must be your ${asset.chain === "near" ? "NEAR account" : asset.chain === "sol" ? "Solana" : "EVM"} address`);
+    if (this.isDirect(i, asset)) { // same chain, same coin: no swap, so no solver wait and no fee
+      this.pay.direct(id, refundTo);
+      return { chain: "sol", direct: true, depositAddress: i.recipient, quoteExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), expectedOutput: { amountOut: out.toString() }, transfer: { kind: "sol" as const, to: i.recipient, amount: out, native: asset.native, contract: asset.contract } };
+    }
     const r = (await this.routeDirect(this.directFor(i, originAssetId, out, refundTo, false))) as {
       depositAddress: string;
       amountIn: string;
@@ -749,6 +790,7 @@ export class MooPayService {
   /** Progress of one pay link. Counts the payment in the public stats once it is delivered. */
   async payStatus(id: string) {
     const i = this.pay.get(id);
+    if (i.direct) return this.directStatus(i);
     if (!i.depositAddress) return { state: "WAITING_FOR_USER" as const, message: "The user has not pressed Send on the pay page yet." };
     const s = (await this.d.oneClick.status(i.depositAddress)) as { status: string; swapDetails?: { destinationChainTxHashes?: { hash: string }[] } };
     const hash = s.swapDetails?.destinationChainTxHashes?.[0]?.hash;
