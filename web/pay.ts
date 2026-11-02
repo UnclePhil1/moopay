@@ -4,6 +4,8 @@ import { setupModal } from "@near-wallet-selector/modal-ui";
 import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
 import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
 import { setupNightly } from "@near-wallet-selector/nightly";
+import { PublicKey, Transaction } from "@solana/web3.js";
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { createAppKit, type AppKit } from "@reown/appkit";
 import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, solana } from "@reown/appkit/networks";
 
@@ -202,6 +204,15 @@ async function wcConnect(chain: string): Promise<Conn> {
   return { account: address, request: (method, params) => provider.request({ method, params }, net.caip) };
 }
 
+/** USDC / USDT on Solana: make sure the receiving token account exists (the payer funds it if not), then transfer. */
+function solTokenTransfer(from: string, to: string, mint: string, amount: bigint, decimals: number, blockhash: string): Uint8Array {
+  const owner = new PublicKey(from), dest = new PublicKey(to), m = new PublicKey(mint);
+  const src = getAssociatedTokenAddressSync(m, owner), dst = getAssociatedTokenAddressSync(m, dest, true);
+  const tx = new Transaction({ feePayer: owner, recentBlockhash: blockhash });
+  tx.add(createAssociatedTokenAccountIdempotentInstruction(owner, dst, dest, m), createTransferCheckedInstruction(src, m, dst, owner, amount, decimals));
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+}
+
 /* Solana wallets announce themselves through the Wallet Standard (Solflare, Phantom, Backpack...). That is how the wallet inside a wallet app's browser is found. */
 interface WsAccount { address: string; chains?: readonly string[] }
 interface WsWallet { name: string; accounts: readonly WsAccount[]; features: Record<string, any> } // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -254,11 +265,11 @@ async function sendOther(a: Asset) {
     say("msg", "Preparing your payment…");
     const q = await getQuote(a.assetId, signer.account);
     $("addr").textContent = q.depositAddress;
-    if (!a.native) { showManual(q, a); $("dlabel").textContent = "Send this from your Solana wallet (USDC and USDT cannot be signed from this page yet)"; throw new Error("manual"); }
     try {
       say("msg", "Approve the payment in your wallet…");
       const bh = await api<{ blockhash: string }>(`${base}/blockhash`);
-      await signer.send(solTransfer(signer.account, q.transfer.to, BigInt(q.transfer.amount), bh.blockhash), bh.blockhash);
+      const lamports = BigInt(q.transfer.amount);
+      await signer.send(a.native ? solTransfer(signer.account, q.transfer.to, lamports, bh.blockhash) : solTokenTransfer(signer.account, q.transfer.to, a.contract, lamports, a.decimals, bh.blockhash), bh.blockhash);
     } catch {
       showManual(q, a);
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
