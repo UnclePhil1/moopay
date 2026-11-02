@@ -241,6 +241,8 @@ const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
 /* cards */
 /** Pay and sign without leaving the chat: the pay page opens as a sheet over it. */
 function openSheet(url) {
+  // Phones: wallet apps open through deep links, which a browser blocks inside a frame (the page goes blank), so the pay page opens as a normal tab there.
+  if (matchMedia("(pointer: coarse)").matches || innerWidth < 700) { if (!window.open(url, "_blank")) location.href = url; return; }
   const close = () => { box.remove(); window.removeEventListener("message", onMsg); };
   const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") setTimeout(close, 2500); };
   const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
