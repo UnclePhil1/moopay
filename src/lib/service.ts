@@ -363,6 +363,21 @@ export class MooPayService {
     return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}) }).id;
   }
 
+  /** What a Solana wallet holds, so the page can say what is missing before the wallet shows a failed simulation. */
+  async solCheck(owner: string, mint?: string, to?: string): Promise<{ sol: string; token: string; destHasAccount: boolean }> {
+    const b58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+    if (!b58.test(owner) || (mint && !b58.test(mint)) || (to && !b58.test(to))) throw new MoopayError("INVALID_INPUT", "that does not look like a Solana address");
+    const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+    const call = async (method: string, params: unknown[]) => {
+      const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(8000) });
+      return ((await r.json()) as { result?: any }).result; // eslint-disable-line @typescript-eslint/no-explicit-any
+    };
+    const accounts = async (who: string) => ((await call("getTokenAccountsByOwner", [who, { mint }, { encoding: "jsonParsed" }])) ?? { value: [] }).value as { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[];
+    const [bal, mine, theirs] = await Promise.all([call("getBalance", [owner]), mint ? accounts(owner) : [], mint && to ? accounts(to) : []]);
+    const token = mine.reduce((n, a) => n + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
+    return { sol: String(bal?.value ?? 0), token: String(token), destHasAccount: theirs.length > 0 };
+  }
+
   /** Sends a transaction the user already signed (WalletConnect wallets sign but do not broadcast). */
   async solSend(txBase64: string): Promise<{ signature: string }> {
     if (!/^[A-Za-z0-9+/=]{100,2000}$/.test(txBase64)) throw new MoopayError("INVALID_INPUT", "that does not look like a signed transaction");

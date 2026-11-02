@@ -205,11 +205,12 @@ async function wcConnect(chain: string): Promise<Conn> {
 }
 
 /** USDC / USDT on Solana: make sure the receiving token account exists (the payer funds it if not), then transfer. */
-function solTokenTransfer(from: string, to: string, mint: string, amount: bigint, decimals: number, blockhash: string): Uint8Array {
+function solTokenTransfer(from: string, to: string, mint: string, amount: bigint, decimals: number, blockhash: string, destHasAccount = false): Uint8Array {
   const owner = new PublicKey(from), dest = new PublicKey(to), m = new PublicKey(mint);
   const src = getAssociatedTokenAddressSync(m, owner), dst = getAssociatedTokenAddressSync(m, dest, true);
   const tx = new Transaction({ feePayer: owner, recentBlockhash: blockhash });
-  tx.add(createAssociatedTokenAccountIdempotentInstruction(owner, dst, dest, m), createTransferCheckedInstruction(src, m, dst, owner, amount, decimals));
+  if (!destHasAccount) tx.add(createAssociatedTokenAccountIdempotentInstruction(owner, dst, dest, m));
+  tx.add(createTransferCheckedInstruction(src, m, dst, owner, amount, decimals));
   return tx.serialize({ requireAllSignatures: false, verifySignatures: false });
 }
 
@@ -265,11 +266,18 @@ async function sendOther(a: Asset) {
     say("msg", "Preparing your payment…");
     const q = await getQuote(a.assetId, signer.account);
     $("addr").textContent = q.depositAddress;
+    const lamports = BigInt(q.transfer.amount);
+    const have = await api<{ sol: string; token: string; destHasAccount: boolean }>(`${base}/sol-check?owner=${signer.account}${a.native ? "" : `&mint=${a.contract}&to=${q.transfer.to}`}`).catch(() => null);
+    if (have) { // say what is missing here instead of letting the wallet show a failed simulation
+      const fees = a.native ? 10_000n : have.destHasAccount ? 20_000n : 2_200_000n; // network fee, plus rent for a new token account
+      const unit = 10 ** a.decimals, short = (n: bigint) => (Number(n) / unit).toLocaleString(undefined, { maximumFractionDigits: 6 });
+      if (!a.native && BigInt(have.token) < lamports) throw new Error(`This wallet holds ${short(BigInt(have.token))} ${a.symbol} and this payment needs ${short(lamports)}. Add ${a.symbol} to it, or pick another asset.`);
+      if (BigInt(have.sol) < (a.native ? lamports : 0n) + fees) throw new Error(`This wallet needs about ${(Number((a.native ? lamports : 0n) + fees) / 1e9).toFixed(4)} SOL for this payment and the network fee, and holds ${(Number(have.sol) / 1e9).toFixed(4)}. Add a little SOL and try again.`);
+    }
     try {
       say("msg", "Approve the payment in your wallet…");
       const bh = await api<{ blockhash: string }>(`${base}/blockhash`);
-      const lamports = BigInt(q.transfer.amount);
-      await signer.send(a.native ? solTransfer(signer.account, q.transfer.to, lamports, bh.blockhash) : solTokenTransfer(signer.account, q.transfer.to, a.contract, lamports, a.decimals, bh.blockhash), bh.blockhash);
+      await signer.send(a.native ? solTransfer(signer.account, q.transfer.to, lamports, bh.blockhash) : solTokenTransfer(signer.account, q.transfer.to, a.contract, lamports, a.decimals, bh.blockhash, have?.destHasAccount), bh.blockhash);
     } catch {
       showManual(q, a);
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
