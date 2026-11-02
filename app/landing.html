@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Xmind:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#0a0a0a; --fg:#fff; --mute:#a3a3a3; --line:#262626; --mono: "Xmind", sans-serif; --sans: "Xmind", sans-serif; }
+  :root { --bg:#0a0a0a; --fg:#f4efe6; --mute:#aaa49a; --line:#262626; --mono: "Xmind", sans-serif; --sans: "Xmind", sans-serif; }
   * { box-sizing:border-box; }
   html, body { height:100%; margin:0; overflow:hidden; background:var(--bg); color:var(--fg); font-family:var(--mono); font-size:13px; -webkit-font-smoothing:antialiased; }
   a { color:inherit; text-decoration:none; }
@@ -25,43 +25,43 @@
   .top nav { display:flex; gap:24px; color:var(--mute); }
   .top nav a:hover { color:var(--fg); }
   .hero { flex:1; display:flex; flex-direction:column; justify-content:center; padding:0 48px; }
-  .tag { align-self:flex-start; background:var(--fg); color:#000; padding:2px 6px; font-size:11px; text-transform:uppercase; }
+  .tag { align-self:flex-start; background:var(--fg); color:#0a0a0a; padding:2px 6px; font-size:11px; text-transform:uppercase; }
   h1 { margin:20px 0 0; font:800 clamp(34px, 5.4vw, 76px)/1 var(--sans); letter-spacing:-.04em; text-transform:uppercase; display:flex; flex-direction:column; align-items:flex-start; }
   h1 span { border:1px solid var(--line); padding:4px 16px 6px; margin-top:-1px; background:var(--bg); }
-  .cta { align-self:flex-start; margin-top:48px; background:var(--fg); color:#000; padding:12px 18px; text-transform:uppercase; border:1px solid var(--fg); transition:background .2s, color .2s; }
-  .cta:hover, .cta:focus-visible { background:#000; color:var(--fg); outline:none; }
+  .cta { align-self:flex-start; margin-top:48px; background:var(--fg); color:#0a0a0a; padding:12px 18px; text-transform:uppercase; border:1px solid var(--fg); transition:background .2s, color .2s; }
+  .cta:hover, .cta:focus-visible { background:#0a0a0a; color:var(--fg); outline:none; }
   .dots { display:flex; justify-content:space-between; padding:0 48px; height:88px; align-items:center; border-top:1px solid var(--line); background:var(--bg); }
   .dots button { width:32px; height:32px; border-radius:50%; border:1px solid var(--line); background:none; color:var(--mute); font:inherit; cursor:pointer; transition:background .2s, color .2s, border-color .2s; }
   .dots button:hover { border-color:var(--fg); color:var(--fg); }
-  .dots button[aria-current="true"] { background:var(--fg); color:#000; border-color:var(--fg); }
+  .dots button[aria-current="true"] { background:var(--fg); color:#0a0a0a; border-color:var(--fg); }
 
-  .right { position:relative; background:#fff; color:#000; }
+  .right { position:relative; background:#f4efe6; color:#0a0a0a; }
   .slide { position:absolute; inset:0; padding:24px 48px 48px; display:flex; flex-direction:column; opacity:0; visibility:hidden; transform:translateY(8px); transition:opacity .45s ease, transform .45s ease, visibility 0s .45s; }
   .slide.on { opacity:1; visibility:visible; transform:none; transition:opacity .45s ease .15s, transform .45s ease .15s, visibility 0s; }
   .art { flex:1; display:grid; place-items:center; }
   .art svg { width:min(300px, 60%); height:auto; overflow:visible; }
-  .art rect { fill:none; stroke:#000; stroke-width:1.2; }
-  .art circle { fill:#000; }
+  .art rect { fill:none; stroke:#0a0a0a; stroke-width:1.2; }
+  .art circle { fill:#0a0a0a; }
   .slide h2 { margin:0 0 16px; font:800 clamp(30px, 4vw, 52px)/1 var(--sans); letter-spacing:-.04em; text-transform:uppercase; }
   .slide p { margin:0; max-width:40ch; font-size:16px; line-height:1.6; }
 
-  .stage { container-type:inline-size; position:relative; overflow:hidden; background:#000; color:#fff; width:min(100%, 560px, calc((100dvh - 340px) * 16 / 9)); aspect-ratio:16/9; font-family:var(--sans); }
+  .stage { container-type:inline-size; position:relative; overflow:hidden; background:#0a0a0a; color:#f4efe6; width:min(100%, 560px, calc((100dvh - 340px) * 16 / 9)); aspect-ratio:16/9; font-family:var(--sans); }
   .stage .ly { position:absolute; inset:0; opacity:0; }
   .stage .mono { font-family:var(--mono); }
-  .stage .mute { color:#a3a3a3; }
+  .stage .mute { color:#aaa49a; }
   .stage .mask { display:block; overflow:hidden; }
   .stage .mask > * { display:block; will-change:transform; }
   .stage .field { position:absolute; left:8cqw; right:8cqw; top:23cqw; height:10cqw; border:1px solid #333; background:#0a0a0a; display:flex; align-items:center; padding:0 3cqw; font:3cqw var(--mono); }
-  .stage .caret { display:inline-block; width:.12em; height:1.1em; background:#fff; margin-left:2px; vertical-align:-.15em; }
-  .stage .btn { position:absolute; right:1.5cqw; top:1.5cqw; width:7cqw; height:7cqw; border-radius:50%; background:#fff; display:grid; place-items:center; }
-  .stage .btn svg { width:3.2cqw; height:3.2cqw; stroke:#000; fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; }
+  .stage .caret { display:inline-block; width:.12em; height:1.1em; background:#f4efe6; margin-left:2px; vertical-align:-.15em; }
+  .stage .btn { position:absolute; right:1.5cqw; top:1.5cqw; width:7cqw; height:7cqw; border-radius:50%; background:#f4efe6; display:grid; place-items:center; }
+  .stage .btn svg { width:3.2cqw; height:3.2cqw; stroke:#0a0a0a; fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; }
   .stage .cur { position:absolute; left:0; top:0; width:4cqw; height:4cqw; }
-  .stage .bub { position:absolute; right:8cqw; top:6cqw; background:#fff; color:#000; padding:1.8cqw 3cqw; font:600 2.8cqw var(--sans); border-radius:3cqw 3cqw .6cqw 3cqw; }
+  .stage .bub { position:absolute; right:8cqw; top:6cqw; background:#f4efe6; color:#0a0a0a; padding:1.8cqw 3cqw; font:600 2.8cqw var(--sans); border-radius:3cqw 3cqw .6cqw 3cqw; }
   .stage .st { position:absolute; left:8cqw; display:flex; align-items:center; gap:2cqw; font:2.7cqw var(--sans); }
-  .stage .st i { width:3.4cqw; height:3.4cqw; border-radius:50%; border:1px solid #fff; display:grid; place-items:center; font:700 2cqw var(--sans); font-style:normal; }
-  .stage .card { position:absolute; left:8cqw; right:8cqw; top:31cqw; height:19cqw; border:1px solid #fff; padding:2.6cqw 3.4cqw; display:flex; justify-content:space-between; align-items:center; }
+  .stage .st i { width:3.4cqw; height:3.4cqw; border-radius:50%; border:1px solid #f4efe6; display:grid; place-items:center; font:700 2cqw var(--sans); font-style:normal; }
+  .stage .card { position:absolute; left:8cqw; right:8cqw; top:31cqw; height:19cqw; border:1px solid #f4efe6; padding:2.6cqw 3.4cqw; display:flex; justify-content:space-between; align-items:center; }
   .stage .card b { display:block; font:800 7cqw/1 var(--sans); letter-spacing:-.04em; margin:1.2cqw 0; }
-  .stage .card small { font:2.2cqw var(--mono); color:#a3a3a3; text-transform:uppercase; letter-spacing:.06em; }
+  .stage .card small { font:2.2cqw var(--mono); color:#aaa49a; text-transform:uppercase; letter-spacing:.06em; }
   .stage .line { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2cqw; font:800 9cqw/1.1 var(--sans); letter-spacing:-.045em; text-align:center; opacity:0; }
   .stage .logo4 { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2.4cqw; }
   .hint { position:absolute; bottom:16px; right:48px; font-size:11px; color:#737373; }
@@ -85,7 +85,7 @@
 <main class="app" id="app">
   <section class="left">
     <div class="top">
-      <a class="logo" href="/?home" aria-label="Moo Pay"><svg viewBox="0 0 36 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#fff" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#fff" stroke-width="4"/></svg>Moo Pay</a>
+      <a class="logo" href="/?home" aria-label="Moo Pay"><svg viewBox="0 0 36 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/></svg>Moo Pay</a>
       <nav><a href="/guide">Docs</a><a href="/agent">Connect</a></nav>
     </div>
     <div class="hero">
@@ -113,15 +113,15 @@
   const FEATURES = ["Send to any chain", "Private claims", "Spending rules", "Agent keys", "Stake with Rhea", "No signups"];
   const STAGE = '<div class="stage" id="stage" role="img" aria-label="Typing a payment, the agent sending it, then what MooPay can do">'
     + '<div class="ly" id="lA"><div class="field"><span id="typed"></span><span class="caret" id="caret"></span><div class="btn" id="sendBtn">' + ARROW + '</div></div>'
-    + '<svg class="cur" id="cur" viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L10 19z" fill="#fff" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg></div>'
+    + '<svg class="cur" id="cur" viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L10 19z" fill="#f4efe6" stroke="#0a0a0a" stroke-width="1.5" stroke-linejoin="round"/></svg></div>'
     + '<div class="ly" id="lB"><div class="bub">send 1 NEAR to unclephil.near</div>'
     + '<div class="st" id="s1" style="top:19cqw"><i id="i1"></i><span>Finding the route</span></div>'
     + '<div class="st" id="s2" style="top:25cqw"><i id="i2"></i><span>Sending 1 NEAR</span></div>'
     + '<div class="card" id="card"><div><small>Sent</small><b>1 NEAR</b><span class="mute" style="font-size:2.6cqw">to unclephil.near</span></div><div class="mono" style="font-size:2.6cqw;text-align:right">Landed<br><span style="font-size:6cqw;line-height:1.3">&#10003;</span></div></div></div>'
     + '<div class="ly" id="lC">' + FEATURES.map((f, i) => '<div class="line"><span>' + f + '</span></div>').join("") + '</div>'
-    + '<div class="ly" id="lD"><div class="logo4"><svg id="rings" viewBox="0 0 36 20" style="width:22cqw"><circle cx="10" cy="10" r="8" fill="none" stroke="#fff" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#fff" stroke-width="4"/></svg>'
+    + '<div class="ly" id="lD"><div class="logo4"><svg id="rings" viewBox="0 0 36 20" style="width:22cqw"><circle cx="10" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/></svg>'
     + '<span class="mask"><span id="word" style="font:800 11cqw/1.3 var(--sans);letter-spacing:-.04em">Moo Pay</span></span>'
-    + '<span class="mask"><span id="tag" style="font-size:4cqw;color:#d4d4d4">Money that moves in private</span></span></div></div></div>';
+    + '<span class="mask"><span id="tag" style="font-size:4cqw;color:#d9d3c7">Money that moves in private</span></span></div></div></div>';
   const art = (s) => { const u = 60; return '<svg viewBox="0 0 ' + 3 * u + " " + 3 * u + '" aria-hidden="true">' + s.c.map(([x, y]) => '<rect x="' + x * u + '" y="' + y * u + '" width="' + u + '" height="' + u + '"/>').join("") + s.d.map(([x, y]) => '<circle cx="' + x * u + '" cy="' + y * u + '" r="3"/>').join("") + "</svg>"; };
   const right = document.getElementById("right"), dots = document.getElementById("dots");
   SLIDES.forEach((s, i) => {
@@ -168,7 +168,7 @@
     const u = (el, a) => { el.style.opacity = ease(q(t, a, a + .4)); el.style.transform = "translateY(" + (1 - ease(q(t, a, a + .4))) * 1.5 + "cqw)"; };
     u($("s1"), 3.8); u($("s2"), 4.9); u($("card"), 5.9);
     $("i1").textContent = t > 4.7 ? "\u2713" : ""; $("i2").textContent = t > 5.7 ? "\u2713" : "";
-    $("i1").style.borderTopColor = t > 4.7 ? "#fff" : "#444"; $("i2").style.borderTopColor = t > 5.7 ? "#fff" : "#444";
+    $("i1").style.borderTopColor = t > 4.7 ? "#f4efe6" : "#444"; $("i2").style.borderTopColor = t > 5.7 ? "#f4efe6" : "#444";
     $("i1").style.opacity = t > 4.7 ? 1 : .5 + .5 * Math.sin(t * 8); $("i2").style.opacity = t > 5.7 ? 1 : .5 + .5 * Math.sin(t * 8);
     $("lC").style.opacity = win(t, 7.5, 7.6, 15.4, 15.5);
     stage.querySelectorAll(".line").forEach((l, i) => { const a = 7.7 + i * 1.3; l.style.opacity = win(t, a, a + .35, a + .95, a + 1.3); });
