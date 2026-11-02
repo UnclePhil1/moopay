@@ -121,7 +121,13 @@ export class OneClick {
 
   async tokens(): Promise<Token[]> {
     if (this.tokenCache && this.now() - this.tokenCache.at < TOKENS_TTL_MS) return this.tokenCache.tokens;
-    const body = await this.request("/v0/tokens", { method: "GET" }, "QUOTE_FAILED");
+    let body: unknown;
+    try {
+      body = await this.request("/v0/tokens", { method: "GET" }, "QUOTE_FAILED");
+    } catch (e) {
+      if (this.tokenCache) return this.tokenCache.tokens; // 1Click is down: the last list still names the same assets
+      throw e;
+    }
     const parsed = z.array(TokenSchema).safeParse(body);
     if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "1Click returned an unexpected /v0/tokens payload");
     this.tokenCache = { at: this.now(), tokens: parsed.data };
