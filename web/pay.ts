@@ -182,7 +182,7 @@ async function wcConnect(chain: string): Promise<Conn> {
     // The wallets people actually use, instead of Reown's full catalogue. Wallets installed in this browser always show first.
     includeWalletIds: WALLET_IDS, allWallets: "HIDE", enableWalletGuide: false,
     // Where the wallet app sends the user back to after approving.
-    metadata: { name: "MooPay", description: "Private payments", url: location.origin, icons: [`${location.origin}/p/assets/favicon.png`], redirect: { universal: location.href.split("#")[0]! } },
+    metadata: { name: "MooPay", description: "Private payments", url: location.origin, icons: [`${location.origin}/p/assets/favicon.png`], redirect: { universal: location.href.split("#")[0]! } } as never,
     features: { analytics: false, email: false, socials: false, onramp: false, swaps: false },
   });
   const k = kit;
@@ -202,29 +202,63 @@ async function wcConnect(chain: string): Promise<Conn> {
   return { account: address, request: (method, params) => provider.request({ method, params }, net.caip) };
 }
 
+/* Solana wallets announce themselves through the Wallet Standard (Solflare, Phantom, Backpack...). That is how the wallet inside a wallet app's browser is found. */
+interface WsAccount { address: string; chains?: readonly string[] }
+interface WsWallet { name: string; accounts: readonly WsAccount[]; features: Record<string, any> } // eslint-disable-line @typescript-eslint/no-explicit-any
+const wsWallets: WsWallet[] = [];
+{
+  const api = { register: (...ws: WsWallet[]) => { for (const x of ws) if (!wsWallets.includes(x)) wsWallets.push(x); return () => undefined; } };
+  window.addEventListener("wallet-standard:register-wallet", (e) => (e as CustomEvent<(a: typeof api) => void>).detail(api));
+  window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: api }));
+}
+const canSend = (x: WsWallet) => Boolean(x.features["standard:connect"] && x.features["solana:signAndSendTransaction"]);
+/** Injected wallets can appear a moment after the page loads, so look for a short while before giving up. */
+async function findSolWallet(): Promise<WsWallet | undefined> {
+  for (let i = 0; i < 12; i++) {
+    const hit = wsWallets.find(canSend);
+    if (hit) return hit;
+    window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: { register: (...ws: WsWallet[]) => { for (const x of ws) if (!wsWallets.includes(x)) wsWallets.push(x); return () => undefined; } } }));
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return undefined;
+}
+
+type SolSigner = { account: string; send(tx: Uint8Array, bh: string): Promise<void> };
+async function solSigner(): Promise<SolSigner> {
+  const ws = await findSolWallet();
+  if (ws) {
+    const { accounts } = (await ws.features["standard:connect"].connect()) as { accounts: readonly WsAccount[] };
+    const acc = accounts[0] ?? ws.accounts[0];
+    if (!acc) throw new Error(`${ws.name} did not share an account. Unlock it and try again.`);
+    return { account: acc.address, send: async (tx) => { await ws.features["solana:signAndSendTransaction"].signAndSendTransaction({ account: acc, chain: "solana:mainnet", transaction: tx }); } };
+  }
+  const ph = w.phantom?.solana ?? w.solana;
+  if (ph) return { account: (await ph.connect()).publicKey.toString(), send: async (tx) => { await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } }); } };
+  const conn = await wcConnect("sol");
+  return {
+    account: conn.account,
+    send: async (tx) => {
+      // WalletConnect wallets sign and hand back; we put the signature in and send it through the server.
+      const res = (await conn.request("solana_signTransaction", { transaction: btoa(String.fromCharCode(...tx)), pubkey: conn.account })) as { signature?: string; transaction?: string };
+      let signed = res.transaction;
+      if (!signed && res.signature) { const t = Uint8Array.from(tx); t.set(b58decode(res.signature), 1); signed = btoa(String.fromCharCode(...t)); }
+      if (!signed) throw new Error("no signature");
+      await api(`${base}/sol-send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx: signed }) });
+    },
+  };
+}
+
 async function sendOther(a: Asset) {
   if (a.chain === "sol") {
-    const ph = w.phantom?.solana ?? w.solana;
-    const conn: Conn = ph
-      ? { account: (await ph.connect()).publicKey.toString(), request: (method, params) => ph.request({ method, params }) }
-      : await wcConnect("sol");
+    const signer = await solSigner();
     say("msg", "Preparing your payment…");
-    const q = await getQuote(a.assetId, conn.account);
+    const q = await getQuote(a.assetId, signer.account);
     $("addr").textContent = q.depositAddress;
     if (!a.native) { showManual(q, a); $("dlabel").textContent = "Send this from your Solana wallet (USDC and USDT cannot be signed from this page yet)"; throw new Error("manual"); }
     try {
       say("msg", "Approve the payment in your wallet…");
       const bh = await api<{ blockhash: string }>(`${base}/blockhash`);
-      const tx = solTransfer(conn.account, q.transfer.to, BigInt(q.transfer.amount), bh.blockhash);
-      if (ph) await conn.request("signAndSendTransaction", { message: b58encode(tx) });
-      else {
-        // WalletConnect wallets sign and hand back; we put the signature in and send it through the server.
-        const res = (await conn.request("solana_signTransaction", { transaction: btoa(String.fromCharCode(...tx)), pubkey: conn.account })) as { signature?: string; transaction?: string };
-        let signed = res.transaction;
-        if (!signed && res.signature) { const t = Uint8Array.from(tx); t.set(b58decode(res.signature), 1); signed = btoa(String.fromCharCode(...t)); }
-        if (!signed) throw new Error("no signature");
-        await api(`${base}/sol-send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx: signed }) });
-      }
+      await signer.send(solTransfer(signer.account, q.transfer.to, BigInt(q.transfer.amount), bh.blockhash), bh.blockhash);
     } catch {
       showManual(q, a);
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
