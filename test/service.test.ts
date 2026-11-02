@@ -191,7 +191,7 @@ test("pay link: needs HTTP prefix; page API builds the exact transfer the wallet
   assert.ok(view.assets.some((a) => a.chain === "sol" && a.native), "other chains are offered too");
 
   const est = await ctx.service.payEstimate(id, USDC);
-  assert.equal(est.amountIn, 2500000n);
+  assert.equal(est.amountIn, 2525000n, "the payer sends the amount plus fees");
   assert.equal(ctx.oc.quotes.at(-1)?.dry, true);
 
   await assert.rejects(ctx.service.payQuote(id, USDC, "not an account!"), code("INVALID_INPUT"));
@@ -199,8 +199,9 @@ test("pay link: needs HTTP prefix; page API builds the exact transfer the wallet
   const q = await ctx.service.payQuote(id, USDC, "me.near");
   assert.equal(ctx.oc.quotes.at(-1)?.dry, false);
   assert.equal(ctx.oc.quotes.at(-1)?.refundTo, "me.near");
-  assert.equal(ctx.oc.quotes.at(-1)?.amount, "2500000");
-  assert.equal(q.transfer.amount, 2500000n);
+  assert.equal(ctx.oc.quotes.at(-1)?.amount, "2500000", "the receiver gets the whole amount");
+  assert.equal(ctx.oc.quotes.at(-1)?.swapType, "EXACT_OUTPUT");
+  assert.equal(q.transfer.amount, 2525000n);
   assert.equal(q.transfer.receiverId, q.depositAddress);
   assert.equal(q.transfer.needsRegistration, true);
   ctx.near.registered.add("dep-2");
@@ -208,13 +209,13 @@ test("pay link: needs HTTP prefix; page API builds the exact transfer the wallet
   assert.equal(ctx.transfers.length, 0, "MooPay signs nothing");
   assert.equal(q.transfer.native, false);
 
-  // Plain NEAR: dollars are converted at the listed price (fake: $5), rounded up; unregistered sender wraps extra for storage.
+  // Plain NEAR: the quote decides what is sent (fees on top); an unregistered sender wraps extra for storage.
   const near = await ctx.service.payQuote(id, "nep141:wrap.near", "me.near");
-  assert.equal(near.transfer.amount, 500000000000000000000000n); // $2.50 / $5 = 0.5 NEAR
+  assert.equal(near.transfer.amount, 2525000n);
   assert.equal(near.transfer.native, true);
-  assert.equal(near.transfer.wrapDeposit, 500000000000000000000000n + 1250000000000000000000n);
+  assert.equal(near.transfer.wrapDeposit, 2525000n + 1250000000000000000000n);
   ctx.near.registered.add("me.near");
-  assert.equal((await ctx.service.payQuote(id, "nep141:wrap.near", "me.near")).transfer.wrapDeposit, 500000000000000000000000n);
+  assert.equal((await ctx.service.payQuote(id, "nep141:wrap.near", "me.near")).transfer.wrapDeposit, 2525000n);
   assert.equal((await ctx.service.payEstimate(id, "nep141:wrap.near")).paySymbol, "NEAR");
   await assert.rejects(ctx.service.payIntentView("nope-nope"), code("NOTE_NOT_FOUND"));
 });

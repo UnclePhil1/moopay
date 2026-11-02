@@ -4,11 +4,13 @@ import { setupModal } from "@near-wallet-selector/modal-ui";
 import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
 import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
 import { setupNightly } from "@near-wallet-selector/nightly";
+import { createAppKit, type AppKit } from "@reown/appkit";
+import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, solana } from "@reown/appkit/networks";
 
 interface Asset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; chain: string; chainId?: number }
 interface Intent {
   destinationChain: string; destinationSymbol: string; destinationDecimals: number;
-  recipient: string; payAmount: string; assets: Asset[]; fromChain?: string; fromSymbol?: string;
+  recipient: string; payAmount: string; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string;
 }
 interface Quote {
   depositAddress: string; depositMemo?: string; chain: string;
@@ -25,6 +27,10 @@ const base = isPublic ? `/papi/${id}` : `/api/${parts[2]}/intent/${id}`;
 const $ = <T extends HTMLElement>(i: string) => document.getElementById(i) as T;
 
 const CHAINS: Record<string, string> = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR", base: "Base", arb: "Arbitrum", op: "Optimism", pol: "Polygon", bsc: "BNB Chain", avax: "Avalanche" };
+const WC_NETS: Record<string, { net: unknown; caip: string }> = {
+  eth: { net: mainnet, caip: "eip155:1" }, base: { net: baseNet, caip: "eip155:8453" }, arb: { net: arbitrum, caip: "eip155:42161" }, op: { net: optimism, caip: "eip155:10" },
+  pol: { net: polygon, caip: "eip155:137" }, bsc: { net: bsc, caip: "eip155:56" }, avax: { net: avalanche, caip: "eip155:43114" }, sol: { net: solana, caip: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
+};
 const chainName = (c: string) => CHAINS[c] ?? c.toUpperCase();
 
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -158,22 +164,57 @@ function showManual(q: Quote, a: Asset) {
   $("exactrow").classList.remove("hidden");
 }
 
+/** Any wallet on a phone or desktop, picked in a WalletConnect modal that opens the wallet app to approve. */
+type Conn = { account: string; request: (method: string, params: unknown) => Promise<unknown> };
+let kit: AppKit | undefined;
+async function wcConnect(chain: string): Promise<Conn> {
+  if (!intent.wcProjectId) throw new Error("No wallet found in this browser, and wallet connections are not set up on this server yet. Use the deposit address.");
+  const net = WC_NETS[chain]!;
+  kit ??= createAppKit({
+    projectId: intent.wcProjectId, networks: [mainnet, baseNet, arbitrum, optimism, polygon, bsc, avalanche, solana], themeMode: "dark",
+    metadata: { name: "MooPay", description: "Private payments", url: location.origin, icons: [`${location.origin}/p/assets/favicon.png`] },
+    features: { analytics: false, email: false, socials: false, onramp: false, swaps: false },
+  });
+  const k = kit;
+  await k.switchNetwork(net.net as never);
+  const ns = chain === "sol" ? "solana" : "eip155";
+  if (!k.getAddress(ns)) {
+    await new Promise<void>((resolve, reject) => {
+      const done = (fn: () => void) => { offAcc(); offState(); fn(); };
+      const offAcc = k.subscribeAccount((acc) => { if (acc.isConnected && acc.address) done(resolve); }, ns);
+      const offState = k.subscribeState((st) => { if (!st.open && !k.getAddress(ns)) setTimeout(() => { if (!k.getAddress(ns)) done(() => reject(new Error("Wallet connection was cancelled."))); }, 600); });
+      void k.open();
+    });
+  }
+  const address = k.getAddress(ns);
+  const provider = k.getProvider(ns) as { request(a: { method: string; params: unknown }, chain?: string): Promise<unknown> } | undefined;
+  if (!address || !provider) throw new Error("Your wallet did not connect. Try again.");
+  return { account: address, request: (method, params) => provider.request({ method, params }, net.caip) };
+}
+
 async function sendOther(a: Asset) {
-  let account: string;
-  let hash: unknown;
   if (a.chain === "sol") {
     const ph = w.phantom?.solana ?? w.solana;
-    if (!ph) throw new Error("No Solana wallet found in this browser. Open this page in Phantom, or use the deposit address.");
-    account = (await ph.connect()).publicKey.toString();
+    const conn: Conn = ph
+      ? { account: (await ph.connect()).publicKey.toString(), request: (method, params) => ph.request({ method, params }) }
+      : await wcConnect("sol");
     say("msg", "Preparing your payment…");
-    const q = await getQuote(a.assetId, account);
+    const q = await getQuote(a.assetId, conn.account);
     $("addr").textContent = q.depositAddress;
     if (!a.native) { showManual(q, a); $("dlabel").textContent = "Send this from your Solana wallet (USDC and USDT cannot be signed from this page yet)"; throw new Error("manual"); }
     try {
       say("msg", "Approve the payment in your wallet…");
       const bh = await api<{ blockhash: string }>(`${base}/blockhash`);
-      const tx = solTransfer(account, q.transfer.to, BigInt(q.transfer.amount), bh.blockhash);
-      hash = await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } });
+      const tx = solTransfer(conn.account, q.transfer.to, BigInt(q.transfer.amount), bh.blockhash);
+      if (ph) await conn.request("signAndSendTransaction", { message: b58encode(tx) });
+      else {
+        // WalletConnect wallets sign and hand back; we put the signature in and send it through the server.
+        const res = (await conn.request("solana_signTransaction", { transaction: btoa(String.fromCharCode(...tx)), pubkey: conn.account })) as { signature?: string; transaction?: string };
+        let signed = res.transaction;
+        if (!signed && res.signature) { const t = Uint8Array.from(tx); t.set(b58decode(res.signature), 1); signed = btoa(String.fromCharCode(...t)); }
+        if (!signed) throw new Error("no signature");
+        await api(`${base}/sol-send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx: signed }) });
+      }
     } catch {
       showManual(q, a);
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
@@ -182,20 +223,22 @@ async function sendOther(a: Asset) {
     return q;
   }
   const eth = w.ethereum;
-  if (!eth) throw new Error("No wallet found in this browser. Open this page in your wallet's browser, or use the deposit address.");
-  account = ((await eth.request({ method: "eth_requestAccounts" })) as string[])[0]!;
-  if (a.chainId) await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x" + a.chainId.toString(16) }] });
+  let conn: Conn;
+  if (eth) {
+    const account = ((await eth.request({ method: "eth_requestAccounts" })) as string[])[0]!;
+    if (a.chainId) await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x" + a.chainId.toString(16) }] });
+    conn = { account, request: (method, params) => eth.request({ method, params: params as unknown[] }) };
+  } else conn = await wcConnect(a.chain);
   say("msg", "Preparing your payment…");
-  const q = await getQuote(a.assetId, account);
+  const q = await getQuote(a.assetId, conn.account);
   $("addr").textContent = q.depositAddress;
   const hex = (n: bigint) => "0x" + n.toString(16);
   const pad = (h: string) => h.replace(/^0x/, "").toLowerCase().padStart(64, "0");
   const amount = BigInt(q.transfer.amount);
-  const tx = a.native ? { from: account, to: q.transfer.to, value: hex(amount) } : { from: account, to: a.contract, data: "0xa9059cbb" + pad(q.transfer.to) + pad(hex(amount)) };
+  const tx = a.native ? { from: conn.account, to: q.transfer.to, value: hex(amount) } : { from: conn.account, to: a.contract, data: "0xa9059cbb" + pad(q.transfer.to) + pad(hex(amount)) };
   say("msg", "Approve the payment in your wallet…");
-  try { hash = await eth.request({ method: "eth_sendTransaction", params: [tx] }); }
+  try { await conn.request("eth_sendTransaction", [tx]); }
   catch { showManual(q, a); $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`; throw new Error("manual"); }
-  void hash;
   return q;
 }
 
@@ -286,7 +329,7 @@ async function main() {
     const near = ch.value === "near";
     $("manual").classList.toggle("hidden", near);
     $("refundbox").classList.add("hidden");
-    $("send").textContent = near ? "Send" : `Connect ${chainName(ch.value)} wallet and send`;
+    $("send").textContent = "Make transfer";
   };
   if (intent.fromChain && chains.includes(intent.fromChain)) ch.value = intent.fromChain;
   fillAssets();

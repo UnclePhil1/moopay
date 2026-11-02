@@ -363,6 +363,16 @@ export class MooPayService {
     return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}) }).id;
   }
 
+  /** Sends a transaction the user already signed (WalletConnect wallets sign but do not broadcast). */
+  async solSend(txBase64: string): Promise<{ signature: string }> {
+    if (!/^[A-Za-z0-9+/=]{100,2000}$/.test(txBase64)) throw new MoopayError("INVALID_INPUT", "that does not look like a signed transaction");
+    const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+    const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [txBase64, { encoding: "base64" }] }), signal: AbortSignal.timeout(10000) });
+    const j = (await r.json()) as { result?: string; error?: { message?: string } };
+    if (!j.result) throw new MoopayError("QUOTE_FAILED", `Solana did not accept the transaction: ${j.error?.message ?? "unknown error"}`);
+    return { signature: j.result };
+  }
+
   /** The newest Solana blockhash, fetched here because public RPCs often refuse browsers. */
   async solBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
     const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
@@ -386,47 +396,63 @@ export class MooPayService {
       recipient: i.recipient,
       payAmount: i.payAmount,
       assets: await this.payAssetsAll(),
+      // Public id of this server's WalletConnect project; lets phones pick any wallet without opening this page inside one.
+      ...(process.env["WALLETCONNECT_PROJECT_ID"] ? { wcProjectId: process.env["WALLETCONNECT_PROJECT_ID"] } : {}),
       ...(i.fromChain ? { fromChain: i.fromChain } : {}),
       ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
     };
   }
 
-  private async payInputs(id: string, originAssetId: string): Promise<{ i: PayIntent; amount: bigint; asset: PayAsset }> {
+  /** What the receiver gets, in their asset's smallest units: the dollar amount, whole. Fees are added to what the payer sends. */
+  private async receiverUnits(i: PayIntent): Promise<bigint> {
+    const t = await this.d.oneClick.findToken(i.destinationAssetId);
+    if (!t) throw new MoopayError("UNKNOWN_ASSET", "destinationAssetId is not listed by 1Click /v0/tokens");
+    if (/^US(DC|DT)$/i.test(t.symbol)) return parseDecimal(i.payAmount, t.decimals);
+    if (!t.price || t.price <= 0) throw new MoopayError("QUOTE_FAILED", `no price for ${t.symbol} right now`);
+    const usdMicro = parseDecimal(i.payAmount, 6);
+    const priceMicro = BigInt(Math.round(t.price * 1e6));
+    return (usdMicro * 10n ** BigInt(t.decimals) + priceMicro - 1n) / priceMicro;
+  }
+
+  private async payInputs(id: string, originAssetId: string): Promise<{ i: PayIntent; out: bigint; asset: PayAsset }> {
     const i = this.pay.get(id);
     const asset = (await this.payAssetsAll()).find((a) => a.assetId === originAssetId);
     if (!asset) throw new MoopayError("INVALID_INPUT", "that asset is not offered for payment");
-    return { i, amount: payUnits(i.payAmount, asset), asset };
+    return { i, out: await this.receiverUnits(i), asset };
   }
 
   private directFor(i: PayIntent, originAssetId: string, amount: bigint, refundTo: string, dryRun: boolean): DirectInput {
     return {
-      originAssetId, amount: amount.toString(), refundTo, destinationChain: i.destinationChain as DirectInput["destinationChain"],
+      originAssetId, amount: amount.toString(), refundTo, exactOutput: true, destinationChain: i.destinationChain as DirectInput["destinationChain"],
       destinationAssetId: i.destinationAssetId, recipient: i.recipient, slippageBps: i.slippageBps, dryRun,
     };
   }
 
   /** Price preview for the page. Dry quote: no deposit address, nothing reserved. */
   async payEstimate(id: string, originAssetId: string) {
-    const { i, amount, asset } = await this.payInputs(id, originAssetId);
-    const r = (await this.routeDirect(this.directFor(i, originAssetId, amount, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true))) as {
+    const { i, out, asset } = await this.payInputs(id, originAssetId);
+    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true))) as {
+      amountIn: string;
       expectedOutput: { amountOut?: string; minAmountOut?: string };
       fees: Record<string, unknown>;
       quote: Record<string, unknown>;
     };
-    return { amountIn: amount, payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: r.expectedOutput, withdrawFee: r.quote["withdrawFee"], timeEstimate: r.quote["timeEstimate"] };
+    return { amountIn: BigInt(r.amountIn), payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: r.expectedOutput, withdrawFee: r.quote["withdrawFee"], timeEstimate: r.quote["timeEstimate"] };
   }
 
   /** Creates the real 1Click deposit address and the exact transfer for the user's wallet to sign. */
   async payQuote(id: string, originAssetId: string, refundTo: string) {
-    const { i, amount, asset } = await this.payInputs(id, originAssetId);
+    const { i, out, asset } = await this.payInputs(id, originAssetId);
     const okRefund = asset.chain === "near" ? isNearAccountId(refundTo) : asset.chain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(refundTo) : EVM_ADDR.test(refundTo);
     if (!okRefund) throw new MoopayError("INVALID_INPUT", `refundTo must be your ${asset.chain === "near" ? "NEAR account" : asset.chain === "sol" ? "Solana" : "EVM"} address`);
-    const r = (await this.routeDirect(this.directFor(i, originAssetId, amount, refundTo, false))) as {
+    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, refundTo, false))) as {
       depositAddress: string;
+      amountIn: string;
       depositMemo?: string;
       quoteExpiresAt: string;
       expectedOutput: { amountOut?: string; minAmountOut?: string };
     };
+    const amount = BigInt(r.amountIn);
     this.pay.attach(id, r.depositAddress, refundTo);
     if (asset.chain !== "near") {
       return {
@@ -457,9 +483,9 @@ export class MooPayService {
   }
 
 
-  private quoteBase(input: CommonInput, originAsset: string, amount: bigint, refundTo: string): Omit<QuoteRequest, "dry"> {
+  private quoteBase(input: CommonInput, originAsset: string, amount: bigint, refundTo: string, exactOutput = false): Omit<QuoteRequest, "dry"> {
     return {
-      swapType: "EXACT_INPUT",
+      swapType: exactOutput ? "EXACT_OUTPUT" : "EXACT_INPUT",
       slippageTolerance: input.slippageBps,
       originAsset,
       depositType: "ORIGIN_CHAIN",
@@ -487,7 +513,7 @@ export class MooPayService {
     const origin = await this.d.oneClick.findToken(input.originAssetId);
     if (!origin) throw new MoopayError("UNKNOWN_ASSET", "originAssetId is not listed by 1Click /v0/tokens");
     const amount = BigInt(input.amount);
-    const base = this.quoteBase(input, input.originAssetId, amount, input.refundTo);
+    const base = this.quoteBase(input, input.originAssetId, amount, input.refundTo, input.exactOutput);
     const costs = this.fees("the sender's own wallet (MooPay holds no funds and signs nothing in DIRECT mode)");
 
     if (input.dryRun) {
@@ -496,6 +522,7 @@ export class MooPayService {
         mode: "direct" as const,
         dryRun: true,
         ledgerChanged: false,
+        amountIn: q.quote.amountIn,
         quote: q.quote,
         expectedOutput: { amountOut: q.quote.amountOut, minAmountOut: q.quote.minAmountOut },
         fees: { ...costs, slippageBps: input.slippageBps, amountInUsd: q.quote.amountInUsd, amountOutUsd: q.quote.amountOutUsd, withdrawFee: q.quote["withdrawFee"], refundFee: q.quote["refundFee"] },
@@ -512,7 +539,8 @@ export class MooPayService {
       dryRun: false,
       depositAddress,
       ...(q.quote.depositMemo ? { depositMemo: q.quote.depositMemo } : {}),
-      pay: { assetId: input.originAssetId, chain: origin.blockchain, amount },
+      amountIn: q.quote.amountIn,
+      pay: { assetId: input.originAssetId, chain: origin.blockchain, amount: input.exactOutput ? BigInt(q.quote.amountIn ?? input.amount) : amount },
       quoteExpiresAt: q.quote.deadline ?? base.deadline,
       expectedOutput: { amountOut: q.quote.amountOut, minAmountOut: q.quote.minAmountOut },
       fees: { ...costs, slippageBps: input.slippageBps, amountInUsd: q.quote.amountInUsd },
@@ -768,6 +796,7 @@ type CommonInput = Pick<RouteParsed, "destinationChain" | "destinationAssetId" |
 type RouteParsed = z.output<typeof routeSchema>;
 type ClaimInput = CommonInput & { secretKeyString: string; originAssetId?: string | undefined };
 type PayLinkInput = CommonInput & { payAmount: string };
-export type DirectInput = CommonInput & { originAssetId: string; amount: string; refundTo: string };
+/** exactOutput: `amount` is what the receiver gets, and the quote adds the fees on top of what the sender pays. */
+export type DirectInput = CommonInput & { originAssetId: string; amount: string; refundTo: string; exactOutput?: boolean };
 
 export type { Token };

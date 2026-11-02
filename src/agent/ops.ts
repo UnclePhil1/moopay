@@ -166,6 +166,8 @@ export class AgentOps {
     const usdc = await this.svc.usdcAsset();
     const units = parseDecimal(usdText, usdc.decimals);
     const key = this.recipientKey(chain, p.recipient);
+    // What the receiver gets, whole. The swap fees are added on top of what the wallet pays.
+    const destUnits = coinUnits ?? (/^US(DC|DT)$/.test(sym) ? parseDecimal(usdText, dest.decimals) : price ? BigInt(Math.ceil((amt / price) * 10 ** Math.min(dest.decimals, 12))) * 10n ** BigInt(Math.max(dest.decimals - 12, 0)) : units);
     // Straight from the wallet when it already holds that coin: NEAR to a NEAR wallet, or USDC to a NEAR wallet.
     let direct: "usdc" | "near" | undefined = chain === "near" && sym === "USDC" ? "usdc" : undefined;
     let nearUnits = 0n;
@@ -176,17 +178,17 @@ export class AgentOps {
     // The agent wallet is optional: it pays only when asked to, or when it already holds enough. Otherwise the user signs in their own wallet.
     const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct, units)));
     if (own) return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt), fromChain: p.fromChain, fromSymbol: p.fromSymbol }, ctx!);
-    const expected = direct ? undefined : await this.preview(u, usdc, units, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
+    const expected = direct ? undefined : await this.preview(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
     const denied = this.blocked(u, who, amt, chain, sym, p.recipient);
     if (denied) return { result: { status: "denied", reason: denied } };
     const d = decide(u, amt, key, this.now());
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const what = coinUnits ? `${p.amount} ${sym}` : usd(amt);
-    const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}` + (expected ? ` (they get about ${expected})` : "");
+    const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}` + (expected ? ` (they get exactly ${expected}; fees are added on top)` : "");
     if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
     let pay: Payment;
     try {
-      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc");
+      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
     } catch (e) {
       // Short on the agent wallet after all (fees, a price move): hand over to the user's own wallet instead of failing.
       if (ctx && !who.ak && p.useAgentWallet !== true && asMoopayError(e).code === "NOTE_NOT_FUNDED") return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt) }, ctx);
@@ -229,10 +231,15 @@ export class AgentOps {
     return pay;
   }
 
-  private async preview(u: UserRec, usdc: { assetId: string; decimals: number }, units: bigint, chain: string, p: SendParams): Promise<string> {
+  /** A quote where the receiver gets `out` whole and the fees come on top of what the wallet pays. */
+  private async exactOut(u: UserRec, usdc: { assetId: string }, out: bigint, chain: string, p: SendParams, dryRun: boolean) {
     const dest = await this.destAsset(chain, p.assetSymbol);
-    const r = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: units.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun: true })) as { expectedOutput?: { amountOut?: string } };
-    return `${fmt(BigInt(r.expectedOutput?.amountOut ?? "0"), dest.decimals)} ${dest.symbol}`;
+    const r = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: out.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun, exactOutput: true })) as { amountIn: string; depositAddress?: string };
+    return { dest, amountIn: BigInt(r.amountIn), depositAddress: r.depositAddress };
+  }
+  private async preview(u: UserRec, usdc: { assetId: string; decimals: number }, out: bigint, chain: string, p: SendParams): Promise<string> {
+    const r = await this.exactOut(u, usdc, out, chain, p, true);
+    return `${fmt(out, r.dest.decimals)} ${r.dest.symbol}`;
   }
   private async destAsset(chain: string, symbol?: string) {
     let want = (symbol ?? NATIVE[chain] ?? "").toUpperCase();
@@ -242,8 +249,10 @@ export class AgentOps {
     return t;
   }
 
-  private async doSend(u: UserRec, usdc: { assetId: string; contract: string; decimals: number }, units: bigint, amt: number, chain: string, p: SendParams, expected?: string, ak?: AgentKey, direct = false): Promise<Payment> {
-    await this.ensureUsdc(u, units);
+  private async doSend(u: UserRec, usdc: { assetId: string; contract: string; decimals: number }, units: bigint, amt: number, chain: string, p: SendParams, expected?: string, ak?: AgentKey, direct = false, destUnits = units): Promise<Payment> {
+    let pay = units;
+    if (!direct) pay = (await this.exactOut(u, usdc, destUnits, chain, p, true)).amountIn; // what the swap really costs with fees
+    await this.ensureUsdc(u, pay);
     const b = await this.balances(u);
     if (b.nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet. Add a little more money (about $0.50) and try again.`);
     const k = this.store.keyOf(u);
@@ -253,9 +262,10 @@ export class AgentOps {
       Object.assign(base, { status: "DELIVERED", txHash: r.txHash, settled: true });
       this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     } else {
-      const dest = await this.destAsset(chain, p.assetSymbol);
-      const q = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: units.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun: false })) as { depositAddress: string };
-      const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: q.depositAddress, amount: units });
+      const q = await this.exactOut(u, usdc, destUnits, chain, p, false);
+      if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
+      if ((await this.balances(u)).tok < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", "Your balance is a little short once fees are added. Add a little more money and try again.");
+      const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: q.depositAddress, amount: q.amountIn });
       await this.svc.oneClickClient.submitDeposit(q.depositAddress, r.txHash).catch(() => undefined);
       Object.assign(base, { depositAddress: q.depositAddress, txHash: r.txHash });
     }
@@ -569,11 +579,13 @@ export class AgentOps {
     const chain = p.fromChain.toLowerCase();
     this.checkRefund(chain, p.refundAddress);
     const usdc = await this.svc.usdcAsset();
-    const { token, units } = await this.originAsset(chain, p.fromSymbol, p.amountUsd);
-    const req: QuoteRequest = { dry: false, swapType: "EXACT_INPUT", slippageTolerance: 100, originAsset: token.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: usdc.assetId, amount: units.toString(), recipient: u.accountId, recipientType: "DESTINATION_CHAIN", refundTo: p.refundAddress, refundType: "ORIGIN_CHAIN", deadline: new Date(this.now() + 8 * 60_000).toISOString() };
+    const { token } = await this.originAsset(chain, p.fromSymbol, p.amountUsd);
+    // The wallet receives the whole amount; the fees are added to what the user sends.
+    const req: QuoteRequest = { dry: false, swapType: "EXACT_OUTPUT", slippageTolerance: 100, originAsset: token.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: usdc.assetId, amount: parseDecimal(p.amountUsd, usdc.decimals).toString(), recipient: u.accountId, recipientType: "DESTINATION_CHAIN", refundTo: p.refundAddress, refundType: "ORIGIN_CHAIN", deadline: new Date(this.now() + 8 * 60_000).toISOString() };
     const q = (await this.svc.oneClickClient.quote(req)).quote;
     if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
-    const expected = `about ${fmt(BigInt(q.amountOut ?? "0"), usdc.decimals, 2)} USDC`;
+    const units = BigInt(q.amountIn ?? "0");
+    const expected = `${fmt(parseDecimal(p.amountUsd, usdc.decimals), usdc.decimals, 2)} USDC`;
     u.payments.unshift({ id: id(), kind: "fund", amountUsd: Number(p.amountUsd), chain, recipient: u.accountId, status: "AWAITING_YOUR_DEPOSIT", createdAt: this.now(), depositAddress: q.depositAddress, expected });
     this.store.save();
     const card = this.depositCard(q.depositAddress, units, token, chain, { deadline: q.deadline, depositMemo: q.depositMemo }, expected, "Send exactly this amount from your own wallet. It arrives in your agent wallet as USDC.");
@@ -585,13 +597,17 @@ export class AgentOps {
     const from = p.fromChain.toLowerCase(), to = p.toChain.toLowerCase();
     if (to !== "btc" && to !== "sol" && to !== "eth") throw new MoopayError("INVALID_INPUT", "paying from your own wallet can go to btc, sol or eth");
     this.checkRefund(from, p.refundAddress); this.validate(to, p.recipient);
-    const { token, units } = await this.originAsset(from, p.fromSymbol, p.amountUsd);
+    const { token } = await this.originAsset(from, p.fromSymbol, p.amountUsd);
     const dest = await this.destAsset(to, p.toSymbol);
-    const q = (await this.svc.directQuote({ originAssetId: token.assetId, amount: units.toString(), refundTo: p.refundAddress, destinationChain: to as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun: false })) as { depositAddress: string; depositMemo?: string; quoteExpiresAt?: string; expectedOutput?: { amountOut?: string } };
-    const expected = `${fmt(BigInt(q.expectedOutput?.amountOut ?? "0"), dest.decimals)} ${dest.symbol}`;
+    const price = (dest as { price?: number }).price;
+    const out = /^US(DC|DT)$/i.test(dest.symbol) ? parseDecimal(p.amountUsd, dest.decimals) : price ? BigInt(Math.ceil((Number(p.amountUsd) / price) * 10 ** Math.min(dest.decimals, 12))) * 10n ** BigInt(Math.max(dest.decimals - 12, 0)) : 0n;
+    if (out <= 0n) throw new MoopayError("QUOTE_FAILED", `I couldn't price ${dest.symbol} right now.`);
+    const q = (await this.svc.directQuote({ originAssetId: token.assetId, amount: out.toString(), exactOutput: true, refundTo: p.refundAddress, destinationChain: to as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun: false })) as { amountIn: string; depositAddress: string; depositMemo?: string; quoteExpiresAt?: string; expectedOutput?: { amountOut?: string } };
+    const units = BigInt(q.amountIn);
+    const expected = `${fmt(out, dest.decimals)} ${dest.symbol}`;
     u.payments.unshift({ id: id(), kind: "send", amountUsd: Number(p.amountUsd), chain: to, recipient: p.recipient, status: "AWAITING_YOUR_DEPOSIT", createdAt: this.now(), depositAddress: q.depositAddress, expected });
     this.store.save();
-    const card = this.depositCard(q.depositAddress, units, token, from, { deadline: q.quoteExpiresAt, depositMemo: q.depositMemo }, `${p.recipient.slice(0, 8)}… gets about ${expected}`, "Send exactly this amount from your own wallet. MooPay holds nothing: it goes straight to the receiver.");
+    const card = this.depositCard(q.depositAddress, units, token, from, { deadline: q.quoteExpiresAt, depositMemo: q.depositMemo }, `${p.recipient.slice(0, 8)}… gets exactly ${expected}`, "Send exactly this amount from your own wallet. MooPay holds nothing: it goes straight to the receiver.");
     return { result: { status: "awaiting_your_deposit", sendExactly: `${card["amount"]} ${token.symbol}`, to: q.depositAddress, receiverGets: expected, expires: q.quoteExpiresAt, ...(q.depositMemo ? { memo: q.depositMemo } : {}) }, card };
   }
 

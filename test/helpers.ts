@@ -34,7 +34,7 @@ export class FakeOneClick {
     return {
       quote: {
         ...(req.dry ? {} : { depositAddress: `dep-${++this.n}` }),
-        amountIn: req.amount, amountOut: "99000", minAmountOut: "98000",
+        amountIn: req.swapType === "EXACT_OUTPUT" ? String((BigInt(req.amount) * 101n) / 100n) : req.amount, amountOut: "99000", minAmountOut: "98000",
         amountInUsd: "0.10", amountOutUsd: "0.099", deadline: req.deadline,
       },
     };

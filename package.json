@@ -30,6 +30,7 @@
     "@near-wallet-selector/nightly": "10.1.4",
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
+    "@reown/appkit": "^1.8.24",
     "near-api-js": "7.4.0",
     "zod": "4.6.7"
   },

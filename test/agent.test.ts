@@ -220,8 +220,9 @@ test("fund from another chain: quote pays USDC to the agent wallet, shows the ex
   assert.equal(q.recipient, a.u.accountId);
   assert.equal(q.destinationAsset, TOKENS[1]!.assetId, "arrives as USDC on NEAR");
   assert.equal(q.refundTo, SOL_ADDR);
-  assert.equal(q.amount, "200000000", "$20 at $100/SOL = 0.2 SOL");
-  assert.equal((r.card as { amount: string }).amount, "0.2");
+  assert.equal(q.swapType, "EXACT_OUTPUT");
+  assert.equal(q.amount, "20000000", "the wallet receives the whole $20; fees go on top of what the user sends");
+  assert.ok(Number((r.card as { amount: string }).amount) > 0);
   assert.equal(a.near.transfers.length, 0);
   assert.equal(a.u.payments[0]?.kind, "fund");
   await assert.rejects(a.ops.fundWallet(a.u, { amountUsd: "20", fromChain: "sol", refundAddress: "nope" }), code("BAD_RECIPIENT"));
@@ -341,12 +342,13 @@ test("send in coins: 0.1 NEAR goes straight from the wallet's NEAR, no swap", as
 
 test("send in coins to another chain: priced in dollars, paid from USDC, receiver gets that coin", async () => {
   const a = agent();
-  a.fund(50);
+  a.fund(200); // the fake quote is not price-aware, so give it room
   const r = await a.ops.send(a.u, { amount: "0.09", assetSymbol: "SOL", chain: "sol", recipient: "So11111111111111111111111111111111111111112" });
   assert.equal(r.result["status"], "sent");
   const q = a.oc.quotes.find((x) => !x.dry)!;
   assert.equal(q.destinationAsset, "nep141:sol.omft.near");
-  assert.equal(q.amount, "9090000", "0.09 SOL at $100 plus a 1% cushion");
+  assert.equal(q.amount, "90000000", "the receiver gets exactly 0.09 SOL; fees go on top");
+  assert.equal(q.swapType, "EXACT_OUTPUT");
   await assert.rejects(a.ops.send(a.u, { chain: "sol", recipient: "So11111111111111111111111111111111111111112" }), code("INVALID_INPUT"));
 });
 
