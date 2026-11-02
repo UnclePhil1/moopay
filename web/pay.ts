@@ -28,6 +28,42 @@ const id = isPublic ? parts[2] : parts[3];
 const base = isPublic ? `/papi/${id}` : `/api/${parts[2]}/intent/${id}`;
 const $ = <T extends HTMLElement>(i: string) => document.getElementById(i) as T;
 
+/* Inside the chat's pay window the page is a frame, and a browser will not open a wallet app from a frame. Wallet links open from the top page instead. */
+if (window.parent !== window) {
+  const open = window.open.bind(window);
+  window.open = ((u?: string | URL, t?: string, f?: string) => { try { return window.top!.open(u, t === "_self" ? "_blank" : t, f); } catch { return open(u, t, f); } }) as typeof window.open;
+}
+
+/** A picker in the app's own style that drives a hidden <select>, so the rest of the page keeps working as before. */
+function fancy(sel: HTMLSelectElement) {
+  const wrap = document.createElement("div"), btn = document.createElement("button"), list = document.createElement("div");
+  wrap.className = "dd"; btn.type = "button"; btn.className = "dd-btn"; list.className = "dd-list"; list.setAttribute("role", "listbox");
+  btn.setAttribute("aria-haspopup", "listbox");
+  sel.style.display = "none";
+  sel.after(wrap); wrap.append(btn, list);
+  const badge = (t: string) => { const b = document.createElement("span"); b.className = "dd-badge"; b.textContent = t.replace(/[^A-Za-z0-9]/g, "").slice(0, 3); return b; };
+  const chev = () => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "chev"); const p = document.createElementNS("http://www.w3.org/2000/svg", "path"); p.setAttribute("d", "M6 9l6 6 6-6"); s.append(p); return s; };
+  const tick = () => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "tick"); const p = document.createElementNS("http://www.w3.org/2000/svg", "path"); p.setAttribute("d", "M5 12l5 5 9-10"); s.append(p); return s; };
+  const close = () => { wrap.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); };
+  const sync = () => {
+    const cur = sel.selectedOptions[0];
+    const lab = document.createElement("span"); lab.className = "lab"; lab.textContent = cur?.text ?? "";
+    btn.replaceChildren(...(cur ? [badge(cur.text)] : []), lab, chev());
+    list.replaceChildren(...[...sel.options].map((o) => {
+      const it = document.createElement("button"); it.type = "button"; it.className = "dd-opt"; it.setAttribute("role", "option"); it.setAttribute("aria-selected", String(o.value === sel.value));
+      const t = document.createElement("span"); t.textContent = o.text;
+      it.append(badge(o.text), t, tick());
+      it.addEventListener("click", () => { const changed = sel.value !== o.value; sel.value = o.value; sync(); close(); if (changed) sel.dispatchEvent(new Event("change")); });
+      return it;
+    }));
+  };
+  btn.addEventListener("click", () => { const open = !wrap.classList.contains("open"); document.querySelectorAll(".dd.open").forEach((d) => d.classList.remove("open")); wrap.classList.toggle("open", open); btn.setAttribute("aria-expanded", String(open)); if (open) list.querySelector<HTMLElement>("[aria-selected=true]")?.scrollIntoView({ block: "nearest" }); });
+  document.addEventListener("click", (e) => { if (!wrap.contains(e.target as Node)) close(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  sync();
+  return { sync };
+}
+
 const CHAINS: Record<string, string> = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR", base: "Base", arb: "Arbitrum", op: "Optimism", pol: "Polygon", bsc: "BNB Chain", avax: "Avalanche" };
 /** Reown registry ids: MetaMask, Trust, Phantom, Coinbase, Rainbow, Solflare, OKX, Binance. */
 const WALLET_IDS = [
@@ -393,6 +429,7 @@ async function main() {
   const sel = $<HTMLSelectElement>("asset"), ch = $<HTMLSelectElement>("chain");
   const chains = [...new Set(intent.assets.map((a) => a.chain))];
   for (const c of chains) ch.add(new Option(chainName(c), c));
+  const ddChain = fancy(ch), ddAsset = fancy(sel);
   const fillAssets = () => {
     sel.innerHTML = "";
     for (const a of intent.assets.filter((x) => x.chain === ch.value)) sel.add(new Option(a.native ? `${a.symbol} (the chain's own coin)` : a.symbol, a.assetId));
@@ -403,8 +440,9 @@ async function main() {
     $("manual").classList.toggle("hidden", near);
     $("refundbox").classList.add("hidden");
     $("send").textContent = "Make transfer";
+    ddAsset.sync();
   };
-  if (intent.fromChain && chains.includes(intent.fromChain)) ch.value = intent.fromChain;
+  if (intent.fromChain && chains.includes(intent.fromChain)) { ch.value = intent.fromChain; ddChain.sync(); }
   fillAssets();
   setTitle();
   ch.addEventListener("change", () => { fillAssets(); void refreshEstimate(); });

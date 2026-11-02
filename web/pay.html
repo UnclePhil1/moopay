@@ -27,11 +27,28 @@
   .card { overflow:hidden; }
   .msg { overflow-wrap:anywhere; }
   label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:18px 0 6px; }
-  select, input { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; }
-  .btn { width:100%; margin-top:22px; padding:16px; border:0; border-radius:999px; background:var(--accent); color:#000; font:700 17px "Inter",sans-serif; cursor:pointer;  }
-  .btn:hover:not(:disabled) { background:var(--accent-2); }
+  input { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; }
+  .btn { width:100%; margin-top:22px; padding:16px; border:1.5px solid transparent; border-radius:999px; background:var(--accent); color:#0a0a0a; font:700 17px "Inter",sans-serif; cursor:pointer; transition:background .2s, color .2s, border-color .2s, transform .15s, box-shadow .2s; }
+  .btn:hover:not(:disabled) { background:var(--accent-2); transform:translateY(-1px); box-shadow:0 8px 24px rgba(244,239,230,.12); }
+  .btn:active:not(:disabled) { transform:scale(.98); box-shadow:none; }
   .btn:disabled { opacity:.55; cursor:default; }
-  .btn.ghost { background:transparent; border:1px solid var(--line); box-shadow:none; margin-top:10px; padding:11px; font-size:14px; }
+  .btn.ghost { background:transparent; color:var(--text); border:1.5px solid var(--text); box-shadow:none; margin-top:10px; padding:12px; font-size:14px; }
+  .btn.ghost:hover:not(:disabled) { background:rgba(244,239,230,.12); box-shadow:none; }
+  .btn.ghost:active:not(:disabled) { background:rgba(244,239,230,.2); }
+  /* the custom picker for "Pay from" and "Pay with" */
+  .dd { position:relative; }
+  .dd-btn { width:100%; display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; cursor:pointer; text-align:left; transition:border-color .2s, background .2s; }
+  .dd-btn:hover, .dd.open .dd-btn { border-color:rgba(244,239,230,.35); background:#101010; }
+  .dd-btn .lab { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dd-btn .chev { width:16px; height:16px; stroke:var(--muted); fill:none; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; transition:transform .2s; flex:none; }
+  .dd.open .chev { transform:rotate(180deg); }
+  .dd-badge { width:30px; height:30px; flex:none; border-radius:50%; display:grid; place-items:center; background:rgba(244,239,230,.1); border:1px solid var(--line); color:var(--text); font:700 11px "Inter",sans-serif; text-transform:uppercase; }
+  .dd-list { max-height:0; overflow:hidden; opacity:0; transition:max-height .25s ease, opacity .2s ease, margin .2s ease; border-radius:14px; background:#0a0a0a; border:1px solid transparent; }
+  .dd.open .dd-list { max-height:240px; overflow-y:auto; opacity:1; margin-top:8px; border-color:var(--line); }
+  .dd-opt { display:flex; align-items:center; gap:12px; width:100%; padding:10px 14px; border:0; background:none; color:var(--text); font:600 15px "Inter",sans-serif; text-align:left; cursor:pointer; transition:background .15s; }
+  .dd-opt:hover, .dd-opt.cur { background:rgba(244,239,230,.08); }
+  .dd-opt .tick { margin-left:auto; width:16px; height:16px; stroke:var(--text); fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; opacity:0; }
+  .dd-opt[aria-selected=true] .tick { opacity:1; }
   .msg { margin-top:16px; font-size:14px; color:var(--muted); min-height:20px; }
   .msg.err { color:var(--bad); } .msg.ok { color:var(--ok); }
   .addr { display:flex; gap:8px; margin-top:8px; }

@@ -66,6 +66,9 @@
   @keyframes fade { from { opacity:0; } }
   .sheet { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:12px; }
   .sheet .box { position:relative; width:min(480px,100%); height:min(760px,100%); background:#141414; border:1px solid var(--line2); border-radius:22px; overflow:hidden; }
+  @keyframes rise { from { transform:translateY(24px); opacity:0; } }
+  .sheet .box { animation:rise .22s ease; }
+  @media (max-width:640px) { .sheet { align-items:flex-end; padding:0; } .sheet .box { width:100%; height:92dvh; border-radius:22px 22px 0 0; } }
   .sheet iframe { width:100%; height:100%; border:0; background:transparent; }
   .sheet .x { position:absolute; top:8px; right:10px; z-index:2; border:0; background:rgba(244,239,230,.1); color:#f4efe6; width:30px; height:30px; border-radius:50%; font-size:18px; cursor:pointer; }
   .btns { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
@@ -92,7 +95,7 @@
   #send { width:42px; height:42px; border-radius:50%; border:0; background:#f4efe6; display:grid; place-items:center; flex:none; } #send:disabled { opacity:.35; cursor:default; }
   #send svg { width:18px; height:18px; stroke:#000; fill:none; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
   .note { text-align:center; font-size:12px; color:var(--dim); margin-top:8px; }
-  #palette { position:absolute; left:50%; bottom:72px; transform:translateX(-50%); width:min(680px,calc(100% - 40px)); background:var(--card); border:1px solid var(--line2); border-radius:18px; padding:6px; box-shadow:0 20px 60px rgba(0,0,0,.6); z-index:5; }
+  #palette { width:min(720px,100%); margin:0 auto 10px; max-height:min(280px,38vh); overflow-y:auto; overscroll-behavior:contain; background:var(--card); border:1px solid var(--line2); border-radius:18px; padding:6px; animation:fade .15s; }
   #palette[hidden] { display:none; }
   .cmd { display:flex; gap:14px; align-items:baseline; padding:10px 14px; border-radius:12px; width:100%; background:none; border:0; text-align:left; }
   .cmd.sel,.cmd:hover { background:rgba(244,239,230,.08); } .cmd b { min-width:84px; font-weight:700; } .cmd span { color:var(--muted); font-size:13.5px; }
@@ -241,10 +244,8 @@ const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
 /* cards */
 /** Pay and sign without leaving the chat: the pay page opens as a sheet over it. */
 function openSheet(url) {
-  // Phones: wallet apps open through deep links, which a browser blocks inside a frame (the page goes blank), so the pay page opens as a normal tab there.
-  if (matchMedia("(pointer: coarse)").matches || innerWidth < 700) { if (!window.open(url, "_blank")) location.href = url; return; }
   const close = () => { box.remove(); window.removeEventListener("message", onMsg); };
-  const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") setTimeout(close, 2500); };
+  const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); } };
   const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
     h("div", { class: "box" }, h("button", { class: "x", onclick: close, "aria-label": "Close" }, "\u00d7"), h("iframe", { src: url + (url.includes("?") ? "&" : "?") + "embed=1", allow: "clipboard-write" })));
   window.addEventListener("message", onMsg);
@@ -423,6 +424,7 @@ function paletteFor(v) {
   sel = Math.min(sel, shown.length - 1);
   pal.replaceChildren(...shown.map((c, i) => h("button", { type: "button", class: "cmd" + (i === sel ? " sel" : ""), onmousedown: (e) => { e.preventDefault(); pick(c); } }, h("b", {}, c.name), h("span", {}, c.desc))));
   pal.hidden = false;
+  pal.querySelector(".cmd.sel")?.scrollIntoView({ block: "nearest" });
 }
 async function exportKey() {
   if (!(await ask({ title: "Show your wallet key?", text: "Anyone who sees this key can take the money in your agent wallet. Only show it when nobody is watching.", confirm: "Show key", danger: true }))) return;

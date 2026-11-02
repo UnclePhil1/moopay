@@ -597,9 +597,17 @@ export class AgentOps {
     if (p.settled) return { changed: false };
     const before = p.status;
     let link: string | undefined;
-    if (p.payId && !p.depositAddress) {
-      try { const s = await this.svc.payStatus(p.payId); if ("depositAddress" in s) p.depositAddress = s.depositAddress; }
-      catch { p.status = "EXPIRED"; p.settled = true; }
+    if (p.payId) {
+      try {
+        const s = (await this.svc.payStatus(p.payId)) as { state: string; direct?: boolean; depositAddress?: string; explorerUrl?: string };
+        if (s.direct) { // a straight transfer: the chain itself says whether it landed
+          if (s.state === "SUCCESS") { p.status = "DELIVERED"; p.settled = true; link = s.explorerUrl; }
+          else if (s.state === "FAILED") { p.status = "FAILED"; p.settled = true; }
+          if (p.status !== before) this.store.save();
+          return { changed: p.status !== before, ...(link ? { link } : {}) };
+        }
+        if (!p.depositAddress && s.depositAddress) p.depositAddress = s.depositAddress;
+      } catch { if (!p.depositAddress) { p.status = "EXPIRED"; p.settled = true; } }
     }
     if (p.kind === "claim" && p.fundKey) {
       const s = await this.svc.claimFundState(p.fundKey, ctx.origin);

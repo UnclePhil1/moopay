@@ -11,7 +11,7 @@ import { spentToday } from "./policy.js";
 import { alertOwner } from "../lib/alert.js";
 import { clientIp, pageHeaders, rateLimiter, withNonce } from "../lib/guard.js";
 import { AgentStore, SESSION_ENDED, SESSION_MS, type UserRec } from "./store.js";
-import { tick } from "./worker.js";
+import { followPayments, tick } from "./worker.js";
 
 const appFile = (name: string): Buffer => readFileSync(fileURLToPath(new URL(`../../app/${name}`, import.meta.url)));
 const IMAGES = new Set(["moopay-logo.png", "moopay-mark.png", "favicon.png"]);
@@ -56,6 +56,7 @@ export function makeAgent(d: AgentDeps) {
   };
 
   /** The door for outside AI agents: Bearer mpk_… key, same rules as the user, plus the key's own limits. */
+  const lastFollow = new Map<string, number>();
   async function delegate(req: IncomingMessage, res: ServerResponse, op: string, ctx: { origin: string }) {
     const key = /^Bearer (mpk_[\w-]+)$/.exec(String(req.headers["authorization"] ?? ""))?.[1];
     const hit = key ? store.byKey(key) : undefined;
@@ -181,6 +182,10 @@ export function makeAgent(d: AgentDeps) {
       }
       if (op === "events" && req.method === "GET") {
         const since = Number(url.searchParams.get("since") ?? 0);
+        if (u.payments.some((p) => !p.settled && p.kind !== "sweep") && (lastFollow.get(u.id) ?? 0) < Date.now() - 4000) { // the page asks every few seconds: say so the moment a payment lands, not a minute later
+          lastFollow.set(u.id, Date.now());
+          await followPayments(ops, store, u, origin).catch(() => undefined);
+        }
         json(res, 200, { events: u.events.filter((e) => e.id > since) });
         return true;
       }

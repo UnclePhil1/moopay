@@ -13,6 +13,22 @@ export async function tick(ops: AgentOps, store: AgentStore, origin: string, now
   }
 }
 
+/** Looks at every payment still in flight and tells the user in chat as soon as one lands, fails or comes back. */
+export async function followPayments(ops: AgentOps, store: AgentStore, u: UserRec, origin: string): Promise<void> {
+  for (const p of u.payments.filter((x) => !x.settled && x.kind !== "sweep")) {
+    const r = await ops.refresh(u, p, { origin });
+    if (!r.changed) continue;
+    const text = p.status === "DELIVERED" && p.kind === "fund" ? `Your agent wallet is funded: about $${p.amountUsd.toFixed(2)} arrived as USDC.`
+      : p.status === "DELIVERED" ? `Delivered: $${p.amountUsd.toFixed(2)} reached ${p.recipient}.`
+      : p.status === "CLAIMED" ? `Claimed: ${p.recipient} opened your $${p.amountUsd.toFixed(2)} claim.`
+      : p.status === "REFUNDED" ? `Refunded: your $${p.amountUsd.toFixed(2)} ${p.kind === "claim" ? "claim was not opened in time" : "payment did not go through"}, and the money is back ${p.payId ? "in your wallet" : "in your agent wallet"}.`
+      : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
+      : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
+    if (text) store.event(u, text, { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link });
+  }
+  store.save();
+}
+
 async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string, now: number) {
   const b = await ops.balances(u);
   const cents = Math.round(b.totalUsd * 100), was = Number(u.seen.usdc), nat = b.nat.toString();
@@ -25,17 +41,7 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
   const swept = await ops.sweep(u);
   if (swept) { store.event(u, `Sent $${swept.amountUsd.toFixed(2)} above your float to your own wallet.`, { kind: "payment", id: swept.id, amountUsd: swept.amountUsd, chain: "near", recipient: swept.recipient, status: "DELIVERED" }); u.seen.usdc = String(Math.round((await ops.balances(u)).totalUsd * 100)); }
 
-  for (const p of u.payments.filter((x) => !x.settled && x.kind !== "sweep")) {
-    const r = await ops.refresh(u, p, { origin });
-    if (!r.changed) continue;
-    const text = p.status === "DELIVERED" && p.kind === "fund" ? `Your agent wallet is funded: about $${p.amountUsd.toFixed(2)} arrived as USDC.`
-      : p.status === "DELIVERED" ? `Delivered: $${p.amountUsd.toFixed(2)} reached ${p.recipient}.`
-      : p.status === "CLAIMED" ? `Claimed: ${p.recipient} opened your $${p.amountUsd.toFixed(2)} claim.`
-      : p.status === "REFUNDED" ? `Refunded: your $${p.amountUsd.toFixed(2)} ${p.kind === "claim" ? "claim was not opened in time" : "payment did not go through"}, and the money is back ${p.payId ? "in your wallet" : "in your agent wallet"}.`
-      : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
-      : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
-    if (text) store.event(u, text, { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link });
-  }
+  await followPayments(ops, store, u, origin);
 
   for (const t of u.tasks.filter((x) => x.nextAt <= now)) {
     t.nextAt = now + PERIOD[t.every];
