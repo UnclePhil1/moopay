@@ -8,7 +8,7 @@ import { RNEAR, RNEAR_APP, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, WRAP
 import type { MooPayService } from "../lib/service.js";
 import { alertOwner } from "../lib/alert.js";
 import { agentDeny, decide, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
-import type { AgentKey, Approval, AgentStore, Payment, Rules, Task, UserRec } from "./store.js";
+import type { AgentKey, Approval, AgentStore, GroupItem, Payment, Rules, Task, UserRec } from "./store.js";
 import { hashKey } from "./store.js";
 
 /* What the agent can do. Every money move goes through decide() first; the language model cannot skip it. */
@@ -23,6 +23,7 @@ export interface SendParams {
   useAgentWallet?: boolean | undefined; fromChain?: string | undefined; fromSymbol?: string | undefined;
 }
 
+const MAX_GROUP = 20;
 const NATIVE: Record<string, string> = { sol: "SOL", eth: "ETH", btc: "BTC" };
 const EXPLORER: Record<string, string> = { sol: "https://solscan.io/tx/", eth: "https://etherscan.io/tx/", btc: "https://mempool.space/tx/", near: "https://nearblocks.io/txns/" };
 const MIN_GAS = 10_000_000_000_000_000_000_000n; // 0.01 NEAR
@@ -55,6 +56,10 @@ export function approvalCard(a: Approval): Record<string, unknown> {
     ["Amount", str("amountUsd") ? `$${str("amountUsd")}` : str("amount") ? `${str("amount")} ${str("assetSymbol") ?? ""}`.trim() : undefined],
     ["Chain", (str("chain") ?? str("assetSymbol"))?.toUpperCase()],
   ];
+  if (Array.isArray(p["items"])) { // a group: every line is listed in full
+    const lines = (p["items"] as Record<string, unknown>[]).map((i): [string, string] => [String(i["recipient"] ?? i["receiver"]), `${i["amountUsd"] ? "$" + i["amountUsd"] : `${i["amount"]} ${i["assetSymbol"] ?? ""}`.trim()} (${String(i["chain"] ?? "near").toUpperCase()}${i["assetSymbol"] && i["amountUsd"] ? " " + String(i["assetSymbol"]).toUpperCase() : ""})`]);
+    return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: lines };
+  }
   return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: rows.filter((r): r is [string, string] => Boolean(r[1])) };
 }
 
@@ -195,6 +200,49 @@ export class AgentOps {
       throw e;
     }
     return { result: { status: "sent", paymentId: pay.id, ...(expected ? { expected } : {}), note: pay.settled ? "delivered" : "on its way; I will tell the user when it lands" }, card: this.paymentCard(pay) };
+  }
+
+  /* ---- group payouts: many receivers, chains and assets in one go ---- */
+  /** Dollar value of one line, whatever it is written in. */
+  private async itemUsd(it: GroupItem): Promise<number> {
+    if (it.amountUsd) return Number(it.amountUsd);
+    if (!it.amount) throw new MoopayError("INVALID_INPUT", `${it.recipient}: give an amount in dollars (amountUsd) or in coins (amount)`);
+    const chain = it.chain.toLowerCase(), sym = (it.assetSymbol ?? (chain === "near" ? "USDC" : NATIVE[chain] ?? "")).toUpperCase();
+    const price = ((await this.destAsset(chain, sym)) as { price?: number }).price ?? (/^US(DC|DT)$/.test(sym) ? 1 : undefined);
+    if (!price) throw new MoopayError("QUOTE_FAILED", `I couldn't price ${sym}, so give ${it.recipient}'s amount in dollars instead.`);
+    return Number(it.amount) * price;
+  }
+
+  /** Pays several receivers at once. The rules see the whole batch: one approval covers it, and a daily cap counts the total. */
+  async sendMany(u: UserRec, items: GroupItem[], approved = false, who: Who = {}, ctx?: Ctx): Promise<Out> {
+    this.active(u);
+    if (items.length < 2 || items.length > MAX_GROUP) throw new MoopayError("INVALID_INPUT", `a group payout takes 2 to ${MAX_GROUP} receivers`);
+    const usds: number[] = [];
+    for (const it of items) {
+      const chain = it.chain.toLowerCase(); this.validate(chain, it.recipient);
+      usds.push(await this.itemUsd(it));
+      const denied = this.blocked(u, who, usds[usds.length - 1]!, chain, (it.assetSymbol ?? NATIVE[chain] ?? "USDC").toUpperCase(), it.recipient);
+      if (denied) return { result: { status: "denied", reason: denied } };
+    }
+    const total = usds.reduce((a, b) => a + b, 0);
+    const whole = decide(u, total, "batch", this.now());
+    if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
+    const asks = items.map((it, i) => decide(u, usds[i]!, this.recipientKey(it.chain.toLowerCase(), it.recipient), this.now())).find((d) => d.action === "ask");
+    const lines = items.map((it, i) => `${usd(usds[i]!)} to ${it.recipient} (${it.chain.toUpperCase()}${it.assetSymbol ? " " + it.assetSymbol.toUpperCase() : ""})`);
+    const summary = `Send ${usd(total)} to ${items.length} wallets: ${lines.join("; ")}`;
+    if ((whole.action === "ask" || asks) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks!.action === "ask" ? asks!.reason : "a new recipient");
+    const rows: { to: string; chain: string; amount: string; status: string; url?: string }[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!;
+      const row = { to: it.recipient, chain: it.chain.toUpperCase(), amount: it.amountUsd ? usd(Number(it.amountUsd)) : `${it.amount} ${(it.assetSymbol ?? NATIVE[it.chain.toLowerCase()] ?? "").toUpperCase()}`.trim() };
+      try {
+        const r = await this.send(u, { chain: it.chain, recipient: it.recipient, ...(it.amountUsd ? { amountUsd: it.amountUsd } : { amount: it.amount }), ...(it.assetSymbol ? { assetSymbol: it.assetSymbol } : {}) }, true, who, ctx);
+        const st = String(r.result["status"]);
+        rows.push({ ...row, status: st === "sent" ? "sent" : st === "needs_your_signature" ? "needs your signature" : st, ...((r.card as { url?: string } | undefined)?.url ? { url: (r.card as { url: string }).url } : {}) });
+      } catch (e) { rows.push({ ...row, status: "failed: " + asMoopayError(e).message }); }
+    }
+    const sent = rows.filter((r) => r.status === "sent").length;
+    return { result: { status: "group_done", total: usd(total), sent, results: rows.map((r) => ({ to: r.to, status: r.status })), note: rows.some((r) => r.url) ? "Some lines show a Confirm button for the user to sign in their own wallet." : "Every line ran." }, card: { kind: "batch", title: `Group payout, ${usd(total)}`, rows } };
   }
 
   /** Whether the agent wallet can pay this by itself, including the network fee. */
@@ -357,6 +405,39 @@ export class AgentOps {
     u.tasks.push(t); this.store.save();
     return { result: { status: "scheduled", id: t.id, text: t.text, firstRun: new Date(t.nextAt).toISOString() }, card: { kind: "note", text: "Scheduled: " + t.text } };
   }
+  /** One link for several wallets: each opens only its own private claim. The rules see the total. */
+  async groupClaim(u: UserRec, items: { receiver: string; amountUsd: string; chain?: string }[], ctx: Ctx, approved = false, who: Who = {}): Promise<Out> {
+    this.active(u);
+    if (items.length < 2 || items.length > MAX_GROUP) throw new MoopayError("INVALID_INPUT", `a group link takes 2 to ${MAX_GROUP} wallets`);
+    if (new Set(items.map((i) => i.receiver.toLowerCase())).size !== items.length) throw new MoopayError("INVALID_INPUT", "each wallet can appear only once in a group link");
+    const total = items.reduce((a, i) => a + Number(i.amountUsd), 0);
+    const whole = decide(u, total, "groupclaim", this.now());
+    if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason } };
+    if (whole.action === "ask" && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.reason);
+    const entries: { receiver: string; chain: string; claimKey: string }[] = [];
+    for (const it of items) {
+      const r = await this.claim(u, { amountUsd: it.amountUsd, receiver: it.receiver, ...(it.chain ? { chain: it.chain } : {}) }, ctx, true, who);
+      const link = (r.card as { link?: string } | undefined)?.link ?? String(r.result["claimLink"] ?? "");
+      if (!link) return { result: { status: "partial", created: entries.length, reason: String(r.result["reason"] ?? "a claim could not be created") } };
+      entries.push({ receiver: it.receiver, chain: (it.chain ?? "near").toLowerCase(), claimKey: link.split("/c/")[1]! });
+    }
+    const gid = id();
+    (u.groups ??= []).unshift({ id: gid, at: this.now(), entries }); u.groups.length = Math.min(u.groups.length, 50); this.store.save();
+    const link = `${ctx.origin}/g/${gid}`;
+    return { result: { status: "created", groupLink: link, wallets: entries.length, total: usd(total), rule: "Each wallet opens the link, enters its own address and claims only its own amount within 24 hours; anything unclaimed comes back to the agent wallet." }, card: { kind: "groupclaim", link, total, rows: items.map((i) => ({ to: i.receiver, amount: usd(Number(i.amountUsd)), chain: (i.chain ?? "near").toUpperCase() })) } };
+  }
+
+  /** Repeats a whole group payout every day, week or month. Each run follows the rules like any other payment. */
+  async scheduleGroup(u: UserRec, items: GroupItem[], every: "day" | "week" | "month"): Promise<Out> {
+    this.active(u);
+    if (!(every in EVERY_MS)) throw new MoopayError("INVALID_INPUT", "every must be day, week or month");
+    if (items.length < 2 || items.length > MAX_GROUP) throw new MoopayError("INVALID_INPUT", `a group payout takes 2 to ${MAX_GROUP} receivers`);
+    let total = 0;
+    for (const it of items) { this.validate(it.chain.toLowerCase(), it.recipient); total += await this.itemUsd(it); }
+    const t: Task = { id: id(), amountUsd: total, chain: "multi", recipient: `${items.length} wallets`, items, every, nextAt: this.now() + EVERY_MS[every], text: `${usd(total)} to ${items.length} wallets every ${every}` };
+    u.tasks.push(t); this.store.save();
+    return { result: { status: "scheduled", id: t.id, text: t.text, firstRun: new Date(t.nextAt).toISOString() }, card: { kind: "note", text: "Scheduled: " + t.text } };
+  }
   cancel(u: UserRec, taskId: string): Out { u.tasks = u.tasks.filter((t) => t.id !== taskId); this.store.save(); return { result: { status: "cancelled" } }; }
 
   private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string): Out {
@@ -374,6 +455,8 @@ export class AgentOps {
     if (!yes) return { result: { status: "declined" }, card: { kind: "note", text: "Cancelled. Nothing was sent." } };
     const ak = u.agents.find((x) => x.id === a.params["agentId"]);
     if (a.kind === "send") return this.send(u, a.params as unknown as SendParams, true, { ak });
+    if (a.kind === "groupclaim") return this.groupClaim(u, a.params["items"] as never, ctx, true, { ak });
+    if (a.kind === "batch") return this.sendMany(u, a.params["items"] as GroupItem[], true, { ak }, ctx);
     if (a.kind === "claim") return this.claim(u, a.params as { amountUsd: string; receiver: string }, ctx, true, { ak });
     if (a.kind === "withdraw") return this.withdraw(u, a.params as never, true);
     if (a.kind === "stake") return this.stakeRnear(u, a.params as never, true);

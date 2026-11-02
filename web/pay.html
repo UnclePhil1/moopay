@@ -40,11 +40,13 @@
   .okline { font-size:18px; font-weight:600; margin:4px 0 0; }
   .linkbtn { display:block; text-align:center; text-decoration:none; color:#000; box-sizing:border-box; }
   .hidden { display:none !important; }
+  .embed body { padding:14px 12px; min-height:0; background:transparent; } .embed .logo { display:none; } .embed .foot { display:none; } .embed .card { box-shadow:none; }
   .foot { text-align:center; color:var(--muted); font-size:12.5px; margin-top:18px; }
   a:not(.btn) { color:var(--accent-2); }
 </style>
 </head>
 <body>
+<script>if (window.parent !== window) document.documentElement.classList.add("embed");</script>
 <main>
   <img class="logo" src="/p/assets/moopay-logo.png" alt="MooPay">
   <div class="card" id="card">

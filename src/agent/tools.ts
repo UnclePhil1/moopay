@@ -7,8 +7,12 @@ import type { UserRec } from "./store.js";
 /** The tools the model can call. Inputs are re-validated here; the model's output is never trusted. */
 const money = z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/, "amount in dollars, like 20 or 12.50");
 const chain = z.enum(["btc", "sol", "eth", "near"]);
+const item = z.object({ chain, recipient: z.string().min(2).max(128), amountUsd: money.optional(), amount: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$/).optional(), assetSymbol: z.string().max(16).optional() }).strict();
+const ITEM_JSON = { type: "object", properties: { chain: { type: "string", enum: ["btc", "sol", "eth", "near"] }, recipient: { type: "string" }, amountUsd: { type: "string", description: "dollars" }, amount: { type: "string", description: "OR coins the receiver gets" }, assetSymbol: { type: "string", description: "optional: what the receiver gets, e.g. SOL, ETH, USDC" } }, required: ["chain", "recipient"], additionalProperties: false };
 const ZS = {
   get_account: z.object({}).strict(),
+  group_payout: z.object({ items: z.array(item).min(2).max(20), every: z.enum(["day", "week", "month"]).optional() }).strict(),
+  group_claim: z.object({ items: z.array(z.object({ receiver: z.string().min(2).max(128), amountUsd: money, chain: z.string().min(2).max(16).optional() }).strict()).min(2).max(20) }).strict(),
   send_money: z.object({ amountUsd: money.optional(), amount: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$/, "amount in coins, like 0.1").optional(), chain, recipient: z.string().min(2).max(128), assetSymbol: z.string().max(16).optional(), useAgentWallet: z.boolean().optional(), fromChain: z.string().min(2).max(16).optional(), fromSymbol: z.string().max(16).optional() }).strict(),
   create_claim: z.object({ amountUsd: money, receiver: z.string().min(2).max(128), chain: z.string().min(2).max(16).optional() }).strict(),
   check_payment: z.object({ paymentId: z.string().min(3).max(32) }).strict(),
@@ -38,6 +42,8 @@ export const TOOLS = [
   { name: "check_payment", description: "Latest status of a payment or claim by paymentId.", input_schema: obj({ paymentId: str("id from an earlier result") }, ["paymentId"]) },
   { name: "list_activity", description: "Recent payments and claims.", input_schema: obj({ limit: { type: "integer" } }) },
   { name: "update_rules", description: "Change the user's rules (float, daily cap, new-recipient limit, auto-approve limit, payout wallet). Only when the user asks. Loosening limits or changing the payout wallet needs their OK, and a changed payout wallet only starts 24 hours later (setting the current one again cancels the change).", input_schema: obj({ floatUsd: { type: "number" }, dailyCapUsd: { type: "number" }, newRecipientLimitUsd: { type: "number" }, approveAboveUsd: { type: "number" }, payoutAddress: str("the user's own NEAR wallet"), allowedChains: { type: "array", items: { type: "string" }, description: "only these chains may be paid, e.g. [\"sol\"]; empty list clears" }, allowedAssets: { type: "array", items: { type: "string" }, description: "only these assets, e.g. [\"USDC\"]; empty list clears" } }) },
+  { name: "group_payout", description: "Pay several receivers at once: different people, chains and assets in one request (e.g. $10 in SOL to one wallet, $5 in ETH to another, $20 USDC to a NEAR wallet). One approval covers the whole batch. Give every to repeat the same group every day, week or month.", input_schema: obj({ items: { type: "array", items: ITEM_JSON, description: "2 to 20 lines" }, every: { type: "string", enum: ["day", "week", "month"], description: "optional: repeat" } }, ["items"]) },
+  { name: "group_claim", description: "ONE link for several people: each named wallet can open only its own private claim, for its own amount. Use for splitting money between named wallets (a team, friends) with a single link to share.", input_schema: obj({ items: { type: "array", items: { type: "object", properties: { receiver: { type: "string", description: "wallet address" }, amountUsd: { type: "string" }, chain: { type: "string", description: "near (default), sol, eth, base..." } }, required: ["receiver", "amountUsd"], additionalProperties: false } } }, ["items"]) },
   { name: "schedule_payment", description: "Repeat a payment every day, week or month. Each run follows the rules.", input_schema: obj({ amountUsd: str("dollars"), chain: { type: "string", enum: ["btc", "sol", "eth", "near"] }, recipient: str("address"), every: { type: "string", enum: ["day", "week", "month"] }, assetSymbol: str("optional") }, ["amountUsd", "chain", "recipient", "every"]) },
   { name: "cancel_schedule", description: "Stop a scheduled payment by id.", input_schema: obj({ id: str("schedule id from get_account") }, ["id"]) },
   { name: "list_supported_assets", description: "Look up assets 1Click supports, optionally filtered by chain and symbol. Do not guess asset names.", input_schema: obj({ chain: str("sol, eth, btc, near"), symbol: str("e.g. USDC") }) },
@@ -56,7 +62,7 @@ export const TOOLS = [
 export const READ_ONLY = new Set(["get_account", "check_payment", "list_activity", "list_supported_assets", "rnear_position", "list_agent_keys"]);
 
 export const STEP_LABEL: Record<string, string> = {
-  get_account: "Checking your account", send_money: "Finding the best route", create_claim: "Preparing the private claim", check_payment: "Checking the payment",
+  get_account: "Checking your account", group_payout: "Preparing the group payout", group_claim: "Preparing the group link", send_money: "Finding the best route", create_claim: "Preparing the private claim", check_payment: "Checking the payment",
   list_activity: "Looking through your activity", update_rules: "Updating your rules", schedule_payment: "Scheduling it", cancel_schedule: "Cancelling it", list_supported_assets: "Looking up assets", withdraw: "Preparing your withdrawal", fund_wallet: "Getting a deposit address", pay_from_my_wallet: "Getting a deposit address", payment_link: "Making your payment link", create_agent_key: "Creating the agent key", stake_rnear: "Staking with Rhea", rnear_position: "Checking your stake", list_agent_keys: "Looking at your agents", revoke_agent_key: "Switching it off",
 };
 
@@ -72,6 +78,8 @@ export async function runTool(name: string, input: unknown, u: UserRec, ops: Age
     case "check_payment": return ops.status(u, a["paymentId"]!, ctx);
     case "list_activity": return ops.activity(u, a["limit"]);
     case "update_rules": return ops.rules(u, a as never);
+    case "group_payout": { const g = a as unknown as { items: never[]; every?: "day" | "week" | "month" }; return g.every ? ops.scheduleGroup(u, g.items, g.every) : ops.sendMany(u, g.items, false, {}, ctx); }
+    case "group_claim": return ops.groupClaim(u, (a as unknown as { items: never[] }).items, ctx);
     case "schedule_payment": return ops.schedule(u, a as never);
     case "cancel_schedule": return ops.cancel(u, a["id"]!);
     case "withdraw": return ops.withdraw(u, a as never);

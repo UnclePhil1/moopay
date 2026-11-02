@@ -27,6 +27,12 @@ const base = isPublic ? `/papi/${id}` : `/api/${parts[2]}/intent/${id}`;
 const $ = <T extends HTMLElement>(i: string) => document.getElementById(i) as T;
 
 const CHAINS: Record<string, string> = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR", base: "Base", arb: "Arbitrum", op: "Optimism", pol: "Polygon", bsc: "BNB Chain", avax: "Avalanche" };
+/** Reown registry ids: MetaMask, Trust, Phantom, Coinbase, Rainbow, Solflare, OKX, Binance. */
+const WALLET_IDS = [
+  "c57ca95b47569778a828d19178114f4db188b89b763c899ba0be274e97267d96", "4622a2b2d6af1c9844944291e5e7351a6aa24cd7b23099efac1b2fd875da31a0", "a797aa35c0fadbfc1a53e7f675162ed5226968b44a19ee3d24385c64d1d3c393",
+  "fd20dc426fb37566d803205b19bbc1d4096b248ac04548e3cfb6b3a38bd033aa", "1ae92b26df02f0abca6304df07debccd18262fdf5fe82daa81593582dac9a369", "1ca0bdd4747578705b1939af023d120677c64fe6ca76add81fda36e350605e79",
+  "971e689d0a5be527bac79629b4ee9b925e82208e5168b733496a09c0faed0709", "8a0ee50d1f22f6651afcae7eb4253e52a3310b90af5daef78a8c4929a9bb99d4",
+];
 const WC_NETS: Record<string, { net: unknown; caip: string }> = {
   eth: { net: mainnet, caip: "eip155:1" }, base: { net: baseNet, caip: "eip155:8453" }, arb: { net: arbitrum, caip: "eip155:42161" }, op: { net: optimism, caip: "eip155:10" },
   pol: { net: polygon, caip: "eip155:137" }, bsc: { net: bsc, caip: "eip155:56" }, avax: { net: avalanche, caip: "eip155:43114" }, sol: { net: solana, caip: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
@@ -128,6 +134,7 @@ async function track(depositAddress: string, manual = false) {
       const s = await api<{ state: string; txHash?: string; explorerUrl?: string }>(`${base}/status`);
       if (s.state === "SUCCESS") {
         $("title").textContent = "Delivered";
+        if (window.parent !== window) window.parent.postMessage({ moopay: "delivered" }, location.origin);
         $("deposit").classList.add("hidden");
         const done = $("done");
         done.classList.remove("hidden");
@@ -172,7 +179,10 @@ async function wcConnect(chain: string): Promise<Conn> {
   const net = WC_NETS[chain]!;
   kit ??= createAppKit({
     projectId: intent.wcProjectId, networks: [mainnet, baseNet, arbitrum, optimism, polygon, bsc, avalanche, solana], themeMode: "dark",
-    metadata: { name: "MooPay", description: "Private payments", url: location.origin, icons: [`${location.origin}/p/assets/favicon.png`] },
+    // The wallets people actually use, instead of Reown's full catalogue. Wallets installed in this browser always show first.
+    includeWalletIds: WALLET_IDS, allWallets: "HIDE", enableWalletGuide: false,
+    // Where the wallet app sends the user back to after approving.
+    metadata: { name: "MooPay", description: "Private payments", url: location.origin, icons: [`${location.origin}/p/assets/favicon.png`], redirect: { universal: location.href.split("#")[0]! } },
     features: { analytics: false, email: false, socials: false, onramp: false, swaps: false },
   });
   const k = kit;

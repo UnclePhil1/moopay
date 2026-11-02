@@ -64,6 +64,10 @@
   .modal .err { color:var(--bad); font-size:13px; margin-top:8px; min-height:0; }
   .modal .btns { justify-content:flex-end; margin-top:18px; } .btn.danger { background:var(--bad); }
   @keyframes fade { from { opacity:0; } }
+  .sheet { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:12px; }
+  .sheet .box { position:relative; width:min(480px,100%); height:min(760px,100%); background:#141414; border:1px solid var(--line2); border-radius:22px; overflow:hidden; }
+  .sheet iframe { width:100%; height:100%; border:0; background:transparent; }
+  .sheet .x { position:absolute; top:8px; right:10px; z-index:2; border:0; background:rgba(255,255,255,.1); color:#fff; width:30px; height:30px; border-radius:50%; font-size:18px; cursor:pointer; }
   .btns { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
   .btn { border:0; border-radius:999px; background:#fff; color:#000; padding:11px 22px; font-weight:700; }
   .btn.ghost { background:none; color:var(--text); border:1px solid var(--line2); } .btn:disabled { opacity:.45; cursor:default; }
@@ -235,6 +239,15 @@ const row = (k, v) => h("div", { class: "row" }, h("span", {}, k), h("b", {}, v)
 const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
 
 /* cards */
+/** Pay and sign without leaving the chat: the pay page opens as a sheet over it. */
+function openSheet(url) {
+  const close = () => { box.remove(); window.removeEventListener("message", onMsg); };
+  const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") setTimeout(close, 2500); };
+  const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
+    h("div", { class: "box" }, h("button", { class: "x", onclick: close, "aria-label": "Close" }, "\u00d7"), h("iframe", { src: url + (url.includes("?") ? "&" : "?") + "embed=1", allow: "clipboard-write" })));
+  window.addEventListener("message", onMsg);
+  document.body.append(box);
+}
 function card(c) {
   switch (c.kind) {
     case "account": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your agent wallet"),
@@ -256,16 +269,16 @@ function card(c) {
       h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
       c.memo ? row("Memo (required)", c.memo) : null, c.expected ? row("Result", c.expected) : null, c.expires ? row("Send before", new Date(c.expires).toLocaleTimeString()) : null,
       h("div", { class: "sub", style: "margin-top:10px" }, c.note));
+    case "batch": return h("div", { class: "card" }, h("h3", {}, c.title), ...c.rows.map((r) => h("div", {}, row(short(r.to) + " (" + r.chain + ")", r.amount + " \u00b7 " + r.status), r.url ? h("div", { class: "btns", style: "margin:4px 0 8px" }, h("button", { class: "btn", onclick: () => openSheet(r.url) }, "Confirm and sign")) : null)));
+    case "groupclaim": return h("div", { class: "card" }, h("div", { class: "sub" }, "One link, a private claim for each wallet"), h("div", { class: "big" }, usd(c.total)),
+      h("div", { class: "code" }, h("code", {}, c.link), h("button", { onclick: (e) => copy(c.link, e.target) }, "Copy")),
+      ...c.rows.map((r) => row(short(r.to) + " (" + r.chain + ")", r.amount)), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
     case "confirm_send": {
-      const go = h("button", { class: "btn", onclick: () => {
-        const w = window.open(c.url, "moopay-pay", "popup=yes,width=480,height=780");
-        if (!w) window.open(c.url, "_blank", "noopener");
-        go.textContent = "Open again";
-      } }, "Confirm and sign");
+      const go = h("button", { class: "btn", onclick: () => { openSheet(c.url); go.textContent = "Open again"; } }, "Confirm and sign");
       return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), row("To", short(c.to) + " (" + c.chain + ")"),
         h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
     }
-    case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("a", { class: "btn", href: c.url, target: "_blank", rel: "noopener noreferrer", style: "text-decoration:none;color:#000" }, c.button)));
+    case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => openSheet(c.url) }, c.button)));
     case "recovery": {
       if (isTemp()) return h("div", { class: "card" }, h("div", { class: "sub" }, "This is a temporary session, so no recovery code is kept on this device. Use the one you saved on your own device."));
       const code = deviceToken(), el = h("div", { class: "card" }, h("div", { class: "sub" }, "Your recovery code. Save it somewhere safe, like a password manager."),

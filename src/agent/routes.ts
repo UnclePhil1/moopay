@@ -98,6 +98,20 @@ export function makeAgent(d: AgentDeps) {
     }
     const img = /^\/app\/assets\/([a-z-]+\.png)$/.exec(p);
     if (req.method === "GET" && img && IMAGES.has(img[1]!)) { res.setHeader("content-type", "image/png"); res.setHeader("cache-control", "public, max-age=3600"); res.end(appFile(`assets/${img[1]}`)); return true; }
+    const gp = /^\/g\/([\w-]{6,40})$/.exec(p);
+    if (gp && req.method === "GET") { // the page a group claim link opens
+      const nonce = randomBytes(16).toString("base64url");
+      res.setHeader("content-type", "text/html; charset=utf-8"); pageHeaders(res, nonce);
+      res.end(withNonce(appFile("group.html"), nonce));
+      return true;
+    }
+    const ga = /^\/gapi\/([\w-]{6,40})$/.exec(p);
+    if (ga && req.method === "GET") {
+      if (!strictLimit(clientIp(req) + "|group")) { json(res, 429, { code: "UPSTREAM_TIMEOUT", message: "Slow down a little and try again in a moment." }); return true; }
+      const key = store.groupFind(ga[1]!, url.searchParams.get("address") ?? "");
+      json(res, key ? 200 : 404, key ? { link: `${origin}/c/${key}` } : { message: "That wallet is not part of this group link. Check the address." });
+      return true;
+    }
     if (!p.startsWith("/agent/api/")) return false;
     lastOrigin = origin;
     const ip = clientIp(req), op0 = p.slice("/agent/api/".length);

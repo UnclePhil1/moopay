@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<title>Claim with MooPay</title>
+<link rel="icon" href="/app/assets/favicon.png">
+<style>
+  :root { --bg:#0a0a0a; --card:#141414; --line:rgba(255,255,255,.1); --text:#fff; --muted:#a3a3a3; --bad:#ff8a8a; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,sans-serif; display:grid; place-items:start center; padding:32px 16px; }
+  main { width:min(460px,100%); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:24px; padding:26px; }
+  h1 { font-size:30px; line-height:1.1; margin:0 0 6px; }
+  p { color:var(--muted); margin:0 0 18px; font-size:15px; }
+  input { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px system-ui,sans-serif; }
+  button { width:100%; margin-top:14px; padding:16px; border:0; border-radius:999px; background:#fff; color:#000; font:700 17px system-ui,sans-serif; cursor:pointer; }
+  button:disabled { opacity:.55; }
+  #msg { margin-top:14px; font-size:14px; color:var(--bad); min-height:20px; overflow-wrap:anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>You have money waiting</h1>
+    <p>Enter the wallet address this was sent to. You will only see your own claim.</p>
+    <input id="addr" placeholder="Your wallet address" autocomplete="off" spellcheck="false">
+    <button id="go" type="button">Find my claim</button>
+    <div id="msg"></div>
+  </div>
+</main>
+<script>
+const id = location.pathname.split("/")[2];
+const msg = document.getElementById("msg"), go = document.getElementById("go"), addr = document.getElementById("addr");
+async function find() {
+  const a = addr.value.trim();
+  if (!a) { msg.textContent = "Enter your wallet address first."; return; }
+  go.disabled = true; msg.textContent = "";
+  try {
+    const r = await fetch("/gapi/" + encodeURIComponent(id) + "?address=" + encodeURIComponent(a));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.message || "Not found");
+    location.href = j.link;
+  } catch (e) { msg.textContent = e.message; go.disabled = false; }
+}
+go.addEventListener("click", find);
+addr.addEventListener("keydown", (e) => { if (e.key === "Enter") find(); });
+</script>
+</body>
+</html>

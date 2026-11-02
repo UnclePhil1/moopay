@@ -27,8 +27,10 @@ export interface Payment {
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;
 }
-export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
-export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; every: "day" | "week" | "month"; nextAt: number; text: string }
+export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
+/** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
+export interface GroupItem { chain: string; recipient: string; amountUsd?: string; amount?: string; assetSymbol?: string }
+export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; items?: GroupItem[]; every: "day" | "week" | "month"; nextAt: number; text: string }
 export interface AgentEvent { id: number; at: number; text: string; card?: unknown }
 export interface Session { hash: string; createdAt: number; expiresAt: number }
 export interface UserRec {
@@ -42,6 +44,8 @@ export interface UserRec {
   spent: { day: string; usd: number }; known: string[];
   payments: Payment[]; approvals: Approval[]; tasks: Task[]; events: AgentEvent[]; nextEventId: number;
   sponsoredAt?: number; agents: AgentKey[];
+  /** one shared link, one private claim per named wallet */
+  groups?: { id: string; at: number; entries: { receiver: string; chain: string; claimKey: string }[] }[];
   chat: { id?: string; at?: number; role: "user" | "assistant"; content: string }[]; seen: { usdc: string; near: string }; msgTimes: number[];
 }
 
@@ -137,6 +141,12 @@ export class AgentStore {
     return undefined;
   }
   all(): UserRec[] { return [...this.users.values()]; }
+  /** The claim link of one wallet inside a group link. Nothing about the other entries is revealed. */
+  groupFind(gid: string, address: string): string | undefined {
+    const norm = (a: string) => (a.startsWith("0x") || a.includes(".") ? a.toLowerCase() : a);
+    for (const u of this.users.values()) for (const g of u.groups ?? []) if (g.id === gid) return g.entries.find((e) => norm(e.receiver) === norm(address.trim()))?.claimKey;
+    return undefined;
+  }
 
   /** Applies a held-back payout wallet change once its time has come. */
   settlePayout(u: UserRec, now = Date.now()): void {

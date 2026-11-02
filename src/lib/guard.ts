@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 /** Headers every response carries. HSTS only when the request came in over https. */
 export function securityHeaders(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("x-frame-options", "SAMEORIGIN"); // pay pages open as a sheet inside our own chat page and nowhere else
   res.setHeader("referrer-policy", "no-referrer"); // claim links carry a secret in the path
   res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (String(req.headers["x-forwarded-proto"] ?? "").startsWith("https")) res.setHeader("strict-transport-security", "max-age=31536000");

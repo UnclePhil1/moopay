@@ -40,9 +40,9 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
   for (const t of u.tasks.filter((x) => x.nextAt <= now)) {
     t.nextAt = now + PERIOD[t.every];
     try {
-      const out = await ops.send(u, { amountUsd: String(t.amountUsd), chain: t.chain, recipient: t.recipient, assetSymbol: t.assetSymbol }, false);
+      const out = t.items ? await ops.sendMany(u, t.items, false) : await ops.send(u, { amountUsd: String(t.amountUsd), chain: t.chain, recipient: t.recipient, assetSymbol: t.assetSymbol }, false);
       const st = out.result["status"];
-      if (st === "sent") store.event(u, `Scheduled payment sent: ${t.text}.`, out.card);
+      if (st === "sent" || st === "group_done") store.event(u, `Scheduled payment sent: ${t.text}.`, out.card);
       else if (st === "needs_approval") store.event(u, `Your scheduled payment (${t.text}) needs your OK.`, out.card);
       else store.event(u, `Skipped a scheduled payment (${t.text}): ${String(out.result["reason"] ?? "not allowed by your rules")}.`);
     } catch (e) { store.event(u, `Could not run a scheduled payment (${t.text}): ${msg(e)}`); }

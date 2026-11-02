@@ -744,3 +744,50 @@ test("the pay page quotes and signs from EVM and Solana wallets, and the payment
   const ev = view.assets.find((x) => x.chain === "eth" && x.symbol === "USDC");
   if (ev) await assert.rejects(a.svc.payQuote(pid, ev.assetId, "bob.near"), code("INVALID_INPUT"));
 });
+
+test("group payout: many receivers, chains and assets in one request, one approval for the batch", async () => {
+  const a = agent();
+  a.fund(100);
+  const items = [
+    { chain: "near" as const, recipient: BOB, amountUsd: "5" },
+    { chain: "near" as const, recipient: "carol.near", amountUsd: "4" },
+    { chain: "eth" as const, recipient: ETH_ADDR, amountUsd: "3", assetSymbol: "USDC" },
+  ];
+  await assert.rejects(a.ops.sendMany(a.u, items.slice(0, 1), false, {}, CTX), code("INVALID_INPUT"));
+  const ask = await a.ops.sendMany(a.u, [{ ...items[0]!, amountUsd: "15" }, items[1]!], false, {}, CTX);
+  assert.equal(ask.result["status"], "needs_approval", "new recipients above the limit ask once for the whole batch");
+  assert.equal(a.u.approvals.length, 1);
+  const rows = (ask.card as { details: [string, string][] }).details;
+  assert.equal(rows.length, 2, "every line is listed on the approval card");
+  assert.equal(a.near.transfers.length, 0);
+  const done = await a.ops.resolve(a.u, a.u.approvals[0]!.id, true, CTX);
+  assert.equal(done.result["status"], "group_done");
+  assert.equal(done.result["sent"], 2);
+  const mixed = await a.ops.sendMany(a.u, items.map((i) => ({ ...i, amountUsd: "2" })), false, {}, CTX);
+  assert.equal(mixed.result["status"], "group_done");
+  assert.equal(mixed.result["sent"], 3, "NEAR and Ethereum lines ran from the same wallet");
+  const over = await a.ops.sendMany(a.u, items.map((i) => ({ ...i, amountUsd: "40" })), false, {}, CTX);
+  assert.equal(over.result["status"], "denied", "the daily cap counts the total of the batch");
+});
+
+test("group payout can be scheduled and runs each period", async () => {
+  const a = agent();
+  a.fund(100);
+  const r = await a.ops.scheduleGroup(a.u, [{ chain: "near", recipient: BOB, amountUsd: "2" }, { chain: "near", recipient: "carol.near", amountUsd: "3" }], "week");
+  assert.equal(r.result["status"], "scheduled");
+  assert.equal(a.u.tasks[0]?.items?.length, 2);
+  assert.equal(a.u.tasks[0]?.amountUsd, 5);
+});
+
+test("group claim: one link, each wallet finds only its own claim", async () => {
+  const a = agent();
+  a.fund(100);
+  const r = await a.ops.groupClaim(a.u, [{ receiver: BOB, amountUsd: "3" }, { receiver: "carol.near", amountUsd: "4" }], CTX);
+  assert.equal(r.result["status"], "created", String(r.result["reason"] ?? ""));
+  const gid = String(r.result["groupLink"]).split("/g/")[1]!;
+  const bob = a.store.groupFind(gid, "Bob.near"), carol = a.store.groupFind(gid, "carol.near");
+  assert.ok(bob && carol && bob !== carol, "each wallet gets its own claim");
+  assert.equal(a.store.groupFind(gid, "eve.near"), undefined, "a wallet outside the group finds nothing");
+  assert.equal(a.store.groupFind("nope-nope", BOB), undefined);
+  await assert.rejects(a.ops.groupClaim(a.u, [{ receiver: BOB, amountUsd: "3" }, { receiver: "BOB.near", amountUsd: "4" }], CTX), code("INVALID_INPUT"));
+});
