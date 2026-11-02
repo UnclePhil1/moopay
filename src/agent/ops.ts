@@ -174,7 +174,8 @@ export class AgentOps {
     // What the receiver gets, whole. The swap fees are added on top of what the wallet pays.
     const destUnits = coinUnits ?? (/^US(DC|DT)$/.test(sym) ? parseDecimal(usdText, dest.decimals) : price ? BigInt(Math.ceil((amt / price) * 10 ** Math.min(dest.decimals, 12))) * 10n ** BigInt(Math.max(dest.decimals - 12, 0)) : units);
     // Straight from the wallet when it already holds that coin: NEAR to a NEAR wallet, or USDC to a NEAR wallet.
-    let direct: "usdc" | "near" | undefined = chain === "near" && sym === "USDC" ? "usdc" : undefined;
+    let direct: "usdc" | "near" | "usdt" | undefined = chain === "near" && sym === "USDC" ? "usdc" : undefined;
+    if (chain === "near" && sym === "USDT") { const b = await this.balances(u); if (b.usdtA && b.usdt >= destUnits && b.nat >= MIN_GAS) direct = "usdt"; }
     let nearUnits = 0n;
     if (nativeNear) {
       nearUnits = coinUnits ?? BigInt(Math.round((amt / price!) * 1e6)) * 10n ** 18n;
@@ -193,7 +194,7 @@ export class AgentOps {
     if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
     let pay: Payment;
     try {
-      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
+      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
     } catch (e) {
       // Short on the agent wallet after all (fees, a price move): hand over to the user's own wallet instead of failing.
       if (ctx && !who.ak && p.useAgentWallet !== true && asMoopayError(e).code === "NOTE_NOT_FUNDED") return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt) }, ctx);
@@ -246,9 +247,9 @@ export class AgentOps {
   }
 
   /** Whether the agent wallet can pay this by itself, including the network fee. */
-  private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | undefined, units: bigint): Promise<boolean> {
+  private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | "usdt" | undefined, units: bigint): Promise<boolean> {
     const b = await this.balances(u);
-    if (direct === "near") return true; // already checked against the balance above
+    if (direct === "near" || direct === "usdt") return true; // already checked against the balance above
     if (direct === "usdc" && b.tok < units) return false;
     return b.totalUsd >= amt * 1.02 && (b.nat >= MIN_GAS || !!this.sponsor);
   }
@@ -272,6 +273,17 @@ export class AgentOps {
   private async doSendNear(u: UserRec, amount: bigint, amt: number, to: string, ak?: AgentKey): Promise<Payment> {
     const k = this.store.keyOf(u);
     const r = await this.near.sendNear({ accountId: k.accountId, secretKey: k.secretKey, to, amount });
+    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
+    this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
+    this.spend(u, amt, this.recipientKey("near", to), ak);
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    return pay;
+  }
+
+  /** Another NEAR token the wallet already holds (USDT), straight to a NEAR wallet. */
+  private async doSendToken(u: UserRec, contract: string, amount: bigint, amt: number, to: string, ak?: AgentKey): Promise<Payment> {
+    const k = this.store.keyOf(u);
+    const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: contract, to, amount });
     const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
     this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     this.spend(u, amt, this.recipientKey("near", to), ak);

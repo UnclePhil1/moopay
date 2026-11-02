@@ -101,9 +101,9 @@ async function main(): Promise<void> {
         if (rest.length === 2 && req.method === "GET") return sendJson(await service.payIntentView(id));
         if (rest[2] === "status" && req.method === "GET") return sendJson(await service.payStatus(id));
         if (rest[2] === "blockhash" && req.method === "GET") return sendJson(await service.solBlockhash());
-        if (rest[2] === "sol-done" && req.method === "POST") {
-          const b = (await readJson(req)) as { signature?: unknown } | undefined;
-          return sendJson(service.solDone(id, typeof b?.signature === "string" ? b.signature : ""));
+        if (rest[2] === "paid" && req.method === "POST") {
+          const b = (await readJson(req)) as { tx?: unknown } | undefined;
+          return sendJson(service.directDone(id, typeof b?.tx === "string" ? b.tx : ""));
         }
         if (rest[2] === "sol-check" && req.method === "GET") return sendJson(await service.solCheck(url.searchParams.get("owner") ?? "", url.searchParams.get("mint") ?? undefined, url.searchParams.get("to") ?? undefined));
         if (rest[2] === "sol-send" && req.method === "POST") {

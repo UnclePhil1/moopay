@@ -24,6 +24,8 @@ export interface NearOps {
   call(p: { accountId: string; secretKey: string; contractId: string; method: string; args: Record<string, unknown>; deposit: bigint; gas: bigint }): Promise<{ txHash: string }>;
   /** Read-only contract call. */
   view(contractId: string, method: string, args?: Record<string, unknown>): Promise<unknown>;
+  /** A transaction the payer's wallet signed: did it succeed, who got it, what did it do. Null until the chain has it. */
+  txStatus(txHash: string, signerId: string): Promise<{ ok: boolean; receiver: string; actions: Record<string, any>[] } | null>; // eslint-disable-line @typescript-eslint/no-explicit-any
   /** ft_transfer from the note account to `to`, signed with the note key. */
   transferFromNote(p: {
     accountId: string;
@@ -116,6 +118,18 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         return { txHash: out.transaction.hash as string };
       } catch {
         throw new MoopayError("DEPOSIT_FAILED", "could not wrap NEAR for the swap");
+      }
+    },
+
+    async txStatus(txHash, signerId) {
+      try {
+        const r = (await provider.viewTransactionStatus({ txHash, accountId: signerId, waitUntil: "EXECUTED_OPTIMISTIC" })) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+        if (!r?.transaction) return null;
+        const failed = (s: any) => s && typeof s === "object" && "Failure" in s; // eslint-disable-line @typescript-eslint/no-explicit-any
+        const ok = !failed(r.status) && !(r.receipts_outcome ?? []).some((o: any) => failed(o.outcome?.status)); // eslint-disable-line @typescript-eslint/no-explicit-any
+        return { ok, receiver: String(r.transaction.receiver_id), actions: r.transaction.actions as Record<string, any>[] }; // eslint-disable-line @typescript-eslint/no-explicit-any
+      } catch {
+        return null;
       }
     },
 

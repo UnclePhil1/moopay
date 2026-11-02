@@ -141,6 +141,9 @@ const PAY_FROM = [...Object.keys(EVM_IDS), "sol"];
 /** Throwaway addresses for dry quotes, which never reserve anything. */
 const DRY_REFUND: Record<string, string> = { near: "estimate.near", sol: "So11111111111111111111111111111111111111112" };
 const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/;
+/** Public RPCs used to confirm a direct EVM payment landed. Set EVM_RPC_<CHAIN> (e.g. EVM_RPC_BASE) to use your own. */
+const EVM_RPC: Record<string, string> = { eth: "https://ethereum-rpc.publicnode.com", base: "https://mainnet.base.org", arb: "https://arb1.arbitrum.io/rpc", op: "https://mainnet.optimism.io", pol: "https://polygon-rpc.com", bsc: "https://bsc-dataseed.binance.org", avax: "https://api.avax.network/ext/bc/C/rpc" };
+const ERC20_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const EXPLORERS: Record<string, string> = { sol: "https://solscan.io/tx/", eth: "https://etherscan.io/tx/", btc: "https://mempool.space/tx/", near: "https://nearblocks.io/txns/", base: "https://basescan.org/tx/", arb: "https://arbiscan.io/tx/", op: "https://optimistic.etherscan.io/tx/", pol: "https://polygonscan.com/tx/", bsc: "https://bscscan.com/tx/", avax: "https://snowtrace.io/tx/" };
 
 /** payAmount is a dollar value. Stablecoins are 1:1; NEAR is converted at 1Click's price, rounded up so the recipient is not short. */
@@ -458,38 +461,82 @@ export class MooPayService {
     return { amountIn: BigInt(r.amountIn), payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: r.expectedOutput, withdrawFee: r.quote["withdrawFee"], timeEstimate: r.quote["timeEstimate"] };
   }
 
-  private isDirect(i: PayIntent, a: PayAsset): boolean { return a.chain === "sol" && i.destinationChain === "sol" && a.assetId === i.destinationAssetId; }
+  /** Same chain and same coin: nothing to swap or bridge, so the payer's wallet sends straight to the recipient. */
+  private isDirect(i: PayIntent, a: PayAsset): boolean { return a.chain === i.destinationChain && a.assetId === i.destinationAssetId; }
 
-  /** The page reports the signature of a direct payment; payStatus then checks the chain for it. */
-  solDone(id: string, signature: string): { ok: true } {
-    if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(signature)) throw new MoopayError("INVALID_INPUT", "that does not look like a transaction signature");
-    if (!this.pay.get(id).direct) throw new MoopayError("INVALID_INPUT", "this payment is not a direct transfer");
-    this.pay.setSig(id, signature);
+  /** The page reports the transaction its wallet sent for a direct payment; payStatus then checks the chain for it. */
+  directDone(id: string, tx: string): { ok: true } {
+    const i = this.pay.get(id);
+    if (!i.direct) throw new MoopayError("INVALID_INPUT", "this payment is not a direct transfer");
+    const shape = i.destinationChain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{64,90}$/ : i.destinationChain === "near" ? /^[1-9A-HJ-NP-Za-km-z]{43,44}$/ : /^0x[0-9a-fA-F]{64}$/;
+    if (!shape.test(tx)) throw new MoopayError("INVALID_INPUT", "that does not look like a transaction id");
+    this.pay.setSig(id, tx);
     return { ok: true };
+  }
+
+  private async evmRpc(chain: string, method: string, params: unknown[]): Promise<any> { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const url = process.env[`EVM_RPC_${chain.toUpperCase()}`] ?? EVM_RPC[chain];
+    if (!url) throw new MoopayError("UPSTREAM_TIMEOUT", `no RPC for ${chain}`);
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(8000) });
+    return ((await r.json()) as { result?: unknown }).result;
   }
 
   /** A direct payment is delivered once the chain shows the recipient received the amount. Nothing the page says is trusted. */
   private async directStatus(i: PayIntent) {
-    const base = { depositAddress: i.recipient, recipient: i.recipient, chain: i.destinationChain };
+    const chain = i.destinationChain, base = { depositAddress: i.recipient, recipient: i.recipient, chain, direct: true };
     if (!i.sig) return { state: "PROCESSING", ...base };
     const asset = (await this.payAssetsAll()).find((a) => a.assetId === i.destinationAssetId);
     if (!asset) throw new MoopayError("UNKNOWN_ASSET", "that asset is not offered for payment");
     const want = await this.receiverUnits(i);
-    const tx = await this.solRpc("getTransaction", [i.sig, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
-    if (!tx) return { state: "PROCESSING", ...base };
-    if (tx.meta?.err) return { state: "FAILED", ...base };
-    let got = 0n;
-    if (asset.native) {
-      const keys = (tx.transaction.message.accountKeys as ({ pubkey?: string } | string)[]).map((k) => (typeof k === "string" ? k : k.pubkey));
-      const n = keys.indexOf(i.recipient);
-      if (n >= 0) got = BigInt(tx.meta.postBalances[n]) - BigInt(tx.meta.preBalances[n]);
-    } else {
-      const sum = (rows: { owner?: string; mint: string; uiTokenAmount: { amount: string } }[] | undefined) => (rows ?? []).filter((r) => r.owner === i.recipient && r.mint === asset.contract).reduce((t, r) => t + BigInt(r.uiTokenAmount.amount), 0n);
-      got = sum(tx.meta.postTokenBalances) - sum(tx.meta.preTokenBalances);
-    }
-    if (got < want) return { state: "FAILED", ...base };
+    let verdict: "pending" | "failed" | "ok";
+    try { verdict = await this.directVerdict(i, asset, want); } catch { verdict = "pending"; } // an RPC hiccup is not a failed payment
+    if (verdict === "pending") return { state: "PROCESSING", ...base };
+    if (verdict === "failed") return { state: "FAILED", ...base };
     this.d.stats?.record(i.sig, Number(i.payAmount), i.payer ?? i.recipient);
-    return { state: "SUCCESS", ...base, txHash: i.sig, explorerUrl: this.explorerUrl("sol", i.sig) };
+    return { state: "SUCCESS", ...base, txHash: i.sig, explorerUrl: this.explorerUrl(chain, i.sig) };
+  }
+
+  private async directVerdict(i: PayIntent, asset: PayAsset, want: bigint): Promise<"pending" | "failed" | "ok"> {
+    const sig = i.sig!, chain = i.destinationChain;
+    if (chain === "sol") {
+      const tx = await this.solRpc("getTransaction", [sig, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
+      if (!tx) return "pending";
+      if (tx.meta?.err) return "failed";
+      let got = 0n;
+      if (asset.native) {
+        const keys = (tx.transaction.message.accountKeys as ({ pubkey?: string } | string)[]).map((k) => (typeof k === "string" ? k : k.pubkey));
+        const n = keys.indexOf(i.recipient);
+        if (n >= 0) got = BigInt(tx.meta.postBalances[n]) - BigInt(tx.meta.preBalances[n]);
+      } else {
+        const sum = (rows: { owner?: string; mint: string; uiTokenAmount: { amount: string } }[] | undefined) => (rows ?? []).filter((r) => r.owner === i.recipient && r.mint === asset.contract).reduce((t, r) => t + BigInt(r.uiTokenAmount.amount), 0n);
+        got = sum(tx.meta.postTokenBalances) - sum(tx.meta.preTokenBalances);
+      }
+      return got >= want ? "ok" : "failed";
+    }
+    if (chain === "near") {
+      const tx = await this.d.near.txStatus(sig, i.payer ?? "");
+      if (!tx) return "pending";
+      if (!tx.ok) return "failed";
+      const acts = tx.actions;
+      if (asset.native) return tx.receiver === i.recipient && acts.some((x) => x["Transfer"] && BigInt(x["Transfer"].deposit) >= want) ? "ok" : "failed";
+      const hit = acts.some((x) => {
+        const f = x["FunctionCall"];
+        if (!f || f.method_name !== "ft_transfer") return false;
+        const args = JSON.parse(Buffer.from(f.args, "base64").toString()) as { receiver_id?: string; amount?: string };
+        return args.receiver_id === i.recipient && BigInt(args.amount ?? "0") >= want;
+      });
+      return tx.receiver === asset.contract && hit ? "ok" : "failed";
+    }
+    const rc = await this.evmRpc(chain, "eth_getTransactionReceipt", [sig]);
+    if (!rc) return "pending";
+    if (rc.status !== "0x1") return "failed";
+    const to = i.recipient.toLowerCase();
+    if (asset.native) {
+      const tx = await this.evmRpc(chain, "eth_getTransactionByHash", [sig]);
+      return tx && String(tx.to).toLowerCase() === to && BigInt(tx.value) >= want ? "ok" : "failed";
+    }
+    const hit = (rc.logs as { address: string; topics: string[]; data: string }[]).some((l) => l.address.toLowerCase() === asset.contract.toLowerCase() && l.topics[0] === ERC20_TRANSFER && l.topics[2] && "0x" + l.topics[2].slice(26).toLowerCase() === to && BigInt(l.data) >= want);
+    return hit ? "ok" : "failed";
   }
 
   /** Creates the real 1Click deposit address and the exact transfer for the user's wallet to sign. */
@@ -499,7 +546,9 @@ export class MooPayService {
     if (!okRefund) throw new MoopayError("INVALID_INPUT", `refundTo must be your ${asset.chain === "near" ? "NEAR account" : asset.chain === "sol" ? "Solana" : "EVM"} address`);
     if (this.isDirect(i, asset)) { // same chain, same coin: no swap, so no solver wait and no fee
       this.pay.direct(id, refundTo);
-      return { chain: "sol", direct: true, depositAddress: i.recipient, quoteExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), expectedOutput: { amountOut: out.toString() }, transfer: { kind: "sol" as const, to: i.recipient, amount: out, native: asset.native, contract: asset.contract } };
+      const head = { direct: true, chain: asset.chain, depositAddress: i.recipient, quoteExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), expectedOutput: { amountOut: out.toString() } };
+      if (asset.chain === "near") return { ...head, transfer: { kind: "near" as const, contract: asset.contract, receiverId: i.recipient, amount: out, native: asset.native, needsRegistration: asset.native ? false : !(await this.d.near.storageRegistered(asset.contract, i.recipient)), to: i.recipient } };
+      return { ...head, transfer: { kind: asset.chain === "sol" ? "sol" as const : "evm" as const, to: i.recipient, amount: out, native: asset.native, contract: asset.contract, ...(asset.chainId ? { chainId: asset.chainId } : {}) } };
     }
     const r = (await this.routeDirect(this.directFor(i, originAssetId, out, refundTo, false))) as {
       depositAddress: string;

@@ -133,7 +133,7 @@ async function track(depositAddress: string, manual = false) {
   $("title").textContent = manual ? "Waiting for your payment" : "Sending…";
   for (;;) {
     try {
-      const s = await api<{ state: string; txHash?: string; explorerUrl?: string }>(`${base}/status`);
+      const s = await api<{ state: string; txHash?: string; explorerUrl?: string; direct?: boolean }>(`${base}/status`);
       if (s.state === "SUCCESS") {
         $("title").textContent = "Delivered";
         if (window.parent !== window) window.parent.postMessage({ moopay: "delivered" }, location.origin);
@@ -152,7 +152,8 @@ async function track(depositAddress: string, manual = false) {
         say("dmsg", s.state === "REFUNDED" ? "The swap did not go through and your money was sent back to your wallet." : `Status: ${s.state}. Ask your AI to check this payment.`, "err");
         return;
       }
-      say("dmsg", s.state === "PENDING_DEPOSIT" ? "Waiting for your payment to arrive…" : "Payment received. Delivering…");
+      const where = CHAINS[intent.destinationChain] ?? intent.destinationChain;
+      say("dmsg", s.direct ? `Sent. Confirming on ${where}…` : s.state === "PENDING_DEPOSIT" ? "Your payment is on its way…" : `Moving your money to ${where}…`);
     } catch {
       say("dmsg", "Checking status…");
     }
@@ -260,6 +261,9 @@ async function solSigner(): Promise<SolSigner> {
   };
 }
 
+/** A straight transfer (same chain, same coin): tell the server which transaction the wallet sent so it can confirm it on-chain. */
+const reportPaid = (tx: string) => api(`${base}/paid`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx }) });
+
 async function sendOther(a: Asset) {
   if (a.chain === "sol") {
     const signer = await solSigner();
@@ -284,7 +288,7 @@ async function sendOther(a: Asset) {
       $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`;
       throw new Error("manual");
     }
-    if (q.direct && sig) await api(`${base}/sol-done`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ signature: sig }) });
+    if (q.direct && sig) await reportPaid(sig);
     return q;
   }
   const eth = w.ethereum;
@@ -302,8 +306,10 @@ async function sendOther(a: Asset) {
   const amount = BigInt(q.transfer.amount);
   const tx = a.native ? { from: conn.account, to: q.transfer.to, value: hex(amount) } : { from: conn.account, to: a.contract, data: "0xa9059cbb" + pad(q.transfer.to) + pad(hex(amount)) };
   say("msg", "Approve the payment in your wallet…");
-  try { await conn.request("eth_sendTransaction", [tx]); }
+  let hash: unknown;
+  try { hash = await conn.request("eth_sendTransaction", [tx]); }
   catch { showManual(q, a); $("dlabel").textContent = `Your wallet did not send it. Send this from your ${chainName(a.chain)} wallet yourself`; throw new Error("manual"); }
+  if (q.direct && typeof hash === "string") await reportPaid(hash);
   return q;
 }
 
@@ -343,7 +349,7 @@ async function send() {
 
     // wallet-selector v10 takes near-api-js actions and converts them for each wallet.
     const call = (methodName: string, args: object, deposit: string) => najActions.functionCall(methodName, args, 30n * TGAS, BigInt(deposit));
-    const actions = [
+    const actions = q.direct && q.transfer.native ? [najActions.transfer(BigInt(q.transfer.amount))] : [ // a straight NEAR payment is one plain transfer
       // Plain NEAR: wrap it first, in the same signature (the contract is wrap.near).
       ...(q.transfer.native ? [call("near_deposit", {}, q.transfer.wrapDeposit ?? q.transfer.amount)] : []),
       ...(q.transfer.needsRegistration
@@ -352,7 +358,9 @@ async function send() {
       call("ft_transfer", { receiver_id: q.transfer.receiverId, amount: q.transfer.amount }, "1"),
     ];
     const wallet = await selector.wallet();
-    await wallet.signAndSendTransaction({ signerId: account, receiverId: q.transfer.contract, actions: actions as never });
+    const done = (await wallet.signAndSendTransaction({ signerId: account, receiverId: q.direct && q.transfer.native ? q.transfer.receiverId : q.transfer.contract, actions: actions as never })) as { transaction?: { hash?: string }; transaction_outcome?: { id?: string } } | void;
+    const hash = done?.transaction?.hash ?? done?.transaction_outcome?.id;
+    if (q.direct && hash) await reportPaid(hash);
     await track(q.depositAddress);
   } catch (e) {
     btn.disabled = false;
@@ -419,7 +427,11 @@ async function main() {
 
   // A redirect wallet (MyNearWallet) returns here after signing.
   const pending = sessionStorage.getItem(`moopay:${id}`);
-  if (pending && /transactionHashes/.test(location.search)) void track(pending);
+  if (pending && /transactionHashes/.test(location.search)) {
+    const back = new URLSearchParams(location.search).get("transactionHashes")?.split(",")[0];
+    if (back) await reportPaid(back).catch(() => undefined); // only a straight transfer accepts this; a swap ignores it
+    void track(pending);
+  }
 }
 
 void main();

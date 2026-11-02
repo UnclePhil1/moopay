@@ -51,6 +51,9 @@ export class FakeNear {
   /** Balances of tokens other than USDC (wNEAR, rNEAR...), keyed "contract|account". USDC lives in tokenBalances. */
   otherTokens = new Map<string, bigint>();
   async ftBalance(t: string, a: string) { return ["wrap.near", "lst.rhealab.near", "usdt.tether-token.near"].includes(t) ? this.otherTokens.get(`${t}|${a}`) ?? 0n : this.tokenBalances.get(a) ?? 0n; }
+  /** Transactions a payer's wallet "signed", by hash, for the straight-transfer checks. */
+  txs = new Map<string, { ok: boolean; receiver: string; actions: Record<string, unknown>[] }>();
+  async txStatus(hash: string) { return this.txs.get(hash) ?? null; }
   registered = new Set<string>();
   async storageRegistered(_t: string, a: string) { return this.registered.has(a); }
   async nearBalance(a: string) { return this.nearBalances.get(a) ?? 0n; }

@@ -233,3 +233,50 @@ test("pay status: waits, then counts a delivered payment once in the public stat
   await ctx.service.payStatus(id);
   assert.deepEqual(ctx.service.publicStats(), { payments: 1, volumeUsd: 2.5, users: 1 });
 });
+
+test("pay link: same chain and same coin is a straight transfer, confirmed on-chain, never swapped", async () => {
+  const ctx = setup();
+  const usdcContract = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
+  const id = ctx.service.newPayIntent({ destinationChain: "near", destinationAssetId: USDC, recipient: "bob.near", payAmount: "2.5" });
+  assert.equal((await ctx.service.payEstimate(id, USDC)).amountIn, 2500000n, "no fees on a straight transfer");
+  const q = await ctx.service.payQuote(id, USDC, "me.near") as { direct?: boolean; transfer: { receiverId: string; amount: bigint; needsRegistration: boolean } };
+  assert.equal(ctx.oc.quotes.length, 0, "no 1Click quote for a same-chain payment");
+  assert.deepEqual([q.direct, q.transfer.receiverId, q.transfer.amount, q.transfer.needsRegistration], [true, "bob.near", 2500000n, true]);
+  assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "PROCESSING");
+
+  assert.throws(() => ctx.service.directDone(id, "nope"), code("INVALID_INPUT"));
+  const hash = "7".repeat(44);
+  ctx.service.directDone(id, hash);
+  assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "PROCESSING", "the chain has not shown it yet");
+  const ft = (receiver: string, amount: string) => ({ ok: true, receiver: usdcContract, actions: [{ FunctionCall: { method_name: "ft_transfer", args: Buffer.from(JSON.stringify({ receiver_id: receiver, amount })).toString("base64") } }] });
+  ctx.near.txs.set(hash, ft("bob.near", "2400000")); // too little
+  assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "FAILED");
+  ctx.near.txs.set(hash, ft("mallory.near", "2500000")); // wrong person
+  assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "FAILED");
+  ctx.near.txs.set(hash, ft("bob.near", "2500000"));
+  assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "SUCCESS");
+
+  const other = ctx.service.newPayIntent({ destinationChain: "eth", destinationAssetId: ETH_USDC, recipient: ETH_ADDR, payAmount: "2.5" });
+  assert.throws(() => ctx.service.directDone(other, hash), code("INVALID_INPUT"), "a swap is not a straight transfer");
+});
+
+test("pay link: an EVM payer on the receiver's chain sends straight to the receiver", async () => {
+  const ctx = setup();
+  const id = ctx.service.newPayIntent({ destinationChain: "eth", destinationAssetId: ETH_USDC, recipient: ETH_ADDR, payAmount: "2.5" });
+  const q = await ctx.service.payQuote(id, ETH_USDC, "0x2222222222222222222222222222222222222222") as { direct?: boolean; transfer: { to: string; amount: bigint; kind: string } };
+  assert.equal(ctx.oc.quotes.length, 0);
+  assert.deepEqual([q.direct, q.transfer.kind, q.transfer.to, q.transfer.amount], [true, "evm", ETH_ADDR, 2500000n]);
+  const hash = "0x" + "ab".repeat(32);
+  ctx.service.directDone(id, hash);
+  const realFetch = globalThis.fetch;
+  const topic = (a: string) => "0x" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const log = (to: string, amt: bigint) => ({ address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", topic("0x2222222222222222222222222222222222222222"), topic(to)], data: "0x" + amt.toString(16) });
+  try {
+    for (const [logs, want] of [[[log(ETH_ADDR, 2500000n)], "SUCCESS"], [[log(ETH_ADDR, 1n)], "FAILED"], [[log("0x3333333333333333333333333333333333333333", 2500000n)], "FAILED"]] as const) {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ result: { status: "0x1", logs } }))) as typeof fetch;
+      assert.equal((await ctx.service.payStatus(id) as { state: string }).state, want);
+    }
+    globalThis.fetch = (async () => new Response(JSON.stringify({ result: null }))) as typeof fetch;
+    assert.equal((await ctx.service.payStatus(id) as { state: string }).state, "PROCESSING");
+  } finally { globalThis.fetch = realFetch; }
+});

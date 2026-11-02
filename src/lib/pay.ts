@@ -19,7 +19,7 @@ export interface PayIntent {
   fromSymbol?: string;
   /** Same chain and same coin: the payer's wallet sends straight to the recipient, no swap and no 1Click. */
   direct?: boolean;
-  /** The transaction the payer's wallet reported for a direct payment. */
+  /** The transaction (signature or hash) the payer's wallet reported for a direct payment. */
   sig?: string;
 }
 

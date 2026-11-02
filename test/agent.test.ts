@@ -791,3 +791,17 @@ test("group claim: one link, each wallet finds only its own claim", async () => 
   assert.equal(a.store.groupFind("nope-nope", BOB), undefined);
   await assert.rejects(a.ops.groupClaim(a.u, [{ receiver: BOB, amountUsd: "3" }, { receiver: "BOB.near", amountUsd: "4" }], CTX), code("INVALID_INPUT"));
 });
+
+test("send USDT to a NEAR wallet: straight from the wallet's USDT when it has it, no swap", async () => {
+  const usdt = { assetId: "nep141:usdt.tether-token.near", decimals: 6, blockchain: "near", symbol: "USDT", contractAddress: "usdt.tether-token.near" };
+  TOKENS.push(usdt as never);
+  try {
+    const a = agent();
+    a.fund(0);
+    a.near.otherTokens.set(`usdt.tether-token.near|${a.u.accountId}`, 20_000_000n);
+    const r = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB, assetSymbol: "USDT" });
+    assert.equal(r.result["status"], "sent");
+    assert.deepEqual([a.near.transfers.at(-1)?.tokenContract, a.near.transfers.at(-1)?.to, a.near.transfers.at(-1)?.amount], ["usdt.tether-token.near", BOB, 5_000_000n]);
+    assert.equal(a.oc.quotes.length, 0, "nothing was swapped");
+  } finally { TOKENS.pop(); }
+});
