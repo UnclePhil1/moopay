@@ -187,7 +187,8 @@ test("pay link: needs HTTP prefix; page API builds the exact transfer the wallet
 
   const view = await ctx.service.payIntentView(id);
   assert.equal(view.payAmount, "2.5");
-  assert.deepEqual(view.assets.map((a) => a.symbol), ["USDC", "NEAR"]);
+  assert.deepEqual(view.assets.filter((a) => a.chain === "near").map((a) => a.symbol), ["USDC", "NEAR"]);
+  assert.ok(view.assets.some((a) => a.chain === "sol" && a.native), "other chains are offered too");
 
   const est = await ctx.service.payEstimate(id, USDC);
   assert.equal(est.amountIn, 2500000n);

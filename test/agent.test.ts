@@ -684,3 +684,61 @@ test("agent keys: expire after 7 days by default, and can be pinned to IP addres
     assert.match(((await wrong.json()) as { message: string }).message, /can't be used from this address/);
   } finally { close(); }
 });
+
+const CTX = { origin: "https://moo.test" };
+
+test("an empty agent wallet hands over to a confirm-and-sign link instead of refusing", async () => {
+  const a = agent();
+  const r = await a.ops.send(a.u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" }, false, {}, CTX);
+  assert.equal(r.result["status"], "needs_your_signature");
+  const card = r.card as { kind: string; url: string };
+  assert.equal(card.kind, "confirm_send");
+  assert.match(card.url, /^https:\/\/moo\.test\/p\/[A-Za-z0-9_-]{6,}$/);
+  assert.equal(a.near.transfers.length, 0, "nothing moved from the agent wallet");
+  assert.equal(a.oc.quotes.length, 0, "no quote until the user signs");
+  assert.equal(a.u.payments[0]?.status, "AWAITING_YOUR_SIGNATURE");
+  const view = await a.svc.payIntentView(card.url.split("/").pop()!);
+  assert.equal(view.destinationChain, "eth");
+  assert.equal(view.recipient, ETH_ADDR);
+  assert.ok(view.assets.some((x) => x.chain === "sol"), "the page offers other chains to pay from");
+});
+
+test("a funded agent wallet still pays by itself, unless the user names their own wallet", async () => {
+  const a = agent();
+  a.fund(20);
+  assert.equal((await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX)).result["status"], "sent");
+  const own = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB, fromChain: "sol", fromSymbol: "SOL" }, false, {}, CTX);
+  assert.equal(own.result["status"], "needs_your_signature", "naming where the money comes from skips the agent wallet");
+  const view = await a.svc.payIntentView((own.card as { url: string }).url.split("/").pop()!);
+  assert.equal(view.fromChain, "sol");
+  const no = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB, useAgentWallet: false }, false, {}, CTX);
+  assert.equal(no.result["status"], "needs_your_signature");
+  assert.equal(a.near.transfers.length, 1, "only the first payment used the agent wallet");
+});
+
+test("too little in the agent wallet goes to the user's own wallet; an outside agent key never does", async () => {
+  const a = agent();
+  a.fund(2);
+  assert.equal((await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX)).result["status"], "needs_your_signature");
+  await assert.rejects(a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB, useAgentWallet: true }, false, {}, CTX), code("NOTE_NOT_FUNDED"));
+});
+
+test("the pay page quotes and signs from EVM and Solana wallets, and the payment is tracked", async () => {
+  const a = agent();
+  const r = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX);
+  const pid = (r.card as { url: string }).url.split("/").pop()!;
+  const view = await a.svc.payIntentView(pid);
+  const sol = view.assets.find((x) => x.chain === "sol" && x.native)!;
+  await assert.rejects(a.svc.payQuote(pid, sol.assetId, "not-a-solana-address!"), code("INVALID_INPUT"));
+  const q = await a.svc.payQuote(pid, sol.assetId, "So11111111111111111111111111111111111111112") as { transfer: { kind: string; to: string; amount: bigint } };
+  assert.equal(q.transfer.kind, "sol");
+  assert.ok(q.transfer.amount > 0n);
+  assert.equal(q.transfer.to, "dep-1");
+  const refund = a.oc.quotes.at(-1)!.refundTo;
+  assert.equal(refund, "So11111111111111111111111111111111111111112", "refunds go back to the wallet that paid");
+  a.oc.statuses.set("dep-1", "SUCCESS");
+  await a.ops.refresh(a.u, a.u.payments[0]!, CTX);
+  assert.equal(a.u.payments[0]?.status, "DELIVERED");
+  const ev = view.assets.find((x) => x.chain === "eth" && x.symbol === "USDC");
+  if (ev) await assert.rejects(a.svc.payQuote(pid, ev.assetId, "bob.near"), code("INVALID_INPUT"));
+});

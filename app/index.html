@@ -256,6 +256,15 @@ function card(c) {
       h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
       c.memo ? row("Memo (required)", c.memo) : null, c.expected ? row("Result", c.expected) : null, c.expires ? row("Send before", new Date(c.expires).toLocaleTimeString()) : null,
       h("div", { class: "sub", style: "margin-top:10px" }, c.note));
+    case "confirm_send": {
+      const go = h("button", { class: "btn", onclick: () => {
+        const w = window.open(c.url, "moopay-pay", "popup=yes,width=480,height=780");
+        if (!w) window.open(c.url, "_blank", "noopener");
+        go.textContent = "Open again";
+      } }, "Confirm and sign");
+      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), row("To", short(c.to) + " (" + c.chain + ")"),
+        h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
+    }
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("a", { class: "btn", href: c.url, target: "_blank", rel: "noopener noreferrer", style: "text-decoration:none;color:#000" }, c.button)));
     case "recovery": {
       if (isTemp()) return h("div", { class: "card" }, h("div", { class: "sub" }, "This is a temporary session, so no recovery code is kept on this device. Use the one you saved on your own device."));

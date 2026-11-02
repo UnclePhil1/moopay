@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { assertRecipient, type DestChain } from "../lib/addresses.js";
 import type { QuoteRequest } from "../lib/oneclick.js";
-import { MoopayError } from "../lib/errors.js";
+import { MoopayError, asMoopayError } from "../lib/errors.js";
 import { isNearAccountId, parseDecimal } from "../lib/pay.js";
 import { isClaimChain, validAddress } from "../lib/sign.js";
 import { RNEAR, RNEAR_APP, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, WRAP } from "./rhea.js";
@@ -17,7 +17,11 @@ export interface Out { result: Record<string, unknown>; card?: Record<string, un
 export interface Ctx { origin: string }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
 export interface Who { ak?: AgentKey | undefined }
-export interface SendParams { amountUsd?: string | undefined; amount?: string | undefined; chain: string; recipient: string; assetSymbol?: string | undefined }
+export interface SendParams {
+  amountUsd?: string | undefined; amount?: string | undefined; chain: string; recipient: string; assetSymbol?: string | undefined;
+  /** true: pay from the agent wallet. false, or a fromChain: the user signs in their own wallet. Unset: the agent wallet only when it can cover it. */
+  useAgentWallet?: boolean | undefined; fromChain?: string | undefined; fromSymbol?: string | undefined;
+}
 
 const NATIVE: Record<string, string> = { sol: "SOL", eth: "ETH", btc: "BTC" };
 const EXPLORER: Record<string, string> = { sol: "https://solscan.io/tx/", eth: "https://etherscan.io/tx/", btc: "https://mempool.space/tx/", near: "https://nearblocks.io/txns/" };
@@ -142,7 +146,7 @@ export class AgentOps {
   }
 
   /* ---- sending ---- */
-  async send(u: UserRec, p: SendParams, approved = false, who: Who = {}): Promise<Out> {
+  async send(u: UserRec, p: SendParams, approved = false, who: Who = {}, ctx?: Ctx): Promise<Out> {
     this.active(u);
     const chain = p.chain.toLowerCase();
     this.validate(chain, p.recipient);
@@ -169,6 +173,9 @@ export class AgentOps {
       nearUnits = coinUnits ?? BigInt(Math.round((amt / price!) * 1e6)) * 10n ** 18n;
       if ((await this.balances(u)).nat >= nearUnits + MIN_GAS) direct = "near";
     }
+    // The agent wallet is optional: it pays only when asked to, or when it already holds enough. Otherwise the user signs in their own wallet.
+    const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct, units)));
+    if (own) return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt), fromChain: p.fromChain, fromSymbol: p.fromSymbol }, ctx!);
     const expected = direct ? undefined : await this.preview(u, usdc, units, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
     const denied = this.blocked(u, who, amt, chain, sym, p.recipient);
     if (denied) return { result: { status: "denied", reason: denied } };
@@ -177,8 +184,38 @@ export class AgentOps {
     const what = coinUnits ? `${p.amount} ${sym}` : usd(amt);
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}` + (expected ? ` (they get about ${expected})` : "");
     if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
-    const pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc");
+    let pay: Payment;
+    try {
+      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc");
+    } catch (e) {
+      // Short on the agent wallet after all (fees, a price move): hand over to the user's own wallet instead of failing.
+      if (ctx && !who.ak && p.useAgentWallet !== true && asMoopayError(e).code === "NOTE_NOT_FUNDED") return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt) }, ctx);
+      throw e;
+    }
     return { result: { status: "sent", paymentId: pay.id, ...(expected ? { expected } : {}), note: pay.settled ? "delivered" : "on its way; I will tell the user when it lands" }, card: this.paymentCard(pay) };
+  }
+
+  /** Whether the agent wallet can pay this by itself, including the network fee. */
+  private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | undefined, units: bigint): Promise<boolean> {
+    const b = await this.balances(u);
+    if (direct === "near") return true; // already checked against the balance above
+    if (direct === "usdc" && b.tok < units) return false;
+    return b.totalUsd >= amt * 1.02 && (b.nat >= MIN_GAS || !!this.sponsor);
+  }
+
+  /** The user signs in a wallet of their choice; nothing is taken from the agent wallet. */
+  private ownWallet(u: UserRec, o: { chain: string; sym: string; recipient: string; usdText: string; amt: number; what: string; fromChain?: string | undefined; fromSymbol?: string | undefined }, ctx: Ctx): Promise<Out> {
+    return this.destAsset(o.chain, o.sym).then((dest) => {
+      const payId = this.svc.newPayIntent({ destinationChain: o.chain, destinationAssetId: dest.assetId, recipient: o.recipient, payAmount: o.usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase() });
+      const pay: Payment = { id: id(), kind: "send", amountUsd: o.amt, chain: o.chain, recipient: o.recipient, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId };
+      u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+      const url = `${ctx.origin}/p/${payId}`;
+      const title = `Send ${o.what} to ${o.recipient.length > 20 ? o.recipient.slice(0, 8) + "…" + o.recipient.slice(-6) : o.recipient}`;
+      return {
+        result: { status: "needs_your_signature", paymentId: pay.id, note: "A Confirm button is on the user's screen. They press it, pick the wallet they want to pay from and sign. Nothing has been sent or taken yet. Do not say it failed, do not mention the agent wallet, and do not paste the link." },
+        card: { kind: "confirm_send", title, url, to: o.recipient, chain: o.chain.toUpperCase(), amount: o.what, id: pay.id },
+      };
+    });
   }
 
   /** Native NEAR straight from the wallet to a NEAR wallet. */
@@ -455,6 +492,10 @@ export class AgentOps {
     if (p.settled) return { changed: false };
     const before = p.status;
     let link: string | undefined;
+    if (p.payId && !p.depositAddress) {
+      try { const s = await this.svc.payStatus(p.payId); if ("depositAddress" in s) p.depositAddress = s.depositAddress; }
+      catch { p.status = "EXPIRED"; p.settled = true; }
+    }
     if (p.kind === "claim" && p.fundKey) {
       const s = await this.svc.claimFundState(p.fundKey, ctx.origin);
       const map: Record<string, string> = { CLAIMED: "CLAIMED", REFUNDED: "REFUNDED", CANCELLED: "REFUNDED" };

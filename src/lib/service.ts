@@ -133,7 +133,15 @@ const PAY_SYMBOLS = ["USDC", "USDT"];
 const NATIVE_NEAR_ASSET = "nep141:wrap.near";
 const STORAGE_FEE = 1_250_000_000_000_000_000_000n; // 0.00125 NEAR
 
-interface PayAsset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; priceUsd?: number }
+interface PayAsset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; priceUsd?: number; chain: string; chainId?: number }
+
+/** Other chains a user can pay from, signing in an injected wallet (EVM) or Phantom (Solana). */
+const EVM_IDS: Record<string, number> = { eth: 1, base: 8453, arb: 42161, op: 10, pol: 137, bsc: 56, avax: 43114 };
+const PAY_FROM = [...Object.keys(EVM_IDS), "sol"];
+/** Throwaway addresses for dry quotes, which never reserve anything. */
+const DRY_REFUND: Record<string, string> = { near: "estimate.near", sol: "So11111111111111111111111111111111111111112" };
+const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/;
+const EXPLORERS: Record<string, string> = { sol: "https://solscan.io/tx/", eth: "https://etherscan.io/tx/", btc: "https://mempool.space/tx/", near: "https://nearblocks.io/txns/", base: "https://basescan.org/tx/", arb: "https://arbiscan.io/tx/", op: "https://optimistic.etherscan.io/tx/", pol: "https://polygonscan.com/tx/", bsc: "https://bscscan.com/tx/", avax: "https://snowtrace.io/tx/" };
 
 /** payAmount is a dollar value. Stablecoins are 1:1; NEAR is converted at 1Click's price, rounded up so the recipient is not short. */
 function payUnits(payAmount: string, asset: PayAsset): bigint {
@@ -325,12 +333,44 @@ export class MooPayService {
     const out: PayAsset[] = [];
     for (const sym of PAY_SYMBOLS) {
       const t = tokens.find((x) => x.symbol === sym && x.blockchain === "near" && x.contractAddress);
-      if (t) out.push({ assetId: t.assetId, symbol: t.symbol, decimals: t.decimals, contract: t.contractAddress!, native: false });
+      if (t) out.push({ assetId: t.assetId, symbol: t.symbol, decimals: t.decimals, contract: t.contractAddress!, native: false, chain: "near" });
     }
     // Plain NEAR: the page wraps it into wNEAR and sends it in one signature.
     const near = tokens.find((x) => x.assetId === NATIVE_NEAR_ASSET && x.contractAddress && typeof x.price === "number" && x.price > 0);
-    if (near) out.push({ assetId: near.assetId, symbol: "NEAR", decimals: near.decimals, contract: near.contractAddress!, native: true, priceUsd: near.price! });
+    if (near) out.push({ assetId: near.assetId, symbol: "NEAR", decimals: near.decimals, contract: near.contractAddress!, native: true, priceUsd: near.price!, chain: "near" });
     return out;
+  }
+
+  /** NEAR first, then the chains where the user may hold the money instead (stablecoins and the chain's own coin). */
+  async payAssetsAll(): Promise<PayAsset[]> {
+    const out = await this.payAssets();
+    const tokens = await this.d.oneClick.tokens();
+    for (const chain of PAY_FROM) {
+      const here = tokens.filter((x) => x.blockchain === chain);
+      for (const sym of PAY_SYMBOLS) {
+        const t = here.find((x) => x.symbol === sym && x.contractAddress);
+        if (t) out.push({ assetId: t.assetId, symbol: t.symbol, decimals: t.decimals, contract: t.contractAddress!, native: false, chain, ...(EVM_IDS[chain] ? { chainId: EVM_IDS[chain]! } : {}) });
+      }
+      const nat = here.find((x) => !x.contractAddress && typeof x.price === "number" && x.price > 0);
+      if (nat) out.push({ assetId: nat.assetId, symbol: nat.symbol, decimals: nat.decimals, contract: "", native: true, priceUsd: nat.price!, chain, ...(EVM_IDS[chain] ? { chainId: EVM_IDS[chain]! } : {}) });
+    }
+    return out;
+  }
+
+  /** A pay page for the agent to hand over: any destination, any chain to pay from. */
+  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined }): string {
+    parseDecimal(i.payAmount, 6);
+    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}) }).id;
+  }
+
+  /** The newest Solana blockhash, fetched here because public RPCs often refuse browsers. */
+  async solBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+    const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+    const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestBlockhash", params: [{ commitment: "finalized" }] }), signal: AbortSignal.timeout(8000) });
+    const j = (await r.json()) as { result?: { value?: { blockhash: string; lastValidBlockHeight: number } } };
+    const v = j.result?.value;
+    if (!v?.blockhash) throw new MoopayError("UPSTREAM_TIMEOUT", "could not reach Solana right now; try again");
+    return v;
   }
 
   /** Public view for the pay page. Contains no secrets. */
@@ -345,20 +385,22 @@ export class MooPayService {
       destinationDecimals: dest?.decimals ?? 0,
       recipient: i.recipient,
       payAmount: i.payAmount,
-      assets: await this.payAssets(),
+      assets: await this.payAssetsAll(),
+      ...(i.fromChain ? { fromChain: i.fromChain } : {}),
+      ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
     };
   }
 
   private async payInputs(id: string, originAssetId: string): Promise<{ i: PayIntent; amount: bigint; asset: PayAsset }> {
     const i = this.pay.get(id);
-    const asset = (await this.payAssets()).find((a) => a.assetId === originAssetId);
+    const asset = (await this.payAssetsAll()).find((a) => a.assetId === originAssetId);
     if (!asset) throw new MoopayError("INVALID_INPUT", "that asset is not offered for payment");
     return { i, amount: payUnits(i.payAmount, asset), asset };
   }
 
   private directFor(i: PayIntent, originAssetId: string, amount: bigint, refundTo: string, dryRun: boolean): DirectInput {
     return {
-      originAssetId, amount: amount.toString(), refundTo, destinationChain: i.destinationChain,
+      originAssetId, amount: amount.toString(), refundTo, destinationChain: i.destinationChain as DirectInput["destinationChain"],
       destinationAssetId: i.destinationAssetId, recipient: i.recipient, slippageBps: i.slippageBps, dryRun,
     };
   }
@@ -366,7 +408,7 @@ export class MooPayService {
   /** Price preview for the page. Dry quote: no deposit address, nothing reserved. */
   async payEstimate(id: string, originAssetId: string) {
     const { i, amount, asset } = await this.payInputs(id, originAssetId);
-    const r = (await this.routeDirect(this.directFor(i, originAssetId, amount, "estimate.near", true))) as {
+    const r = (await this.routeDirect(this.directFor(i, originAssetId, amount, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true))) as {
       expectedOutput: { amountOut?: string; minAmountOut?: string };
       fees: Record<string, unknown>;
       quote: Record<string, unknown>;
@@ -376,8 +418,9 @@ export class MooPayService {
 
   /** Creates the real 1Click deposit address and the exact transfer for the user's wallet to sign. */
   async payQuote(id: string, originAssetId: string, refundTo: string) {
-    if (!isNearAccountId(refundTo)) throw new MoopayError("INVALID_INPUT", "refundTo must be a NEAR account id");
     const { i, amount, asset } = await this.payInputs(id, originAssetId);
+    const okRefund = asset.chain === "near" ? isNearAccountId(refundTo) : asset.chain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(refundTo) : EVM_ADDR.test(refundTo);
+    if (!okRefund) throw new MoopayError("INVALID_INPUT", `refundTo must be your ${asset.chain === "near" ? "NEAR account" : asset.chain === "sol" ? "Solana" : "EVM"} address`);
     const r = (await this.routeDirect(this.directFor(i, originAssetId, amount, refundTo, false))) as {
       depositAddress: string;
       depositMemo?: string;
@@ -385,6 +428,12 @@ export class MooPayService {
       expectedOutput: { amountOut?: string; minAmountOut?: string };
     };
     this.pay.attach(id, r.depositAddress, refundTo);
+    if (asset.chain !== "near") {
+      return {
+        chain: asset.chain, depositAddress: r.depositAddress, ...(r.depositMemo ? { depositMemo: r.depositMemo } : {}), quoteExpiresAt: r.quoteExpiresAt, expectedOutput: r.expectedOutput,
+        transfer: { kind: asset.chain === "sol" ? "sol" : "evm", to: r.depositAddress, amount, native: asset.native, contract: asset.contract, ...(asset.chainId ? { chainId: asset.chainId } : {}) },
+      };
+    }
     const registered = await this.d.near.storageRegistered(asset.contract, r.depositAddress);
     // wNEAR's near_deposit keeps the 0.00125 NEAR storage fee out of the wrapped amount for an unregistered account,
     // so wrap that much extra to still cover the transfer. Verified against wrap.testnet; TODO(verify) on mainnet.
@@ -394,7 +443,9 @@ export class MooPayService {
       ...(r.depositMemo ? { depositMemo: r.depositMemo } : {}),
       quoteExpiresAt: r.quoteExpiresAt,
       expectedOutput: r.expectedOutput,
+      chain: "near",
       transfer: {
+        kind: "near" as const,
         contract: asset.contract,
         receiverId: r.depositAddress,
         amount,
@@ -649,8 +700,7 @@ export class MooPayService {
   /** Pass-through 1Click status for a DIRECT-mode deposit address. */
   /** Where the delivered money can be looked at, on the destination chain. */
   private explorerUrl(chain: string, hash: string): string {
-    const h = encodeURIComponent(hash);
-    return chain === "sol" ? `https://solscan.io/tx/${h}` : chain === "eth" ? `https://etherscan.io/tx/${h}` : `https://mempool.space/tx/${h}`;
+    return (EXPLORERS[chain] ?? EXPLORERS["eth"]!) + encodeURIComponent(hash);
   }
 
   /** Progress of one pay link. Counts the payment in the public stats once it is delivered. */
@@ -662,6 +712,7 @@ export class MooPayService {
     if (s.status === "SUCCESS") this.d.stats?.record(i.depositAddress, Number(i.payAmount), i.payer ?? i.depositAddress);
     return {
       state: s.status,
+      depositAddress: i.depositAddress,
       recipient: i.recipient,
       chain: i.destinationChain,
       ...(hash ? { txHash: hash, explorerUrl: this.explorerUrl(i.destinationChain, hash) } : {}),

@@ -27,7 +27,7 @@
   .card { overflow:hidden; }
   .msg { overflow-wrap:anywhere; }
   label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:18px 0 6px; }
-  select { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; }
+  select, input { width:100%; padding:14px; border-radius:14px; border:1px solid var(--line); background:#0a0a0a; color:var(--text); font:600 16px "Inter",sans-serif; }
   .btn { width:100%; margin-top:22px; padding:16px; border:0; border-radius:999px; background:var(--accent); color:#000; font:700 17px "Inter",sans-serif; cursor:pointer;  }
   .btn:hover:not(:disabled) { background:var(--accent-2); }
   .btn:disabled { opacity:.55; cursor:default; }
@@ -54,16 +54,25 @@
     <div id="summary"></div>
 
     <div id="form" class="hidden">
+      <label for="chain">Pay from</label>
+      <select id="chain"></select>
       <label for="asset">Pay with</label>
       <select id="asset"></select>
       <div class="row" style="margin-top:18px"><span>You pay</span><b id="pay">…</b></div>
       <div class="row"><span>They get about</span><b id="est">…</b></div>
       <button class="btn" id="send" type="button">Send</button>
+      <button class="btn ghost" id="manual" type="button">Pay by deposit address instead</button>
+      <div id="refundbox" class="hidden">
+        <label for="refund">Your address on that chain (for refunds if anything fails)</label>
+        <input id="refund" autocomplete="off" spellcheck="false">
+        <button class="btn" id="getaddr" type="button">Get deposit address</button>
+      </div>
       <div class="msg" id="msg"></div>
     </div>
 
     <div id="deposit" class="hidden">
-      <label>Deposit address (you don't need to copy this)</label>
+      <label id="dlabel">Deposit address (you don't need to copy this)</label>
+      <div class="row hidden" id="exactrow"><span>Send exactly</span><b id="exact"></b></div>
       <div class="addr"><code id="addr"></code><button id="copy" type="button">Copy</button></div>
       <div class="msg" id="dmsg"></div>
     </div>

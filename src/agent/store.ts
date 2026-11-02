@@ -24,6 +24,8 @@ export interface AgentKey {
 export interface Payment {
   id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake"; amountUsd: number; chain: string; recipient: string;
   status: string; createdAt: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
+  /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
+  payId?: string;
 }
 export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
 export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; every: "day" | "week" | "month"; nextAt: number; text: string }

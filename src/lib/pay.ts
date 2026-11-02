@@ -4,7 +4,7 @@ import { MoopayError } from "./errors.js";
 /** One pending payment the user finishes on the pay page. Held in memory only; nothing here is a secret. */
 export interface PayIntent {
   id: string;
-  destinationChain: "btc" | "sol" | "eth";
+  destinationChain: string;
   destinationAssetId: string;
   recipient: string;
   /** Human decimal in the units of whichever stablecoin the user picks, e.g. "2.5". */
@@ -14,6 +14,9 @@ export interface PayIntent {
   /** Set when the user asks for a quote on the pay page. */
   depositAddress?: string;
   payer?: string;
+  /** Which wallet the page should offer first, e.g. the user said "send my SOL". */
+  fromChain?: string;
+  fromSymbol?: string;
 }
 
 const TTL_MS = 30 * 60 * 1000;

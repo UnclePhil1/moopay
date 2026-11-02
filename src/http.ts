@@ -100,6 +100,7 @@ async function main(): Promise<void> {
         const id = rest[1];
         if (rest.length === 2 && req.method === "GET") return sendJson(await service.payIntentView(id));
         if (rest[2] === "status" && req.method === "GET") return sendJson(await service.payStatus(id));
+        if (rest[2] === "blockhash" && req.method === "GET") return sendJson(await service.solBlockhash());
         if (rest[2] === "estimate" && req.method === "GET") return sendJson(await service.payEstimate(id, url.searchParams.get("asset") ?? ""));
         if (rest[2] === "quote" && req.method === "POST") {
           const b = (await readJson(req)) as { originAssetId?: unknown; refundTo?: unknown } | undefined;
