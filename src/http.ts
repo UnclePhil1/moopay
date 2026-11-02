@@ -130,6 +130,8 @@ async function main(): Promise<void> {
     if (!perIp(clientIp(req))) return send(429, { code: "UPSTREAM_TIMEOUT", message: "Too many requests. Please slow down." });
     try {
       const url = new URL(req.url ?? "/", "http://x");
+      const own = process.env["MOOPAY_PUBLIC_HOST"]?.trim(); // www.<our domain> sends people to the one real address, so sessions and links stay in one place
+      if (own && String(req.headers.host ?? "").toLowerCase() === `www.${own}`) { res.statusCode = 301; res.setHeader("location", `https://${own}${req.url ?? "/"}`); return void res.end(); }
       if (await agent.handle(req, res, url, publicOrigin(req))) return;
       if (url.pathname === "/stats.json" && req.method === "GET") {
         res.setHeader("access-control-allow-origin", "*");
