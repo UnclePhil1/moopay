@@ -4,7 +4,7 @@ import type { QuoteRequest } from "../lib/oneclick.js";
 import { MoopayError, asMoopayError } from "../lib/errors.js";
 import { isNearAccountId, parseDecimal } from "../lib/pay.js";
 import { isClaimChain, validAddress } from "../lib/sign.js";
-import { RNEAR, RNEAR_APP, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, WRAP } from "./rhea.js";
+import { RNEAR, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, unstaking, WRAP } from "./rhea.js";
 import type { MooPayService } from "../lib/service.js";
 import { alertOwner } from "../lib/alert.js";
 import { agentDeny, decide, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
@@ -554,7 +554,7 @@ export class AgentOps {
     await this.repayAdvance(u, true);
     const apy = await rnearApy();
     const shown = fmt(nearAmt, 24, 4), rnear = fmt((nearAmt * 10n ** 24n) / price, 24, 4);
-    return { tx: tx.txHash, shown, rnear, delivered, apy, card: { kind: "stake", staked: shown, rnear, to, apy, tx: EXPLORER.near + tx.txHash, link: RNEAR_APP } };
+    return { tx: tx.txHash, shown, rnear, delivered, apy, card: { kind: "stake", staked: shown, rnear, to, apy, tx: EXPLORER.near + tx.txHash } };
   }
 
   async stakeRnear(u: UserRec, p: { amount?: string | undefined; amountUsd?: string | undefined; fromChain?: string | undefined; fromSymbol?: string | undefined; payout?: string | undefined }, approved = false, who: Who = {}, ctx?: Ctx): Promise<Out> {
@@ -582,7 +582,7 @@ export class AgentOps {
     const pay: Payment = { id: id(), kind: "stake", amountUsd: amt, chain: "near", recipient: payout, status: "STAKED", createdAt: this.now(), txHash: r.tx, settled: true, expected: `${r.rnear} rNEAR`, ...(who.ak ? { agentId: who.ak.id } : {}) };
     this.spend(u, amt, this.recipientKey("near", payout), who.ak);
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
-    return { result: { status: "staked", staked: `${r.shown} NEAR`, receives: `about ${r.rnear} rNEAR`, to: payout, delivered: r.delivered, ...(r.apy ? { apyPercent: r.apy } : {}), note: r.delivered ? "rNEAR is in the user's own wallet; to unstake they use Rhea's page" : "rNEAR is in the agent wallet and will be forwarded to the payout wallet shortly" }, card: r.card };
+    return { result: { status: "staked", staked: `${r.shown} NEAR`, receives: `about ${r.rnear} rNEAR`, to: payout, delivered: r.delivered, ...(r.apy ? { apyPercent: r.apy } : {}), note: r.delivered ? "rNEAR is in the user's own wallet; to unstake they sign in a window, call unstake_rnear" : "rNEAR is in the agent wallet and will be forwarded to the payout wallet shortly" }, card: r.card };
   }
 
   /** Staking with money from the user's own wallet on any chain: one pay window, payout wallet first, then the agent stakes what lands. */
@@ -640,16 +640,76 @@ export class AgentOps {
     return bal;
   }
 
+  /* ---- unstake: the rNEAR sits in the user's own wallet, so they sign; the agent opens the window and follows it ---- */
+  private callWindow(u: UserRec, ctx: Ctx, p: Payment, o: { wallet: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][]; button: string }) {
+    p.payId = this.svc.newCallIntent({ account: o.wallet, contract: RNEAR, method: o.method, args: o.args, title: o.title, lines: o.lines });
+    this.store.save();
+    return { kind: "confirm_send", title: o.title, url: `${ctx.origin}/p/${p.payId}`, amount: o.lines[1]?.[1] ?? "", button: o.button, id: p.id };
+  }
+
+  /** Opens a window where the user signs the unstake with the wallet that holds the rNEAR (all of it, or `amount` rNEAR). */
+  async unstakeRnear(u: UserRec, p: { amount?: string | undefined; wallet?: string | undefined }, ctx: Ctx): Promise<Out> {
+    this.active(u);
+    const wallet = p.wallet ?? u.payments.find((x) => x.kind === "stake" && x.status === "STAKED")?.recipient ?? u.rules.payoutAddress;
+    if (!wallet) throw new MoopayError("INVALID_INPUT", "Tell me the NEAR wallet that holds your rNEAR.");
+    if (!isNearAccountId(wallet)) throw new MoopayError("BAD_RECIPIENT", "that is not a NEAR wallet address, like alice.near");
+    const [held, price] = await Promise.all([this.near.ftBalance(RNEAR, wallet), rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>)]);
+    if (held <= 0n) throw new MoopayError("INVALID_INPUT", `${wallet} holds no rNEAR.`);
+    const units = p.amount ? parseDecimal(p.amount, 24) : held;
+    if (units <= 0n || units > held) throw new MoopayError("INVALID_INPUT", `${wallet} holds ${fmt(held, 24, 4)} rNEAR.`);
+    const worth = (units * price) / 10n ** 24n; // the contract takes the NEAR value
+    const all = units === held;
+    const pay: Payment = { id: id(), kind: "unstake", amountUsd: 0, chain: "near", recipient: wallet, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), expected: `${fmt(worth, 24, 4)} NEAR` };
+    const card = this.callWindow(u, ctx, pay, { wallet, method: all ? "unstake_all" : "unstake", args: all ? {} : { amount: worth.toString() }, title: `Unstake ${fmt(units, 24, 4)} rNEAR`, button: "Unstake", lines: [["Unstaking", `${fmt(units, 24, 4)} rNEAR`], ["You get back", `about ${pay.expected}`], ["Ready to withdraw", "in a day or two"], ["Wallet", wallet]] });
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    return { result: { status: "needs_your_signature", paymentId: pay.id, note: "An Unstake button is on the user's screen. They press it and sign with their own NEAR wallet, the one that holds the rNEAR. Nothing has happened yet. I will tell them when the NEAR is ready to withdraw (a day or two). Do not paste the link." }, card };
+  }
+
+  /** Once the delay is over: a window to sign the withdrawal that sends the unstaked NEAR to the user's wallet. */
+  async withdrawUnstaked(u: UserRec, p: { wallet?: string | undefined }, ctx: Ctx): Promise<Out> {
+    this.active(u);
+    const wallet = p.wallet ?? u.payments.find((x) => x.kind === "unstake")?.recipient ?? u.rules.payoutAddress;
+    if (!wallet) throw new MoopayError("INVALID_INPUT", "Tell me the NEAR wallet you unstaked from.");
+    const d = await unstaking((c, m, a) => this.near.view(c, m, a), wallet);
+    if (d.pending === 0n) return { result: { status: "nothing_pending", note: "Nothing is waiting to be withdrawn." } };
+    if (!d.canWithdraw) return { result: { status: "not_ready", pending: `${fmt(d.pending, 24, 4)} NEAR`, note: "The unstaking delay is not over yet (a day or two). I will tell the user when it is." } };
+    const pay = u.payments.find((x) => x.kind === "unstake" && !x.settled && x.recipient === wallet) ?? { id: id(), kind: "unstake" as const, amountUsd: 0, chain: "near", recipient: wallet, status: "READY_TO_WITHDRAW", createdAt: this.now() };
+    pay.status = "READY_TO_WITHDRAW"; pay.expected = `${fmt(d.pending, 24, 4)} NEAR`;
+    if (!u.payments.includes(pay)) u.payments.unshift(pay);
+    const card = this.callWindow(u, ctx, pay, { wallet, method: "withdraw_all", args: {}, title: `Withdraw ${pay.expected}`, button: "Withdraw", lines: [["Withdrawing", pay.expected], ["Wallet", wallet]] });
+    return { result: { status: "needs_your_signature", paymentId: pay.id, note: "A Withdraw button is on the user's screen; they sign with their own NEAR wallet. Do not paste the link." }, card };
+  }
+
+  /** Follows an unstake: signed, waiting out the delay, ready to withdraw, withdrawn. */
+  private async refreshUnstake(p: Payment, ctx: Ctx, u: UserRec): Promise<{ changed: boolean; card?: unknown }> {
+    const before = p.status;
+    let card: unknown;
+    try {
+      const d = await unstaking((c, m, a) => this.near.view(c, m, a), p.recipient);
+      if (p.status === "AWAITING_YOUR_SIGNATURE") {
+        if (d.pending > 0n) p.status = "UNSTAKING";
+        else if (p.payId && !this.svc.intentOpen(p.payId)) { p.status = "EXPIRED"; p.settled = true; }
+      }
+      if (p.status === "UNSTAKING" && d.canWithdraw) {
+        p.expected = `${fmt(d.pending, 24, 4)} NEAR`; p.status = "READY_TO_WITHDRAW";
+        card = this.callWindow(u, ctx, p, { wallet: p.recipient, method: "withdraw_all", args: {}, title: `Withdraw ${p.expected}`, button: "Withdraw", lines: [["Withdrawing", p.expected], ["Wallet", p.recipient]] });
+      } else if ((p.status === "UNSTAKING" || p.status === "READY_TO_WITHDRAW") && d.pending === 0n) { p.status = "WITHDRAWN"; p.settled = true; }
+    } catch { /* the chain was busy; look again next round */ }
+    if (p.status !== before) this.store.save();
+    return { changed: p.status !== before, ...(card ? { card } : {}) };
+  }
+
   /** What the user has in rNEAR (in their own wallet), its value, and the current yield. */
   async rnearPosition(u: UserRec): Promise<Out> {
     const payout = u.rules.payoutAddress;
     const [price, apy, b] = await Promise.all([rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>), rnearApy(), this.balances(u)]);
     const held = payout ? await this.near.ftBalance(RNEAR, payout) : 0n;
     const inAgent = await this.near.ftBalance(RNEAR, u.accountId);
+    const waiting = payout ? await unstaking((c, m, a) => this.near.view(c, m, a), payout).catch(() => undefined) : undefined;
     const total = held + inAgent;
     const nearValue = (total * price) / 10n ** 24n;
     const usdValue = b.nearA?.priceUsd ? (Number(nearValue) / 1e24) * b.nearA.priceUsd : undefined;
-    const data = { rnear: fmt(total, 24, 4), worthNear: fmt(nearValue, 24, 4), ...(usdValue !== undefined ? { worthUsd: usdValue.toFixed(2) } : {}), priceNearPerRnear: fmt(price, 24, 4), ...(apy ? { apyPercent: apy } : {}), wallet: payout ?? null, unstakeAt: RNEAR_APP };
+    const data = { rnear: fmt(total, 24, 4), worthNear: fmt(nearValue, 24, 4), ...(usdValue !== undefined ? { worthUsd: usdValue.toFixed(2) } : {}), priceNearPerRnear: fmt(price, 24, 4), ...(apy ? { apyPercent: apy } : {}), wallet: payout ?? null, ...(waiting?.pending ? { unstakingNear: fmt(waiting.pending, 24, 4), readyToWithdraw: waiting.canWithdraw } : {}) };
     return { result: data, card: { kind: "position", ...data } };
   }
 
@@ -662,6 +722,7 @@ export class AgentOps {
   /** Looks at 1Click / the claim desk; returns what changed so the worker can tell the user. */
   async refresh(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown }> {
     if (p.settled) return { changed: false };
+    if (p.kind === "unstake") return this.refreshUnstake(p, ctx, u);
     const before = p.status;
     let link: string | undefined;
     if (p.kind === "stake" && p.status === "WAITING_FOR_FEE") { // the money is here; staking waits only for a first network fee

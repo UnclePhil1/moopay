@@ -555,6 +555,39 @@ test("stake from another chain: with a gas wallet the first fee is lent, and pai
   assert.equal(a.u.advance, undefined);
 });
 
+test("unstake: the user signs with the wallet that holds the rNEAR; the agent follows it to the withdrawal", async () => {
+  const a = agent(); rhea(a);
+  a.near.otherTokens.set("lst.rhealab.near|me.near", 8n * NEAR_1 / 10n); // 0.8 rNEAR in the user's own wallet
+  await assert.rejects(a.ops.unstakeRnear(a.u, { wallet: "empty.near" }, CTX), /holds no rNEAR/);
+  await assert.rejects(a.ops.unstakeRnear(a.u, { wallet: "me.near", amount: "5" }, CTX), /holds 0.8 rNEAR/);
+  const r = await a.ops.unstakeRnear(a.u, { wallet: "me.near" }, CTX);
+  assert.equal(r.result["status"], "needs_your_signature");
+  const card = r.card as { button: string; url: string };
+  assert.equal(card.button, "Unstake");
+  const view = await a.svc.payIntentView(card.url.split("/").pop()!);
+  assert.deepEqual([view.call?.account, view.call?.contract, view.call?.method, view.call?.args], ["me.near", "lst.rhealab.near", "unstake_all", {}]);
+  assert.equal(a.near.calls.length, 0, "the agent signs nothing: it is the user's rNEAR");
+  const part = await a.ops.unstakeRnear(a.u, { wallet: "me.near", amount: "0.4" }, CTX);
+  const pv = await a.svc.payIntentView((part.card as { url: string }).url.split("/").pop()!);
+  assert.deepEqual([pv.call?.method, pv.call?.args], ["unstake", { amount: (4n * NEAR_1 / 10n * 125n / 100n).toString() }], "a part is asked for in NEAR, at the rNEAR price");
+  a.u.payments.shift();
+
+  const pay = a.u.payments[0]!;
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, false, "not signed yet");
+  a.near.views.set("lst.rhealab.near.get_account_details.me.near", { unstaked_balance: "1000000000000000000000000", can_withdraw: false });
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
+  assert.equal(pay.status, "UNSTAKING");
+  assert.equal((await a.ops.withdrawUnstaked(a.u, { wallet: "me.near" }, CTX)).result["status"], "not_ready");
+  a.near.views.set("lst.rhealab.near.get_account_details.me.near", { unstaked_balance: "1000000000000000000000000", can_withdraw: true });
+  const ready = await a.ops.refresh(a.u, pay, CTX);
+  assert.equal(pay.status, "READY_TO_WITHDRAW");
+  const wv = await a.svc.payIntentView((ready.card as { url: string }).url.split("/").pop()!);
+  assert.deepEqual([wv.call?.method, wv.call?.account], ["withdraw_all", "me.near"]);
+  a.near.views.set("lst.rhealab.near.get_account_details.me.near", { unstaked_balance: "0", can_withdraw: false });
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
+  assert.deepEqual([pay.status, pay.settled], ["WITHDRAWN", true]);
+});
+
 test("stake: the agent wallet is used when it can pay, and a missing payout wallet sends the user to the window", async () => {
   const a = agent(); rhea(a);
   a.near.nearBalances.set(a.u.accountId, 3n * NEAR_1);

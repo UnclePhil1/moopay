@@ -12,8 +12,10 @@ import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, 
 interface Asset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; chain: string; chainId?: number }
 interface Intent {
   destinationChain: string; destinationSymbol: string; destinationDecimals: number;
-  recipient: string; payAmount: string; fund?: boolean; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
+  recipient: string; payAmount: string; fund?: boolean; call?: Call; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
 }
+/** One contract call signed in the user's own NEAR wallet: unstaking or withdrawing. */
+interface Call { account: string; contract: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][] }
 interface Quote {
   depositAddress: string; depositMemo?: string; chain: string; direct?: boolean;
   transfer: { kind: "near" | "evm" | "sol"; amount: string; native: boolean; contract: string; receiverId: string; needsRegistration: boolean; wrapDeposit?: string; to: string; chainId?: number };
@@ -208,7 +210,7 @@ async function track(depositAddress: string, manual = false) {
       if (s.state === "SUCCESS") {
         $("title").textContent = intent.stake ? "Staking" : "Delivered";
         if (intent.stake) { $("doneline").textContent = "Your money arrived."; $("donenote").textContent = "MooPay is staking it now and sending the rNEAR to your wallet. You'll see it in your chat."; }
-        if (window.parent !== window) window.parent.postMessage({ moopay: "delivered", stake: Boolean(intent.stake) }, location.origin);
+        if (window.parent !== window) window.parent.postMessage({ moopay: "delivered", wait: Boolean(intent.stake) }, location.origin);
         $("deposit").classList.add("hidden");
         const done = $("done");
         done.classList.remove("hidden");
@@ -472,6 +474,54 @@ async function send() {
   }
 }
 
+const makeSelector = () => setupWalletSelector({ network: "mainnet", modules: [setupMeteorWallet(), setupNightly(), setupMyNearWallet()] });
+
+/** Unstake or withdraw: the wallet that holds the rNEAR signs one call. MooPay never touches it. */
+async function callMode(c: Call) {
+  $("title").textContent = c.title;
+  $("sub").textContent = "Signed in your own NEAR wallet";
+  $("summary").replaceChildren(...c.lines.map(([k, v]) => {
+    const r = document.createElement("div"); r.className = "row";
+    const a = document.createElement("span"), b = document.createElement("b");
+    a.textContent = k; b.textContent = v.length > 30 ? short(v) : v;
+    r.append(a, b);
+    return r;
+  }));
+  const finish = () => {
+    $("callform").classList.add("hidden");
+    $("title").textContent = "Sent";
+    $("doneline").textContent = "Done. It's on the blockchain now.";
+    $("donenote").textContent = "I'll tell you in your chat as soon as it goes through.";
+    $("tx").classList.add("hidden");
+    $("done").classList.remove("hidden");
+    if (window.parent !== window) window.parent.postMessage({ moopay: "delivered", wait: true }, location.origin);
+  };
+  if (/transactionHashes/.test(location.search)) return finish(); // a redirect wallet brought us back after signing
+  const btn = $<HTMLButtonElement>("callgo");
+  btn.textContent = c.title.split(" ")[0]!;
+  $("callform").classList.remove("hidden");
+  selector = await makeSelector();
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      say("callmsg", "Choose your wallet…");
+      const account = await connect();
+      if (account !== c.account) {
+        await (await selector.wallet()).signOut();
+        pickedNear = undefined;
+        throw new Error(`That wallet is ${account}. Sign with ${c.account}, the wallet that holds your rNEAR.`);
+      }
+      say("callmsg", "Approve it in your wallet…");
+      const wallet = await selector.wallet();
+      await wallet.signAndSendTransaction({ signerId: account, receiverId: c.contract, actions: [najActions.functionCall(c.method, c.args, 200n * TGAS, 0n)] as never });
+      finish();
+    } catch (e) {
+      btn.disabled = false;
+      say("callmsg", e instanceof Error ? e.message : "Something went wrong.", "err");
+    }
+  });
+}
+
 async function main() {
   try {
     intent = await api<Intent>(base);
@@ -480,6 +530,7 @@ async function main() {
     say("top-msg", e instanceof Error ? e.message : "This link is not valid.", "err");
     return;
   }
+  if (intent.call) return void (await callMode(intent.call));
   const setTitle = () => { $("title").textContent = `${intent.stake ? "Stake" : "Send"} $${intent.payAmount}`; };
   setTitle();
   $("sub").textContent = intent.stake ? "into rNEAR on Rhea Finance" : `to ${CHAINS[intent.destinationChain] ?? intent.destinationChain}`;
@@ -525,10 +576,7 @@ async function main() {
   });
   $<HTMLButtonElement>("send").addEventListener("click", () => void send());
 
-  selector = await setupWalletSelector({
-    network: "mainnet",
-    modules: [setupMeteorWallet(), setupNightly(), setupMyNearWallet()],
-  });
+  selector = await makeSelector();
   void refreshEstimate();
 
   // A redirect wallet (MyNearWallet) returns here after signing.

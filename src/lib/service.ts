@@ -366,6 +366,14 @@ export class MooPayService {
     return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: i.fund ? 300 : 100, ...(i.fund ? { fund: true } : {}), ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: i.stake.payout ? { payout: i.stake.payout } : {} } : {}) }).id;
   }
 
+  /** A window where the user signs one contract call with the wallet that owns `account`. Nothing is paid. */
+  newCallIntent(c: NonNullable<PayIntent["call"]>): string {
+    return this.pay.create({ destinationChain: "near", destinationAssetId: "", recipient: c.account, payAmount: "1", slippageBps: 100, call: c }).id;
+  }
+
+  /** Whether a pay window is still open. */
+  intentOpen(id: string): boolean { try { this.pay.get(id); return true; } catch { return false; } }
+
   /** The NEAR wallet a staking payment's rNEAR goes to, once the payer has given it on the pay page. */
   stakePayout(id: string): string | undefined { return this.pay.get(id).stake?.payout; }
 
@@ -432,6 +440,7 @@ export class MooPayService {
       ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
       ...(i.stake ? { stake: { payout: i.stake.payout ?? "" } } : {}),
       ...(i.fund ? { fund: true } : {}),
+      ...(i.call ? { call: i.call } : {}),
     };
   }
 

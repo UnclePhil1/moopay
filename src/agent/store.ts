@@ -22,7 +22,7 @@ export interface AgentKey {
   spent: { day: string; usd: number }; totalSpent: number;
 }
 export interface Payment {
-  id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake"; amountUsd: number; chain: string; recipient: string;
+  id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake" | "unstake"; amountUsd: number; chain: string; recipient: string;
   status: string; createdAt: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;

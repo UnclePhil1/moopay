@@ -21,13 +21,14 @@ export async function followPayments(ops: AgentOps, store: AgentStore, u: UserRe
     const text = p.status === "DELIVERED" && p.kind === "fund" ? `Your agent wallet is funded: about $${p.amountUsd.toFixed(2)} arrived as USDC.`
       : p.status === "DELIVERED" ? `Delivered: $${p.amountUsd.toFixed(2)} reached ${p.recipient}.`
       : p.status === "CLAIMED" ? `Claimed: ${p.recipient} opened your $${p.amountUsd.toFixed(2)} claim.`
-      : p.status === "STAKED" ? `Staked: you now hold about ${p.expected}, sent to ${p.recipient}. To unstake, use Rhea's page.`
+      : p.kind === "unstake" ? ({ UNSTAKING: `Unstaking started: about ${p.expected} will be ready to withdraw in a day or two. I'll tell you the moment it is.`, READY_TO_WITHDRAW: `Your unstaked NEAR (${p.expected}) is ready. Press Withdraw and sign to send it to ${p.recipient}.`, WITHDRAWN: `Withdrawn: ${p.expected} is back in ${p.recipient}.`, EXPIRED: "The unstake window closed before it was signed. Nothing happened." } as Record<string, string>)[p.status]
+      : p.status === "STAKED" ? `Staked: you now hold about ${p.expected}, sent to ${p.recipient}. Ask me any time to unstake.`
       : p.status === "WAITING_FOR_FEE" ? `Your payment arrived, but I can't finish the stake yet. ${p.why}`
       : p.kind === "stake" && p.status === "FAILED" ? `I couldn't finish your stake${p.why ? `: ${p.why}` : ""}. Your money is safe in your agent wallet; ask me to try again.`
       : p.status === "REFUNDED" ? `Refunded: your $${p.amountUsd.toFixed(2)} ${p.kind === "claim" ? "claim was not opened in time" : "payment did not go through"}, and the money is back ${p.payId ? "in your wallet" : "in your agent wallet"}.`
       : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
       : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
-    if (text) store.event(u, text, r.card ?? { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link });
+    if (text) store.event(u, text, r.card ?? (p.kind === "unstake" ? undefined : { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link }));
   }
   store.save();
 }

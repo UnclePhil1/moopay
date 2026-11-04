@@ -251,10 +251,10 @@ function openSheet(url) {
   const close = () => { box.remove(); window.removeEventListener("message", onMsg); remember(null); };
   const onMsg = (e) => {
     if (e.origin !== location.origin || !e.data || e.data.moopay !== "delivered") return;
-    if (!e.data.stake) { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); return; }
-    // A stake is not done when the money lands: keep the window up until the agent reports the result in the chat.
+    if (!e.data.wait) { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); return; }
+    // A stake or unstake is not done when it is signed: keep the window up until the agent reports the result in the chat.
     let tries = 0;
-    const wait = async () => { const evs = await poll(); if (evs.some((x) => /stake/i.test(x.text)) || ++tries > 60) return close(); setTimeout(wait, 3000); };
+    const wait = async () => { const evs = await poll(); if (evs.length || ++tries > 60) return close(); setTimeout(wait, 3000); };
     void wait();
   };
   const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
@@ -306,10 +306,11 @@ function card(c) {
     }
     case "stake": return h("div", { class: "card" }, h("div", { class: "sub" }, "Staked with Rhea"), h("div", { class: "big" }, c.staked + " NEAR"),
       row("You receive", "≈ " + c.rnear + " rNEAR"), row("Sent to your wallet", short(c.to)), c.apy ? row("Yield now", c.apy + "% a year") : null,
-      h("div", { class: "sub", style: "margin-top:10px" }, "rNEAR grows against NEAR as rewards come in. It's in your own wallet, not MooPay's. ", h("a", { href: c.tx, target: "_blank", rel: "noopener noreferrer" }, "View transaction"), " · ", h("a", { href: c.link, target: "_blank", rel: "noopener noreferrer" }, "Unstake on Rhea")));
+      h("div", { class: "sub", style: "margin-top:10px" }, "rNEAR grows against NEAR as rewards come in. It's in your own wallet, not MooPay's. ", h("a", { href: c.tx, target: "_blank", rel: "noopener noreferrer" }, "View transaction"), " · Ask me to unstake any time."));
     case "position": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rNEAR"), h("div", { class: "big" }, c.rnear + " rNEAR"),
       row("Worth", c.worthNear + " NEAR" + (c.worthUsd ? " · " + usd(c.worthUsd) : "")), row("1 rNEAR =", c.priceNearPerRnear + " NEAR"), c.apyPercent ? row("Yield now", c.apyPercent + "% a year") : null, c.wallet ? row("Held in", short(c.wallet)) : null,
-      h("div", { class: "sub", style: "margin-top:10px" }, h("a", { href: c.unstakeAt, target: "_blank", rel: "noopener noreferrer" }, "Unstake or withdraw on Rhea"), " (delayed unstake takes about 30 hours)."));
+      c.unstakingNear ? row("Unstaking", c.unstakingNear + " NEAR" + (c.readyToWithdraw ? " · ready to withdraw" : " · waiting")) : null,
+      h("div", { class: "sub", style: "margin-top:10px" }, "Ask me to unstake any time. The NEAR is ready to withdraw a day or two later and I'll tell you."));
     case "approval": return approvalCard(c);
     case "list": return c.items.length ? h("div", { class: "list" }, c.items.map((i) => h("div", { class: "li" }, h("b", {}, (i.kind === "claim" ? "Claim for " : i.kind === "sweep" ? "Sent to your wallet " : "Sent to ") + short(i.to) + " · " + usd(i.amountUsd)), h("span", {}, new Date(i.at).toLocaleString() + " · " + i.status.replaceAll("_", " ").toLowerCase())))) : h("div", { class: "sub" }, "Nothing yet.");
     case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.pendingPayout ? row("Changing to", short(c.rules.pendingPayout.address) + " on " + new Date(c.rules.pendingPayout.at).toLocaleString()) : null, c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);

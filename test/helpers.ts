@@ -64,7 +64,7 @@ export class FakeNear {
   /** Lets a test react to a contract call, e.g. to move fake balances like the chain would. */
   onCall: ((c: FakeNear["calls"][number], who: string) => void) | undefined;
   async call(p: FakeNear["calls"][number] & { accountId: string }) { this.calls.push(p); this.onCall?.(p, p.accountId); return { txHash: `call-${this.calls.length}` }; }
-  async view(contractId: string, method: string) { return this.views.get(`${contractId}.${method}`) ?? null; }
+  async view(contractId: string, method: string, args?: { account_id?: string }) { return this.views.get(`${contractId}.${method}.${args?.account_id}`) ?? this.views.get(`${contractId}.${method}`) ?? null; }
   wraps: bigint[] = [];
   async wrapNear(p: { accountId: string; amount: bigint }) { this.wraps.push(p.amount); return { txHash: `wrap-${this.wraps.length}` }; }
   async sendNear(p: { accountId: string; to: string; amount: bigint }) {

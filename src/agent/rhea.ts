@@ -7,7 +7,6 @@ import { MoopayError } from "../lib/errors.js";
 
 export const RNEAR = "lst.rhealab.near";
 export const WRAP = "wrap.near";
-export const RNEAR_APP = "https://rhea-finance.github.io/rnear-sdk/"; // Rhea's own page: unstake or withdraw with your wallet
 export const STAKE_GAS = 200_000_000_000_000n; // 200 Tgas, the SDK's default; unused gas is refunded
 export const STAKE_MIN_NEAR = 10n ** 23n; // 0.1 NEAR
 const APY_URL = "https://api.rhea.finance/get-rnear-apy";
@@ -25,4 +24,14 @@ export async function rnearApy(doFetch: typeof fetch = fetch): Promise<string | 
     const d = ((await r.json()) as { data?: string }).data;
     return d ? Number(d).toFixed(2) : null;
   } catch { return null; }
+}
+
+const DUST = 10n ** 19n; // the contract's own rounding: less than this pending is nothing
+export interface Unstaking { pending: bigint; canWithdraw: boolean }
+
+/** What the user has waiting to come out of staking, and whether the delay is over. */
+export async function unstaking(view: (c: string, m: string, a?: Record<string, unknown>) => Promise<unknown>, account: string): Promise<Unstaking> {
+  const d = (await view(RNEAR, "get_account_details", { account_id: account })) as { unstaked_balance?: string; can_withdraw?: boolean } | null;
+  const pending = BigInt(d?.unstaked_balance ?? "0");
+  return pending < DUST ? { pending: 0n, canWithdraw: false } : { pending, canWithdraw: Boolean(d?.can_withdraw) };
 }

@@ -25,6 +25,8 @@ export interface PayIntent {
   stake?: { payout?: string };
   /** Money added to the agent wallet: a deposit address accepts a little more or less than quoted. */
   fund?: boolean;
+  /** Not a payment: one contract call the user signs in their own wallet (unstaking, withdrawing). */
+  call?: { account: string; contract: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][] };
 }
 
 const TTL_MS = 30 * 60 * 1000;
