@@ -57,6 +57,13 @@
   .okline { font-size:18px; font-weight:600; margin:4px 0 0; }
   .linkbtn { display:block; text-align:center; text-decoration:none; color:#000; box-sizing:border-box; }
   .hidden { display:none !important; }
+  /* Wallet choices sit above everything on the page, wallet pop-ups included. */
+  .overlay { position:fixed; inset:0; z-index:2147483000; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(0,0,0,.72); }
+  .overlay .panel { width:min(420px,100%); max-height:100%; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:20px; box-shadow:0 30px 80px rgba(0,0,0,.6); }
+  .overlay .panel .msg { margin:0 0 12px; color:var(--text); font-weight:600; }
+  .overlay .panel .btn { margin-top:8px; }
+  :root { --w3m-z-index:2147483600; --apkt-z-index:2147483600; }
+  .nws-modal-wrapper { z-index:2147483600 !important; }
   .embed body { padding:14px 12px; min-height:0; background:transparent; } .embed .logo { display:none; } .embed .foot { display:none; } .embed .card { box-shadow:none; }
   .foot { text-align:center; color:var(--muted); font-size:12.5px; margin-top:18px; }
   a:not(.btn) { color:var(--accent-2); }
@@ -91,20 +98,11 @@
         <button class="btn" id="getaddr" type="button">Get deposit address</button>
       </div>
       <div class="msg" id="msg"></div>
-      <div id="pickbox" class="hidden">
-        <p class="msg" id="picktitle"></p>
-        <div id="picklist"></div>
-      </div>
-      <div id="usebox" class="hidden">
-        <p class="msg" id="usetext"></p>
-        <button class="btn" id="useyes" type="button">Yes, use it</button>
-        <button class="btn ghost" id="useno" type="button">Use another wallet</button>
-      </div>
     </div>
 
     <div id="deposit" class="hidden">
       <label id="dlabel">Deposit address (you don't need to copy this)</label>
-      <div class="row hidden" id="exactrow"><span>Send exactly</span><b id="exact"></b></div>
+      <div class="row hidden" id="exactrow"><span id="exactlabel">Send exactly</span><b id="exact"></b></div>
       <div class="addr"><code id="addr"></code><button id="copy" type="button">Copy</button></div>
       <div class="msg" id="dmsg"></div>
     </div>
@@ -117,6 +115,19 @@
   </div>
   <p class="foot">MooPay never holds your money. You sign from your own wallet.</p>
 </main>
+<div id="pickbox" class="overlay hidden">
+  <div class="panel">
+    <p class="msg" id="picktitle"></p>
+    <div id="picklist"></div>
+  </div>
+</div>
+<div id="usebox" class="overlay hidden">
+  <div class="panel">
+    <p class="msg" id="usetext"></p>
+    <button class="btn" id="useyes" type="button">Yes, use it</button>
+    <button class="btn ghost" id="useno" type="button">Use another wallet</button>
+  </div>
+</div>
 <script src="/p/assets/pay.js"></script>
 </body>
 </html>

@@ -23,6 +23,8 @@ export interface PayIntent {
   sig?: string;
   /** A staking payment: the money lands in the agent wallet and is staked for `payout`, which the page asks for before anything is signed. */
   stake?: { payout?: string };
+  /** Money added to the agent wallet: a deposit address accepts a little more or less than quoted. */
+  fund?: boolean;
 }
 
 const TTL_MS = 30 * 60 * 1000;

@@ -22,7 +22,8 @@ export async function followPayments(ops: AgentOps, store: AgentStore, u: UserRe
       : p.status === "DELIVERED" ? `Delivered: $${p.amountUsd.toFixed(2)} reached ${p.recipient}.`
       : p.status === "CLAIMED" ? `Claimed: ${p.recipient} opened your $${p.amountUsd.toFixed(2)} claim.`
       : p.status === "STAKED" ? `Staked: you now hold about ${p.expected}, sent to ${p.recipient}. To unstake, use Rhea's page.`
-      : p.kind === "stake" && p.status === "FAILED" ? "I couldn't finish your stake. Your money is safe in your agent wallet; ask me to try again."
+      : p.status === "WAITING_FOR_FEE" ? `Your payment arrived, but I can't finish the stake yet. ${p.why}`
+      : p.kind === "stake" && p.status === "FAILED" ? `I couldn't finish your stake${p.why ? `: ${p.why}` : ""}. Your money is safe in your agent wallet; ask me to try again.`
       : p.status === "REFUNDED" ? `Refunded: your $${p.amountUsd.toFixed(2)} ${p.kind === "claim" ? "claim was not opened in time" : "payment did not go through"}, and the money is back ${p.payId ? "in your wallet" : "in your agent wallet"}.`
       : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
       : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
@@ -36,10 +37,11 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
   const cents = Math.round(b.totalUsd * 100), was = Number(u.seen.usdc), nat = b.nat.toString();
   if (was > 0 && cents > was + 4) store.event(u, `Money arrived: $${((cents - was) / 100).toFixed(2)}.`);
   else if (was === 0 && cents >= 5) store.event(u, `Your agent wallet is funded: $${(cents / 100).toFixed(2)}. I'm ready.`);
-  if (await ops.sponsorGas(u, b.tok, b.nat)) store.event(u, "I added a little NEAR so your agent wallet can pay its network fees.");
+  if (await ops.sponsorGas(u, BigInt(Math.round(b.totalUsd * 1e6)), b.nat)) store.event(u, "I added a little NEAR so your agent wallet can pay its network fees.");
   u.seen = { usdc: String(cents), near: nat };
 
   await ops.forwardRnear(u).catch(() => undefined); // rNEAR never stays in the agent wallet
+  await ops.repayAdvance(u);
   const swept = await ops.sweep(u);
   if (swept) { store.event(u, `Sent $${swept.amountUsd.toFixed(2)} above your float to your own wallet.`, { kind: "payment", id: swept.id, amountUsd: swept.amountUsd, chain: "near", recipient: swept.recipient, status: "DELIVERED" }); u.seen.usdc = String(Math.round((await ops.balances(u)).totalUsd * 100)); }
 

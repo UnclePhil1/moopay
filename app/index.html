@@ -249,7 +249,14 @@ function openSheet(url) {
   document.querySelectorAll(".sheet").forEach((x) => x.remove());
   remember(url); // a reload brings the window back where it was
   const close = () => { box.remove(); window.removeEventListener("message", onMsg); remember(null); };
-  const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); } };
+  const onMsg = (e) => {
+    if (e.origin !== location.origin || !e.data || e.data.moopay !== "delivered") return;
+    if (!e.data.stake) { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); return; }
+    // A stake is not done when the money lands: keep the window up until the agent reports the result in the chat.
+    let tries = 0;
+    const wait = async () => { const evs = await poll(); if (evs.some((x) => /stake/i.test(x.text)) || ++tries > 60) return close(); setTimeout(wait, 3000); };
+    void wait();
+  };
   const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
     h("div", { class: "box" }, h("button", { class: "x", onclick: close, "aria-label": "Close" }, "\u00d7"), h("iframe", { src: url + (url.includes("?") ? "&" : "?") + "embed=1", allow: "clipboard-write" })));
   window.addEventListener("message", onMsg);
@@ -286,14 +293,6 @@ function card(c) {
         h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
     }
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => openSheet(c.url) }, c.button)));
-    case "recovery": {
-      if (isTemp()) return h("div", { class: "card" }, h("div", { class: "sub" }, "This is a temporary session, so no recovery code is kept on this device. Use the one you saved on your own device."));
-      const code = deviceToken(), el = h("div", { class: "card" }, h("div", { class: "sub" }, "Your recovery code. Save it somewhere safe, like a password manager."),
-        h("div", { class: "code" }, h("code", {}, code), h("button", { onclick: (e) => copy(code, e.target) }, "Copy")),
-        h("div", { class: "sub", style: "margin-top:10px" }, "If you clear this browser or change computer, type /restore and paste it to get your account back. Anyone with this code can use your account, so keep it private."));
-      if (c.ask) el.append(h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => { try { localStorage.setItem(SAVED_KEY, "1"); } catch {} el.querySelector(".btns").remove(); } }, "I saved it")));
-      return el;
-    }
     case "privacy": {
       const sealed = aiInfo?.tier === "Confidential TEE";
       return h("div", { class: "card" }, h("div", { class: "sub" }, "Privacy"),
@@ -392,8 +391,10 @@ let lastEvent = 0, aiInfo = null;
 async function poll() {
   try {
     const r = await (await api("events?since=" + lastEvent)).json();
-    for (const e of r.events || []) { lastEvent = Math.max(lastEvent, e.id); const b = agent(); await say(b, e.text); if (e.card) b.append(card(e.card)); down(); if (/funded|arrived/.test(e.text)) nudge(1); }
-  } catch {}
+    const events = r.events || [];
+    for (const e of events) { lastEvent = Math.max(lastEvent, e.id); const b = agent(); await say(b, e.text); if (e.card) b.append(card(e.card)); down(); if (/funded|arrived/.test(e.text)) nudge(1); }
+    return events;
+  } catch { return []; }
 }
 
 /* shortcuts */
@@ -402,7 +403,7 @@ const COMMANDS = [
   { name: "/claim", desc: "Private claim only one wallet can open", ex: "Create a private claim of $20 for " },
   { name: "/account", desc: "Balance and deposit address", run: "Show my account" },
   { name: "/status", desc: "Recent payments and claims", run: "Show my recent activity" },
-  { name: "/add", desc: "Add money from any chain", ex: "Add $20 from my Solana wallet. My address is " },
+  { name: "/add", desc: "Add money from any chain", ex: "Add $20 from my Solana wallet" },
   { name: "/withdraw", desc: "Take your money out", run: "Withdraw everything to my wallet" },
   { name: "/privacy", desc: "Who can read your chat", privacy: true },
   { name: "/recovery", desc: "Show your recovery code", recovery: true },
@@ -437,7 +438,20 @@ async function exportKey() {
     await ask({ title: "Your wallet key", text: "Copy it and keep it somewhere safe. It opens the wallet " + short(r.accountId) + " in any NEAR wallet.", reveal: r.secretKey, confirm: "Done" });
   } catch (e) { clearEmpty(); await say(agent(), e.message || "I couldn't get the key."); }
 }
-function showRecovery(ask) { clearEmpty(); agent().append(card({ kind: "recovery", ask })); down(); }
+/** The recovery code only ever appears in this popup, never in the chat. */
+let recoveryOpen = false;
+async function showRecovery() {
+  if (recoveryOpen) return;
+  recoveryOpen = true;
+  try {
+    if (isTemp()) return void (await ask({ title: "Temporary session", text: "No recovery code is kept on this device. Use the one you saved on your own device.", confirm: "OK" }));
+    await recoveryDialog();
+  } finally { recoveryOpen = false; }
+}
+async function recoveryDialog() {
+  const saved = await ask({ title: "Your recovery code", text: "Save it somewhere safe, like a password manager. If you clear this browser or change computer, type /restore and paste it to get your account back. Anyone with this code can use your account.", reveal: deviceToken(), confirm: "I saved it" });
+  if (saved) try { localStorage.setItem(SAVED_KEY, "1"); } catch {}
+}
 const post = async (path, body) => { const j = await (await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) })).json(); if (j.code) throw new Error(j.message); return j; };
 const fail = async (e, fallback) => { clearEmpty(); await say(agent(), e.message || fallback); };
 async function restore() {
@@ -518,7 +532,7 @@ $("form").addEventListener("submit", (e) => { e.preventDefault(); if (busy) void
 function start() {
   chat.replaceChildren(h("div", { id: "empty", class: "empty" }, h("img", { src: "/app/assets/moopay-mark.png", alt: "" }), h("h2", {}, "Where should the money go?"),
     h("p", {}, "Tell me in plain words. I find the route, send it, and follow it until it lands."),
-    h("div", { class: "chips" }, [["Show my account", "Show my account"], ["Add money", "Add $20 from my Solana wallet. My address is "], ["Send money", "Send $20 to "], ["Private claim", "Create a private claim of $20 for "]].map(([l, c]) => h("button", { class: "chip", onclick: () => { if (c.endsWith(" ")) { input.value = c; input.focus(); sync(); } else void submit(c); } }, l)),
+    h("div", { class: "chips" }, [["Show my account", "Show my account"], ["Add money", "Add $20 from my Solana wallet"], ["Send money", "Send $20 to "], ["Private claim", "Create a private claim of $20 for "]].map(([l, c]) => h("button", { class: "chip", onclick: () => { if (c.endsWith(" ")) { input.value = c; input.focus(); sync(); } else void submit(c); } }, l)),
       h("a", { class: "chip", href: "/guide", target: "_blank", rel: "noopener", style: "text-decoration:none" }, "How it works"))));
 }
 

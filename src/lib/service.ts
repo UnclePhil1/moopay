@@ -361,9 +361,9 @@ export class MooPayService {
   }
 
   /** A pay page for the agent to hand over: any destination, any chain to pay from. */
-  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined; stake?: { payout?: string | undefined } | undefined }): string {
+  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined; stake?: { payout?: string | undefined } | undefined; fund?: boolean | undefined }): string {
     parseDecimal(i.payAmount, 6);
-    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: i.stake.payout ? { payout: i.stake.payout } : {} } : {}) }).id;
+    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: i.fund ? 300 : 100, ...(i.fund ? { fund: true } : {}), ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: i.stake.payout ? { payout: i.stake.payout } : {} } : {}) }).id;
   }
 
   /** The NEAR wallet a staking payment's rNEAR goes to, once the payer has given it on the pay page. */
@@ -431,6 +431,7 @@ export class MooPayService {
       ...(i.fromChain ? { fromChain: i.fromChain } : {}),
       ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
       ...(i.stake ? { stake: { payout: i.stake.payout ?? "" } } : {}),
+      ...(i.fund ? { fund: true } : {}),
     };
   }
 
@@ -452,18 +453,25 @@ export class MooPayService {
     return { i, out: await this.receiverUnits(i), asset };
   }
 
-  private directFor(i: PayIntent, originAssetId: string, amount: bigint, refundTo: string, dryRun: boolean): DirectInput {
+  /** `amount` is what the receiver gets. Adding money to the agent wallet instead quotes what the payer sends (`origin` in its own units), so a bit more or less still counts. */
+  private directFor(i: PayIntent, originAssetId: string, amount: bigint, refundTo: string, dryRun: boolean, origin?: PayAsset): DirectInput {
+    const flex = i.fund && origin ? { flex: true, amount: this.originUnits(i, amount, origin) } : undefined;
     return {
-      originAssetId, amount: amount.toString(), refundTo, exactOutput: true, destinationChain: i.destinationChain as DirectInput["destinationChain"],
+      originAssetId, amount: amount.toString(), refundTo, exactOutput: true, ...flex, destinationChain: i.destinationChain as DirectInput["destinationChain"],
       destinationAssetId: i.destinationAssetId, recipient: i.recipient, slippageBps: i.slippageBps, dryRun,
     };
+  }
+
+  private originUnits(i: PayIntent, usdcUnits: bigint, o: PayAsset): string {
+    if (/^US(DC|DT)/i.test(o.symbol) || !o.priceUsd) return ((usdcUnits * 10n ** BigInt(o.decimals) + 999_999n) / 1_000_000n).toString();
+    return ((usdcUnits * 10n ** BigInt(o.decimals) + BigInt(Math.round(o.priceUsd * 1e6)) - 1n) / BigInt(Math.round(o.priceUsd * 1e6))).toString();
   }
 
   /** Price preview for the page. Dry quote: no deposit address, nothing reserved. */
   async payEstimate(id: string, originAssetId: string) {
     const { i, out, asset } = await this.payInputs(id, originAssetId);
     if (this.isDirect(i, asset)) return { amountIn: out, payDecimals: asset.decimals, paySymbol: asset.symbol, expectedOutput: { amountOut: out.toString() }, withdrawFee: undefined, timeEstimate: 2 };
-    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true))) as {
+    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, DRY_REFUND[asset.chain] ?? "0x1111111111111111111111111111111111111111", true, asset))) as {
       amountIn: string;
       expectedOutput: { amountOut?: string; minAmountOut?: string };
       fees: Record<string, unknown>;
@@ -562,7 +570,7 @@ export class MooPayService {
       if (asset.chain === "near") return { ...head, transfer: { kind: "near" as const, contract: asset.contract, receiverId: i.recipient, amount: out, native: asset.native, needsRegistration: asset.native ? false : !(await this.d.near.storageRegistered(asset.contract, i.recipient)), to: i.recipient } };
       return { ...head, transfer: { kind: asset.chain === "sol" ? "sol" as const : "evm" as const, to: i.recipient, amount: out, native: asset.native, contract: asset.contract, ...(asset.chainId ? { chainId: asset.chainId } : {}) } };
     }
-    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, refundTo, false))) as {
+    const r = (await this.routeDirect(this.directFor(i, originAssetId, out, refundTo, false, asset))) as {
       depositAddress: string;
       amountIn: string;
       depositMemo?: string;
@@ -600,9 +608,9 @@ export class MooPayService {
   }
 
 
-  private quoteBase(input: CommonInput, originAsset: string, amount: bigint, refundTo: string, exactOutput = false): Omit<QuoteRequest, "dry"> {
+  private quoteBase(input: CommonInput, originAsset: string, amount: bigint, refundTo: string, exactOutput = false, flex = false): Omit<QuoteRequest, "dry"> {
     return {
-      swapType: exactOutput ? "EXACT_OUTPUT" : "EXACT_INPUT",
+      swapType: flex ? "FLEX_INPUT" : exactOutput ? "EXACT_OUTPUT" : "EXACT_INPUT",
       slippageTolerance: input.slippageBps,
       originAsset,
       depositType: "ORIGIN_CHAIN",
@@ -630,7 +638,7 @@ export class MooPayService {
     const origin = await this.d.oneClick.findToken(input.originAssetId);
     if (!origin) throw new MoopayError("UNKNOWN_ASSET", "originAssetId is not listed by 1Click /v0/tokens");
     const amount = BigInt(input.amount);
-    const base = this.quoteBase(input, input.originAssetId, amount, input.refundTo, input.exactOutput);
+    const base = this.quoteBase(input, input.originAssetId, amount, input.refundTo, input.exactOutput, input.flex);
     const costs = this.fees("the sender's own wallet (MooPay holds no funds and signs nothing in DIRECT mode)");
 
     if (input.dryRun) {
@@ -657,7 +665,7 @@ export class MooPayService {
       depositAddress,
       ...(q.quote.depositMemo ? { depositMemo: q.quote.depositMemo } : {}),
       amountIn: q.quote.amountIn,
-      pay: { assetId: input.originAssetId, chain: origin.blockchain, amount: input.exactOutput ? BigInt(q.quote.amountIn ?? input.amount) : amount },
+      pay: { assetId: input.originAssetId, chain: origin.blockchain, amount: input.exactOutput || input.flex ? BigInt(q.quote.amountIn ?? input.amount) : amount },
       quoteExpiresAt: q.quote.deadline ?? base.deadline,
       expectedOutput: { amountOut: q.quote.amountOut, minAmountOut: q.quote.minAmountOut },
       fees: { ...costs, slippageBps: input.slippageBps, amountInUsd: q.quote.amountInUsd },
@@ -915,6 +923,6 @@ type RouteParsed = z.output<typeof routeSchema>;
 type ClaimInput = CommonInput & { secretKeyString: string; originAssetId?: string | undefined };
 type PayLinkInput = CommonInput & { payAmount: string };
 /** exactOutput: `amount` is what the receiver gets, and the quote adds the fees on top of what the sender pays. */
-export type DirectInput = CommonInput & { originAssetId: string; amount: string; refundTo: string; exactOutput?: boolean };
+export type DirectInput = CommonInput & { originAssetId: string; amount: string; refundTo: string; exactOutput?: boolean; /** `amount` is what the sender pays; any deposit from a little under it upwards is swapped and credited */ flex?: boolean };
 
 export type { Token };

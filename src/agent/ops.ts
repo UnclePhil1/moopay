@@ -26,6 +26,10 @@ export interface SendParams {
 const MAX_GROUP = 20;
 const NATIVE: Record<string, string> = { sol: "SOL", eth: "ETH", btc: "BTC" };
 const EXPLORER: Record<string, string> = { sol: "https://solscan.io/tx/", eth: "https://etherscan.io/tx/", btc: "https://mempool.space/tx/", near: "https://nearblocks.io/txns/" };
+/** The agent wallet holds money but no NEAR to pay its first network fee (and no sponsor topped it up). */
+class NeedsFee extends MoopayError {
+  constructor(address: string) { super("NOTE_NOT_FUNDED", `Your agent wallet needs a little NEAR for network fees. Send about 0.05 NEAR to ${address} and I will finish.`); }
+}
 const MIN_GAS = 10_000_000_000_000_000_000_000n; // 0.01 NEAR
 const CLAIM_GAS = 60_000_000_000_000_000_000_000n; // 0.06 NEAR: 0.03 goes to the claim account, the rest pays for our own transfers
 const APPROVAL_TTL = 30 * 60 * 1000;
@@ -42,6 +46,7 @@ const id = () => randomBytes(6).toString("base64url");
 export interface Sponsor { accountId: string; secretKey: string; dailyMax: number }
 const SPONSOR_AMOUNT = 50_000_000_000_000_000_000_000n; // 0.05 NEAR, enough for a few dozen transfers
 const AGENT_KEY_DEFAULT_HOURS = 24 * 7;
+const ADVANCE = 50_000_000_000_000_000_000_000n; // 0.05 NEAR lent to a wallet that holds wNEAR but no NEAR; paid back out of that wallet once it has staked
 const SPONSOR_LOW = 2_000_000_000_000_000_000_000_000n; // alert below 2 NEAR
 const LOW_GAS = 20_000_000_000_000_000_000_000n; // 0.02 NEAR
 const KEEP_NEAR = 5_000_000_000_000_000_000_000n;
@@ -255,16 +260,16 @@ export class AgentOps {
   }
 
   /** The user signs in a wallet of their choice; nothing is taken from the agent wallet. */
-  private ownWallet(u: UserRec, o: { chain: string; sym: string; recipient: string; usdText: string; amt: number; what: string; fromChain?: string | undefined; fromSymbol?: string | undefined }, ctx: Ctx): Promise<Out> {
+  private ownWallet(u: UserRec, o: { chain: string; sym: string; recipient: string; usdText: string; amt: number; what: string; fromChain?: string | undefined; fromSymbol?: string | undefined; fund?: boolean }, ctx: Ctx): Promise<Out> {
     return this.destAsset(o.chain, o.sym).then((dest) => {
-      const payId = this.svc.newPayIntent({ destinationChain: o.chain, destinationAssetId: dest.assetId, recipient: o.recipient, payAmount: o.usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase() });
-      const pay: Payment = { id: id(), kind: "send", amountUsd: o.amt, chain: o.chain, recipient: o.recipient, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId };
+      const payId = this.svc.newPayIntent({ destinationChain: o.chain, destinationAssetId: dest.assetId, recipient: o.recipient, payAmount: o.usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), fund: o.fund });
+      const pay: Payment = { id: id(), kind: o.fund ? "fund" : "send", amountUsd: o.amt, chain: o.chain, recipient: o.recipient, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId };
       u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
       const url = `${ctx.origin}/p/${payId}`;
-      const title = `Send ${o.what} to ${o.recipient.length > 20 ? o.recipient.slice(0, 8) + "…" + o.recipient.slice(-6) : o.recipient}`;
+      const title = o.fund ? `Add ${o.what} to your agent wallet` : `Send ${o.what} to ${o.recipient.length > 20 ? o.recipient.slice(0, 8) + "…" + o.recipient.slice(-6) : o.recipient}`;
       return {
         result: { status: "needs_your_signature", paymentId: pay.id, note: "A Confirm button is on the user's screen. They press it, pick the wallet they want to pay from and sign. Nothing has been sent or taken yet. Do not say it failed, do not mention the agent wallet, and do not paste the link." },
-        card: { kind: "confirm_send", title, url, to: o.recipient, chain: o.chain.toUpperCase(), amount: o.what, id: pay.id },
+        card: { kind: "confirm_send", title, url, amount: o.what, id: pay.id, ...(o.fund ? { button: "Add money" } : { to: o.recipient, chain: o.chain.toUpperCase() }) },
       };
     });
   }
@@ -509,6 +514,12 @@ export class AgentOps {
     const target = need + STAKE_GAS_ROOM;
     let b = await this.balances(u);
     if (b.nat >= target || !b.nearA?.priceUsd) { if (b.nat < target) throw new MoopayError("NOTE_NOT_FUNDED", `Your balance is $${b.totalUsd.toFixed(2)} but this needs more. Add money and try again.`); return; }
+    const { nearA } = b;
+    if (b.nat < MIN_GAS) { // even unwrapping needs a first fee: use the sponsor if there is one
+      await this.advanceGas(u, b.wnear, b.nat) || await this.sponsorGas(u, BigInt(Math.round(b.totalUsd * 1e6)), b.nat);
+      b = await this.balances(u);
+      if (b.nat < MIN_GAS) throw new NeedsFee(u.accountId);
+    }
     const k = this.store.keyOf(u);
     const unwrap = async (amount: bigint) => {
       await this.near.call({ accountId: k.accountId, secretKey: k.secretKey, contractId: WRAP, method: "near_withdraw", args: { amount: amount.toString() }, deposit: 1n, gas: 30n * 10n ** 12n });
@@ -516,7 +527,7 @@ export class AgentOps {
     };
     let short = target - b.nat; short += short / 50n;
     if (b.wnear > 0n) { const take = b.wnear < short ? b.wnear : short; await unwrap(take); short -= take; }
-    const price = b.nearA.priceUsd, nearAssetId = b.nearA.assetId;
+    const price = nearA.priceUsd!, nearAssetId = nearA.assetId;
     for (const [asset, have] of [[b.usdc, b.tok], [b.usdtA, b.usdt]] as const) {
       if (short <= 0n || !asset || have <= 0n) continue;
       const usdUnits = BigInt(Math.ceil((Number(short) / 1e24) * price * 10 ** asset.decimals * 1.02)) + 1n;
@@ -540,6 +551,7 @@ export class AgentOps {
     const price = await rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>);
     const got = (await this.near.ftBalance(RNEAR, u.accountId)) - before;
     const delivered = got > 0n && Boolean(await this.forwardRnear(u));
+    await this.repayAdvance(u, true);
     const apy = await rnearApy();
     const shown = fmt(nearAmt, 24, 4), rnear = fmt((nearAmt * 10n ** 24n) / price, 24, 4);
     return { tx: tx.txHash, shown, rnear, delivered, apy, card: { kind: "stake", staked: shown, rnear, to, apy, tx: EXPLORER.near + tx.txHash, link: RNEAR_APP } };
@@ -578,7 +590,7 @@ export class AgentOps {
     if (o.payout && !isNearAccountId(o.payout)) throw new MoopayError("BAD_RECIPIENT", "your rNEAR goes to a NEAR wallet, like alice.near");
     const dest = await this.destAsset("near", "NEAR");
     // The window asks for the network fee reserve on top, like every fee here; what staking does not use stays in the agent wallet.
-    const usdText = (Math.ceil((Number(o.nearAmt + STAKE_GAS_ROOM) / 1e24) * o.nearUsd * 100) / 100).toFixed(2);
+    const usdText = (Math.ceil((Number(o.nearAmt + STAKE_GAS_ROOM + STAKE_GAS_ROOM / 2n) / 1e24) * o.nearUsd * 100) / 100).toFixed(2);
     const payId = this.svc.newPayIntent({ destinationChain: "near", destinationAssetId: dest.assetId, recipient: u.accountId, payAmount: usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), stake: { payout: o.payout } });
     const price = await rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>);
     const shown = fmt(o.nearAmt, 24, 4), expected = fmt((o.nearAmt * 10n ** 24n) / price, 24, 4);
@@ -593,6 +605,7 @@ export class AgentOps {
   /** The pay window's money has landed in the agent wallet: stake it and hand the rNEAR over. Safe to call twice; only one run goes ahead. */
   private async finishStake(u: UserRec, p: Payment): Promise<{ link: string; card: unknown } | undefined> {
     if (p.status === "STAKING") return undefined;
+    const was = p.status;
     p.status = "STAKING"; this.store.save();
     try {
       if (!isNearAccountId(p.recipient)) throw new MoopayError("INVALID_INPUT", "no payout wallet was given");
@@ -602,10 +615,17 @@ export class AgentOps {
       if (nearAmt < STAKE_MIN_NEAR) throw new MoopayError("NOTE_NOT_FUNDED", "not enough arrived to stake");
       const r = await this.runStake(u, nearAmt, p.recipient);
       Object.assign(p, { status: "STAKED", settled: true, txHash: r.tx, expected: `${r.rnear} rNEAR` });
+      delete p.why;
       this.spend(u, p.amountUsd, this.recipientKey("near", p.recipient));
       this.store.save();
       return { link: EXPLORER.near + r.tx, card: r.card };
-    } catch { p.status = "FAILED"; p.settled = true; this.store.save(); return undefined; }
+    } catch (e) {
+      console.error("stake failed", p.id, e);
+      if (e instanceof NeedsFee) { p.status = "WAITING_FOR_FEE"; p.why = e.message; } // the money is safe; the next round tries again
+      else { p.status = "FAILED"; p.settled = true; p.why = asMoopayError(e).message; }
+      if (was !== p.status || p.status === "FAILED") this.store.save();
+      return undefined;
+    }
   }
 
   /** Sends any rNEAR the agent wallet holds on to the wallet it was staked for (also used by the worker as a safety net). */
@@ -644,6 +664,10 @@ export class AgentOps {
     if (p.settled) return { changed: false };
     const before = p.status;
     let link: string | undefined;
+    if (p.kind === "stake" && p.status === "WAITING_FOR_FEE") { // the money is here; staking waits only for a first network fee
+      const done = await this.finishStake(u, p);
+      return { changed: p.status !== before, ...(done ?? {}) };
+    }
     if (p.kind === "stake" && p.payId) { // the pay window brings the money; the stake itself is ours to finish
       let done: { link: string; card: unknown } | undefined;
       try {
@@ -737,21 +761,19 @@ export class AgentOps {
     return { kind: "deposit", address, amount: fmt(units, t.decimals, 8), symbol: t.symbol, chain, expires: quote.deadline, memo: quote.depositMemo, expected, note };
   }
 
-  async fundWallet(u: UserRec, p: { amountUsd: string; fromChain: string; fromSymbol?: string | undefined; refundAddress: string }): Promise<Out> {
+  /** Adds money to the agent wallet: a pay window where the user picks any wallet and coin, signs, and it arrives as USDC. Refunds go back to the wallet that signed. */
+  async fundWallet(u: UserRec, p: { amountUsd?: string | undefined; amount?: string | undefined; fromChain: string; fromSymbol?: string | undefined }, ctx: Ctx): Promise<Out> {
     const chain = p.fromChain.toLowerCase();
-    this.checkRefund(chain, p.refundAddress);
-    const usdc = await this.svc.usdcAsset();
-    const { token } = await this.originAsset(chain, p.fromSymbol, p.amountUsd);
-    // The wallet receives the whole amount; the fees are added to what the user sends.
-    const req: QuoteRequest = { dry: false, swapType: "EXACT_OUTPUT", slippageTolerance: 100, originAsset: token.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: usdc.assetId, amount: parseDecimal(p.amountUsd, usdc.decimals).toString(), recipient: u.accountId, recipientType: "DESTINATION_CHAIN", refundTo: p.refundAddress, refundType: "ORIGIN_CHAIN", deadline: new Date(this.now() + 8 * 60_000).toISOString() };
-    const q = (await this.svc.oneClickClient.quote(req)).quote;
-    if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
-    const units = BigInt(q.amountIn ?? "0");
-    const expected = `${fmt(parseDecimal(p.amountUsd, usdc.decimals), usdc.decimals, 2)} USDC`;
-    u.payments.unshift({ id: id(), kind: "fund", amountUsd: Number(p.amountUsd), chain, recipient: u.accountId, status: "AWAITING_YOUR_DEPOSIT", createdAt: this.now(), depositAddress: q.depositAddress, expected });
-    this.store.save();
-    const card = this.depositCard(q.depositAddress, units, token, chain, { deadline: q.deadline, depositMemo: q.depositMemo }, expected, "Send exactly this amount from your own wallet. It arrives in your agent wallet as USDC.");
-    return { result: { status: "awaiting_your_deposit", sendExactly: `${card["amount"]} ${token.symbol}`, to: q.depositAddress, arrives: expected, expires: q.deadline, ...(q.depositMemo ? { memo: q.depositMemo } : {}) }, card };
+    let usdText = p.amountUsd;
+    if (!usdText) { // coins ("0.01 SOL") are priced in dollars here
+      if (!p.amount) throw new MoopayError("INVALID_INPUT", "give an amount in dollars (amountUsd) or in coins (amount)");
+      const price = (await this.destAsset(chain, p.fromSymbol) as { price?: number }).price;
+      if (!price) throw new MoopayError("QUOTE_FAILED", "I couldn't get a price for that coin, so say the amount in dollars instead.");
+      parseDecimal(p.amount, 18);
+      usdText = (Math.ceil(Number(p.amount) * price * 100) / 100).toFixed(2);
+    }
+    const amt = Number(usdText);
+    return this.ownWallet(u, { chain: "near", sym: "USDC", recipient: u.accountId, usdText, amt, what: p.amount ? `${p.amount} ${(p.fromSymbol ?? NATIVE[chain] ?? "").toUpperCase()}`.trim() : usd(amt), fromChain: chain, fromSymbol: p.fromSymbol, fund: true }, ctx);
   }
 
   /* ---- pay without depositing: the user pays straight from their own wallet ---- */
@@ -781,6 +803,35 @@ export class AgentOps {
     const dest = await this.destAsset(to, p.toSymbol);
     const r = (await this.svc.route({ destinationChain: to, destinationAssetId: dest.assetId, recipient: p.recipient, payAmount: p.amountUsd }, { payLinkPrefix: `${ctx.origin}/p` })) as { payLink: string };
     return { result: { status: "link_ready", payLink: r.payLink, note: "They open it, pick USDC, USDT or NEAR, press Send and sign in their NEAR wallet." }, card: { kind: "link", title: `Pay ${usd(Number(p.amountUsd))} from your own wallet`, url: r.payLink, button: "Open to sign", note: "Opens a page where you pick what to pay with and sign in your NEAR wallet. Nothing is stored here." } };
+  }
+
+  /* ---- gas advance: a loan for the first fee, repaid by the wallet's own reserve ---- */
+  /** Lends a wallet that holds wNEAR (at least the staking reserve) but no NEAR enough NEAR to unwrap and stake it. One loan per wallet at a time. */
+  private async advanceGas(u: UserRec, wnear: bigint, nat: bigint): Promise<boolean> {
+    const s = this.sponsor;
+    if (!s || u.advance || nat >= MIN_GAS || wnear < STAKE_GAS_ROOM) return false;
+    u.advance = ADVANCE.toString(); this.store.save();
+    try { await this.near.sendNear({ accountId: s.accountId, secretKey: s.secretKey, to: u.accountId, amount: ADVANCE }); }
+    catch { delete u.advance; this.store.save(); void alertOwner("advance-failed", "the gas wallet could not lend NEAR for a stake. Its balance may be empty.", this.now()); return false; }
+    for (let i = 0; i < 10 && (await this.near.nearBalance(u.accountId)) < MIN_GAS; i++) await new Promise((res) => setTimeout(res, this.pollMs));
+    void this.near.nearBalance(s.accountId).then((b) => { if (b < SPONSOR_LOW) void alertOwner("sponsor-low", `the gas sponsor wallet is running low (${(Number(b) / 1e24).toFixed(2)} NEAR left).`, this.now()); }).catch(() => undefined);
+    return true;
+  }
+
+  /** Sends the loan back once the stake is done. Also the worker's safety net, so it waits while a stake is still waiting on the wallet's wNEAR. */
+  async repayAdvance(u: UserRec, force = false): Promise<void> {
+    const s = this.sponsor;
+    if (!s || !u.advance) return;
+    try {
+      if (!force && (await this.near.ftBalance(WRAP, u.accountId)) >= STAKE_MIN_NEAR) return;
+      const owed = BigInt(u.advance), spare = (await this.near.nearBalance(u.accountId)) - KEEP_NEAR;
+      const pay = owed < spare ? owed : spare;
+      if (pay <= 0n) return;
+      const k = this.store.keyOf(u);
+      await this.near.sendNear({ accountId: k.accountId, secretKey: k.secretKey, to: s.accountId, amount: pay });
+      if (pay >= owed) delete u.advance; else u.advance = (owed - pay).toString();
+      this.store.save();
+    } catch { /* the worker tries again */ }
   }
 
   /* ---- gas sponsor: lets people with no NEAR start (capped, optional) ---- */

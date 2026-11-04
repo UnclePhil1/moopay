@@ -12,7 +12,7 @@ import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, 
 interface Asset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; chain: string; chainId?: number }
 interface Intent {
   destinationChain: string; destinationSymbol: string; destinationDecimals: number;
-  recipient: string; payAmount: string; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
+  recipient: string; payAmount: string; fund?: boolean; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
 }
 interface Quote {
   depositAddress: string; depositMemo?: string; chain: string; direct?: boolean;
@@ -199,6 +199,8 @@ async function track(depositAddress: string, manual = false) {
   $("form").classList.add("hidden");
   $("deposit").classList.remove("hidden");
   $("addr").textContent = depositAddress;
+  for (const el of [$("dlabel"), $("addr").parentElement!]) el.classList.toggle("hidden", !manual); // a signed payment needs no address on screen
+  if (!manual) $("exactrow").classList.add("hidden");
   $("title").textContent = manual ? "Waiting for your payment" : "Sending…";
   for (;;) {
     try {
@@ -206,7 +208,7 @@ async function track(depositAddress: string, manual = false) {
       if (s.state === "SUCCESS") {
         $("title").textContent = intent.stake ? "Staking" : "Delivered";
         if (intent.stake) { $("doneline").textContent = "Your money arrived."; $("donenote").textContent = "MooPay is staking it now and sending the rNEAR to your wallet. You'll see it in your chat."; }
-        if (window.parent !== window) window.parent.postMessage({ moopay: "delivered" }, location.origin);
+        if (window.parent !== window) window.parent.postMessage({ moopay: "delivered", stake: Boolean(intent.stake) }, location.origin);
         $("deposit").classList.add("hidden");
         const done = $("done");
         done.classList.remove("hidden");
@@ -240,6 +242,7 @@ function showManual(q: Quote, a: Asset) {
   $("form").classList.add("hidden");
   $("deposit").classList.remove("hidden");
   $("dlabel").textContent = `Send this from your ${chainName(a.chain)} wallet`;
+  $("exactlabel").textContent = intent.fund ? "Send about" : "Send exactly";
   $("exact").textContent = `${fmt(q.transfer.amount, a.decimals)} ${a.symbol}${q.depositMemo ? ` · memo ${q.depositMemo}` : ""}`;
   $("exactrow").classList.remove("hidden");
 }
@@ -443,8 +446,7 @@ async function send() {
     say("msg", "Preparing your payment…");
     const originAssetId = a.assetId;
     const q = await getQuote(originAssetId, account);
-    $("deposit").classList.remove("hidden");
-    $("addr").textContent = q.depositAddress;
+    $("addr").textContent = q.depositAddress; // kept for the manual fallback; shown only if the wallet fails
     sessionStorage.setItem(`moopay:${id}`, q.depositAddress); // for wallets that redirect and come back
     say("msg", "Approve the payment in your wallet…");
 

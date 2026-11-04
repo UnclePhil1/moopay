@@ -28,6 +28,8 @@ export interface Payment {
   payId?: string;
   /** a stake paid from the user's own wallet: how much NEAR to stake once the money lands (24 decimals) */
   stakeNear?: string;
+  /** why a stake is waiting or failed, in words the user can act on */
+  why?: string;
 }
 export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
@@ -43,6 +45,8 @@ export interface UserRec {
   frozen?: boolean;
   /** where the rNEAR from a stake in progress goes, when it is not the payout wallet in the rules */
   rnearTo?: string;
+  /** NEAR (yocto) lent to this wallet for its first fee, to be paid back after a stake */
+  advance?: string;
   /** the user chose not to keep chat history: it stays in memory for context but is never written to disk or shown again after a reload */
   noHistory?: boolean;
   spent: { day: string; usd: number }; known: string[];

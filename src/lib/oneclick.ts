@@ -50,7 +50,7 @@ export type StatusResponse = z.infer<typeof StatusResponseSchema>;
 
 export interface QuoteRequest {
   dry: boolean;
-  swapType: "EXACT_INPUT" | "EXACT_OUTPUT";
+  swapType: "EXACT_INPUT" | "EXACT_OUTPUT" | "FLEX_INPUT";
   slippageTolerance: number;
   originAsset: string;
   depositType: "ORIGIN_CHAIN";

@@ -212,24 +212,31 @@ test("withdraw: goes to the payout wallet on its own, anywhere else needs a yes"
   assert.equal(a.near.transfers.at(-1)?.amount, 95_000_000_000_000_000_000_000n, "leaves a little for the fee");
 });
 
-test("fund from another chain: quote pays USDC to the agent wallet, shows the exact amount, no agent funds move", async () => {
+test("fund from another chain: the user signs in a window, any coin, refunds go to the signing wallet, a bit more or less still counts", async () => {
   const a = agent();
-  const r = await a.ops.fundWallet(a.u, { amountUsd: "20", fromChain: "sol", refundAddress: SOL_ADDR });
+  const SOL = "So11111111111111111111111111111111111111112";
+  const r = await a.ops.fundWallet(a.u, { amount: "0.01", fromChain: "sol", fromSymbol: "SOL" }, CTX);
+  assert.equal(r.result["status"], "needs_your_signature");
+  const card = r.card as { button: string; url: string; amount: string };
+  assert.deepEqual([card.button, card.amount], ["Add money", "0.01 SOL"]);
+  assert.equal(a.near.transfers.length, 0, "no agent funds move");
+  assert.equal(a.oc.quotes.length, 0, "no quote until the user signs");
+  const pid = card.url.split("/").pop()!;
+  const view = await a.svc.payIntentView(pid);
+  assert.deepEqual([view.destinationChain, view.recipient, view.fromChain, view.fund], ["near", a.u.accountId, "sol", true]);
+  const sol = view.assets.find((x) => x.chain === "sol" && x.native)!;
+  await a.svc.payQuote(pid, sol.assetId, SOL);
   const q = a.oc.quotes.at(-1)!;
-  assert.equal(q.dry, false);
-  assert.equal(q.recipient, a.u.accountId);
+  assert.equal(q.swapType, "FLEX_INPUT", "a deposit a little under or over the quote is still credited");
   assert.equal(q.destinationAsset, TOKENS[1]!.assetId, "arrives as USDC on NEAR");
-  assert.equal(q.refundTo, SOL_ADDR);
-  assert.equal(q.swapType, "EXACT_OUTPUT");
-  assert.equal(q.amount, "20000000", "the wallet receives the whole $20; fees go on top of what the user sends");
-  assert.ok(Number((r.card as { amount: string }).amount) > 0);
-  assert.equal(a.near.transfers.length, 0);
+  assert.equal(q.recipient, a.u.accountId);
+  assert.equal(q.refundTo, SOL, "a refund goes back to the wallet that signed");
   assert.equal(a.u.payments[0]?.kind, "fund");
-  await assert.rejects(a.ops.fundWallet(a.u, { amountUsd: "20", fromChain: "sol", refundAddress: "nope" }), code("BAD_RECIPIENT"));
-  await assert.rejects(a.ops.fundWallet(a.u, { amountUsd: "20", fromChain: "doge", refundAddress: "x" }), code("UNKNOWN_ASSET"));
+  await assert.rejects(a.ops.fundWallet(a.u, { fromChain: "sol" }, CTX), code("INVALID_INPUT"));
   a.oc.statuses.set("dep-1", "SUCCESS");
-  const seen = await a.ops.refresh(a.u, a.u.payments[0]!, { origin: "https://x" });
+  const seen = await a.ops.refresh(a.u, a.u.payments[0]!, CTX);
   assert.equal(seen.changed, true);
+  assert.equal(a.u.payments[0]?.status, "DELIVERED");
 });
 
 test("pay without depositing: a deposit address from the user's own wallet, or a signing link", async () => {
@@ -499,6 +506,53 @@ test("stake from another chain: payout wallet first, the user signs in a window,
   assert.equal(await a.near.ftBalance("lst.rhealab.near", a.u.accountId), 0n);
   assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, false, "a settled stake never runs twice");
   assert.equal(a.near.calls.filter((c) => c.method === "deposit_and_stake").length, 1);
+});
+
+test("stake from another chain: with no NEAR for the first fee it waits, then finishes by itself once there is some", async () => {
+  const a = agent(); rhea(a);
+  const r = await a.ops.stakeRnear(a.u, { amountUsd: "20", fromChain: "sol", fromSymbol: "SOL", payout: "me.near" }, false, {}, CTX);
+  const pid = (r.card as { url: string }).url.split("/").pop()!;
+  const view = await a.svc.payIntentView(pid);
+  await a.svc.payQuote(pid, view.assets.find((x) => x.chain === "sol" && x.native)!.assetId, "So11111111111111111111111111111111111111112");
+  a.oc.statuses.set("dep-1", "SUCCESS");
+  a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, 5n * NEAR_1); // wNEAR landed, but the wallet has no NEAR to pay a fee with
+  const pay = a.u.payments[0]!;
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
+  assert.equal(pay.status, "WAITING_FOR_FEE");
+  assert.match(pay.why!, /needs a little NEAR/);
+  assert.equal(pay.settled, undefined, "the money is safe and the stake is not given up");
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, false, "no repeat message while waiting");
+  a.near.nearBalances.set(a.u.accountId, NEAR_1 / 20n); // someone sends the wallet a little NEAR
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
+  assert.equal(pay.status, "STAKED");
+  assert.equal(a.near.transfers.at(-1)?.to, "me.near");
+});
+
+test("stake from another chain: with a gas wallet the first fee is lent, and paid back out of the user's own reserve", async () => {
+  const a = agent({ accountId: "sponsor.near", secretKey: "ed25519:x", dailyMax: 1 }); rhea(a);
+  (a.ops as unknown as { pollMs: number }).pollMs = 1;
+  const send = a.near.sendNear.bind(a.near);
+  a.near.sendNear = async (p) => { // moves the fake NEAR balances like the chain
+    const r = await send(p);
+    const bal = (x: string) => a.near.nearBalances.get(x) ?? 0n;
+    a.near.nearBalances.set(p.to, bal(p.to) + p.amount); a.near.nearBalances.set(p.accountId, bal(p.accountId) - p.amount);
+    return r;
+  };
+  const r = await a.ops.stakeRnear(a.u, { amountUsd: "20", fromChain: "sol", fromSymbol: "SOL", payout: "me.near" }, false, {}, CTX);
+  const pid = (r.card as { url: string }).url.split("/").pop()!;
+  const view = await a.svc.payIntentView(pid);
+  await a.svc.payQuote(pid, view.assets.find((x) => x.chain === "sol" && x.native)!.assetId, "So11111111111111111111111111111111111111112");
+  a.oc.statuses.set("dep-1", "SUCCESS");
+  a.near.nearBalances.set(a.u.accountId, 0n);
+  a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, 5n * NEAR_1);
+  const pay = a.u.payments[0]!;
+  await a.ops.refresh(a.u, pay, CTX);
+  assert.equal(pay.status, "STAKED");
+  const lent = a.near.transfers.find((t) => t.to === a.u.accountId && t.tokenContract === "NEAR")!;
+  assert.deepEqual([lent.accountId, lent.amount], ["sponsor.near", 50_000_000_000_000_000_000_000n]);
+  const back = a.near.transfers.find((t) => t.to === "sponsor.near")!;
+  assert.equal(back.amount, 50_000_000_000_000_000_000_000n, "the loan comes back in full");
+  assert.equal(a.u.advance, undefined);
 });
 
 test("stake: the agent wallet is used when it can pay, and a missing payout wallet sends the user to the window", async () => {
