@@ -22,7 +22,7 @@ export interface PayIntent {
   /** The transaction (signature or hash) the payer's wallet reported for a direct payment. */
   sig?: string;
   /** A staking payment: the money lands in the agent wallet and is staked for `payout`, which the page asks for before anything is signed. */
-  stake?: { payout?: string };
+  stake?: { payout?: string; notice?: string };
   /** Money added to the agent wallet: a deposit address accepts a little more or less than quoted. */
   fund?: boolean;
   /** Not a payment: one contract call the user signs in their own wallet (unstaking, withdrawing). */
@@ -67,6 +67,9 @@ export class PayHub {
     i.payer = payer;
     i.createdAt = this.now();
   }
+
+  /** Closes a window the user decided not to sign. */
+  cancel(id: string): void { this.intents.delete(id); }
 
   setSig(id: string, sig: string): void { this.get(id).sig = sig; }
 

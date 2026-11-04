@@ -14,6 +14,22 @@ import { AgentStore, SESSION_ENDED, SESSION_MS, type UserRec } from "./store.js"
 import { followPayments, tick } from "./worker.js";
 
 const appFile = (name: string): Buffer => readFileSync(fileURLToPath(new URL(`../../app/${name}`, import.meta.url)));
+/** Docs are built into web/dist/docs: /docs opens the first page, /docs/<path> is a page, <path>.md its plain copy, /llms.txt the index. */
+function docPage(p: string, res: ServerResponse): boolean {
+  const root = fileURLToPath(new URL("../../web/dist/docs/", import.meta.url));
+  const clean = p.replace(/\/$/, "");
+  let file: string, type = "text/html; charset=utf-8";
+  if (clean === "/llms.txt") { file = "llms.txt"; type = "text/plain; charset=utf-8"; }
+  else if (clean === "/docs") { res.writeHead(302, { location: (JSON.parse(readFileSync(root + "index.json", "utf8")) as { first: string }).first }); res.end(); return true; }
+  else if (clean.endsWith(".md")) { file = clean.slice(6); type = "text/markdown; charset=utf-8"; }
+  else file = clean.slice(6) + ".html";
+  try {
+    const body = readFileSync(root + file);
+    res.setHeader("content-type", type); res.setHeader("cache-control", "public, max-age=300");
+    if (type.startsWith("text/html")) { const nonce = randomBytes(16).toString("base64url"); pageHeaders(res, nonce); res.end(withNonce(body, nonce)); } else res.end(body);
+    return true;
+  } catch { return false; }
+}
 const IMAGES = new Set(["moopay-logo.png", "moopay-mark.png", "favicon.png"]);
 const MAX_BODY = 8 * 1024;
 /** Below this the wallet only holds gas dust, so the account can be deleted. */
@@ -90,13 +106,15 @@ export function makeAgent(d: AgentDeps) {
 
   async function handle(req: IncomingMessage, res: ServerResponse, url: URL, origin: string): Promise<boolean> {
     const p = url.pathname;
-    const page = req.method === "GET" ? ({ "/": "landing.html", "/agent": "index.html", "/agent/": "index.html", "/app": "index.html", "/app/": "index.html", "/guide": "guide.html", "/guide/": "guide.html" } as Record<string, string>)[p] : undefined;
+    const page = req.method === "GET" ? ({ "/": "landing.html", "/agent": "index.html", "/agent/": "index.html", "/app": "index.html", "/app/": "index.html" } as Record<string, string>)[p] : undefined;
     if (page) {
       const nonce = randomBytes(16).toString("base64url");
       res.setHeader("content-type", "text/html; charset=utf-8"); pageHeaders(res, nonce);
       res.end(withNonce(appFile(page), nonce));
       return true;
     }
+    if (req.method === "GET" && (p === "/guide" || p === "/guide/")) { res.writeHead(301, { location: "/docs" }); res.end(); return true; }
+    if (req.method === "GET" && /^\/(docs|llms\.txt)(\/[a-z0-9-]+){0,3}(\.md)?\/?$/.test(p) && docPage(p, res)) return true;
     const img = /^\/app\/assets\/([a-z-]+\.png)$/.exec(p);
     if (req.method === "GET" && img && IMAGES.has(img[1]!)) { res.setHeader("content-type", "image/png"); res.setHeader("cache-control", "public, max-age=3600"); res.end(appFile(`assets/${img[1]}`)); return true; }
     const gp = /^\/g\/([\w-]{6,40})$/.exec(p);

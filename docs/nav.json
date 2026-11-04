@@ -1,0 +1,18 @@
+{
+  "tabs": [
+    { "name": "Guides", "slug": "guides", "groups": [
+      { "name": "Get started", "slug": "get-started", "pages": ["what-is-moopay", "quick-start", "how-it-works", "faq"] },
+      { "name": "Using MooPay", "slug": "using-moopay", "pages": ["send-money", "private-claims", "group-payments", "add-money", "scheduled-payments", "stake-rnear", "commands"] },
+      { "name": "Your account", "slug": "your-account", "pages": ["agent-wallet", "rules-and-limits", "recovery-code", "privacy"] },
+      { "name": "Resources", "slug": "resources", "pages": ["supported-chains", "fees", "third-parties", "safety-and-trust", "troubleshooting"] }
+    ] },
+    { "name": "Developers", "slug": "developers", "groups": [
+      { "name": "Overview", "slug": "overview", "pages": ["introduction", "architecture", "run-it-yourself"] },
+      { "name": "Agent API", "slug": "agent-api", "pages": ["agent-keys", "send-api", "claim-api", "errors"] },
+      { "name": "Inside the code", "slug": "inside-the-code", "pages": ["payment-flow", "pay-window", "policy-rules", "configuration", "testing"] }
+    ] },
+    { "name": "Coming soon", "slug": "coming-soon", "groups": [
+      { "name": "Roadmap", "slug": "roadmap", "pages": ["overview", "mcp-connector", "developer-agent-integration"] }
+    ] }
+  ]
+}

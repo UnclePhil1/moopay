@@ -105,6 +105,7 @@ async function main(): Promise<void> {
           const b = (await readJson(req)) as { tx?: unknown } | undefined;
           return sendJson(service.directDone(id, typeof b?.tx === "string" ? b.tx : ""));
         }
+        if (rest[2] === "cancel" && req.method === "POST") return sendJson(service.cancelCall(id));
         if (rest[2] === "payout" && req.method === "POST") {
           const b = (await readJson(req)) as { address?: unknown } | undefined;
           return sendJson(service.setStakePayout(id, typeof b?.address === "string" ? b.address.trim() : ""));

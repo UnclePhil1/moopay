@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs && node scripts/build-docs.mjs",
     "start": "node dist/server.js",
     "test": "tsx --test test/*.test.ts",
     "smoke": "tsx scripts/smoke.ts",
@@ -18,7 +18,7 @@
     "live-check": "tsx scripts/live-check.ts",
     "start:http": "node dist/http.js",
     "smoke:http": "tsx scripts/smoke-http.ts",
-    "build:web": "node scripts/build-web.mjs"
+    "build:web": "node scripts/build-web.mjs && node scripts/build-docs.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.3.0",

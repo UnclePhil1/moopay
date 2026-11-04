@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Moo Pay</title>
+<title>moo pay</title>
 <meta name="description" content="Tell an agent where the money should go. No sign-up, no wallet to connect. Private by default.">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="/app/assets/favicon.png" type="image/png">
@@ -21,7 +21,7 @@
   .left { position:relative; display:flex; flex-direction:column; background-color:var(--bg); background-image:radial-gradient(#262626 1px, transparent 1px); background-size:24px 24px; }
   .top { display:flex; justify-content:space-between; align-items:center; padding:24px 48px; }
   .logo { display:flex; align-items:center; gap:10px; font:800 16px var(--sans); letter-spacing:-.02em; }
-  .logo svg { width:32px; height:18px; }
+  .logo img { height:22px; width:auto; display:block; }
   .top nav { display:flex; gap:24px; color:var(--mute); }
   .top nav a:hover { color:var(--fg); }
   .hero { flex:1; display:flex; flex-direction:column; justify-content:center; padding:0 48px; }
@@ -85,8 +85,8 @@
 <main class="app" id="app">
   <section class="left">
     <div class="top">
-      <a class="logo" href="/?home" aria-label="Moo Pay"><svg viewBox="0 0 36 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/></svg>Moo Pay</a>
-      <nav><a href="/guide">Docs</a><a href="/agent">Connect</a></nav>
+      <a class="logo" href="/?home" aria-label="moo pay"><img src="/app/assets/moopay-logo.png" alt="moo pay"></a>
+      <nav><a href="/docs">Docs</a><a href="/agent">Connect</a></nav>
     </div>
     <div class="hero">
       <span class="tag">Private payments agent</span>
@@ -120,7 +120,7 @@
     + '<div class="card" id="card"><div><small>Sent</small><b>1 NEAR</b><span class="mute" style="font-size:2.6cqw">to unclephil.near</span></div><div class="mono" style="font-size:2.6cqw;text-align:right">Landed<br><span style="font-size:6cqw;line-height:1.3">&#10003;</span></div></div></div>'
     + '<div class="ly" id="lC">' + FEATURES.map((f, i) => '<div class="line"><span>' + f + '</span></div>').join("") + '</div>'
     + '<div class="ly" id="lD"><div class="logo4"><svg id="rings" viewBox="0 0 36 20" style="width:22cqw"><circle cx="10" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/><circle cx="26" cy="10" r="8" fill="none" stroke="#f4efe6" stroke-width="4"/></svg>'
-    + '<span class="mask"><span id="word" style="font:800 11cqw/1.3 var(--sans);letter-spacing:-.04em">Moo Pay</span></span>'
+    + '<span class="mask"><span id="word" style="font:800 11cqw/1.3 var(--sans);letter-spacing:-.04em">moo pay</span></span>'
     + '<span class="mask"><span id="tag" style="font-size:4cqw;color:#d9d3c7">Money that moves in private</span></span></div></div></div>';
   const art = (s) => { const u = 60; return '<svg viewBox="0 0 ' + 3 * u + " " + 3 * u + '" aria-hidden="true">' + s.c.map(([x, y]) => '<rect x="' + x * u + '" y="' + y * u + '" width="' + u + '" height="' + u + '"/>').join("") + s.d.map(([x, y]) => '<circle cx="' + x * u + '" cy="' + y * u + '" r="3"/>').join("") + "</svg>"; };
   const right = document.getElementById("right"), dots = document.getElementById("dots");

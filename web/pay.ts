@@ -12,7 +12,7 @@ import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, 
 interface Asset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; chain: string; chainId?: number }
 interface Intent {
   destinationChain: string; destinationSymbol: string; destinationDecimals: number;
-  recipient: string; payAmount: string; fund?: boolean; call?: Call; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
+  recipient: string; payAmount: string; fund?: boolean; call?: Call; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string; notice?: string };
 }
 /** One contract call signed in the user's own NEAR wallet: unstaking or withdrawing. */
 interface Call { account: string; contract: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][] }
@@ -30,10 +30,14 @@ const id = isPublic ? parts[2] : parts[3];
 const base = isPublic ? `/papi/${id}` : `/api/${parts[2]}/intent/${id}`;
 const $ = <T extends HTMLElement>(i: string) => document.getElementById(i) as T;
 
-/* Inside the chat's pay window the page is a frame, and a browser will not open a wallet app from a frame. Wallet links open from the top page instead. */
+/* Inside the chat's pay window the page is a frame, and a browser will not open a wallet app from a frame, so plain wallet links open from the top page.
+   Popup wallets (Meteor, Nightly) are opened with window features and answer the page that opened them, so those must stay opened from this frame. */
 if (window.parent !== window) {
   const open = window.open.bind(window);
-  window.open = ((u?: string | URL, t?: string, f?: string) => { try { return window.top!.open(u, t === "_self" ? "_blank" : t, f); } catch { return open(u, t, f); } }) as typeof window.open;
+  window.open = ((u?: string | URL, t?: string, f?: string) => {
+    if (f) return open(u, t, f);
+    try { return window.top!.open(u, t === "_self" ? "_blank" : t); } catch { return open(u, t, f); }
+  }) as typeof window.open;
 }
 
 /** A picker in the app's own style that drives a hidden <select>, so the rest of the page keeps working as before. */
@@ -470,7 +474,10 @@ async function send() {
   } catch (e) {
     btn.disabled = false;
     if (e instanceof Error && e.message === "manual") { void track($("addr").textContent ?? "", true); return; }
-    say("msg", e instanceof Error ? e.message : "Something went wrong.", "err");
+    const msg = e instanceof Error ? e.message : "Something went wrong.";
+    // The wallet's signing window can only open from a click, and there was none right after connecting.
+    if (/popup/i.test(msg)) { btn.textContent = "Sign transaction"; say("msg", "Wallet connected. Press Sign transaction to approve."); }
+    else say("msg", msg, "err");
   }
 }
 
@@ -501,6 +508,12 @@ async function callMode(c: Call) {
   btn.textContent = c.title.split(" ")[0]!;
   $("callform").classList.remove("hidden");
   selector = await makeSelector();
+  const label = btn.textContent;
+  $("callcancel").addEventListener("click", async () => {
+    await api(`${base}/cancel`, { method: "POST" }).catch(() => undefined);
+    if (window.parent !== window) window.parent.postMessage({ moopay: "close" }, location.origin);
+    else { $("callform").classList.add("hidden"); $("title").textContent = "Cancelled"; $("sub").textContent = "Nothing was sent."; }
+  });
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     try {
@@ -517,7 +530,10 @@ async function callMode(c: Call) {
       finish();
     } catch (e) {
       btn.disabled = false;
-      say("callmsg", e instanceof Error ? e.message : "Something went wrong.", "err");
+      const msg = e instanceof Error ? e.message : "Something went wrong.";
+      // A browser only lets a click open the wallet's signing window. Right after connecting there is no click, so ask for one.
+      if (/popup/i.test(msg)) { btn.textContent = "Sign transaction"; say("callmsg", "Wallet connected. Press Sign transaction to approve."); }
+      else { btn.textContent = label; say("callmsg", msg, "err"); }
     }
   });
 }
@@ -536,6 +552,7 @@ async function main() {
   $("sub").textContent = intent.stake ? "into rNEAR on Rhea Finance" : `to ${CHAINS[intent.destinationChain] ?? intent.destinationChain}`;
   $("summary").innerHTML = "";
   const rows: [string, string][] = intent.stake ? [["You receive", "rNEAR, earning yield"]] : [["They receive", intent.destinationSymbol], ["Recipient", short(intent.recipient)]];
+  if (intent.stake?.notice) { $("notice").textContent = intent.stake.notice; $("notice").classList.remove("hidden"); }
   if (intent.stake) { $("payoutbox").classList.remove("hidden"); $<HTMLInputElement>("payout").value = intent.stake.payout; $("estlabel").textContent = "You stake (plus a small network reserve)"; }
   for (const [k, v] of rows) {
     const r = document.createElement("div");

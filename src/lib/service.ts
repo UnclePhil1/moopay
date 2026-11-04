@@ -361,14 +361,21 @@ export class MooPayService {
   }
 
   /** A pay page for the agent to hand over: any destination, any chain to pay from. */
-  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined; stake?: { payout?: string | undefined } | undefined; fund?: boolean | undefined }): string {
+  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined; stake?: { payout?: string | undefined; notice?: string | undefined } | undefined; fund?: boolean | undefined }): string {
     parseDecimal(i.payAmount, 6);
-    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: i.fund ? 300 : 100, ...(i.fund ? { fund: true } : {}), ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: i.stake.payout ? { payout: i.stake.payout } : {} } : {}) }).id;
+    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: i.fund ? 300 : 100, ...(i.fund ? { fund: true } : {}), ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: { ...(i.stake.payout ? { payout: i.stake.payout } : {}), ...(i.stake.notice ? { notice: i.stake.notice } : {}) } } : {}) }).id;
   }
 
   /** A window where the user signs one contract call with the wallet that owns `account`. Nothing is paid. */
   newCallIntent(c: NonNullable<PayIntent["call"]>): string {
     return this.pay.create({ destinationChain: "near", destinationAssetId: "", recipient: c.account, payAmount: "1", slippageBps: 100, call: c }).id;
+  }
+
+  /** The user backed out of signing a contract call: the window closes and the link stops working. */
+  cancelCall(id: string): { ok: true } {
+    if (!this.pay.get(id).call) throw new MoopayError("INVALID_INPUT", "only an unstake or withdraw window can be cancelled here");
+    this.pay.cancel(id);
+    return { ok: true };
   }
 
   /** Whether a pay window is still open. */
@@ -438,7 +445,7 @@ export class MooPayService {
       ...(process.env["WALLETCONNECT_PROJECT_ID"] ? { wcProjectId: process.env["WALLETCONNECT_PROJECT_ID"] } : {}),
       ...(i.fromChain ? { fromChain: i.fromChain } : {}),
       ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
-      ...(i.stake ? { stake: { payout: i.stake.payout ?? "" } } : {}),
+      ...(i.stake ? { stake: { payout: i.stake.payout ?? "", ...(i.stake.notice ? { notice: i.stake.notice } : {}) } } : {}),
       ...(i.fund ? { fund: true } : {}),
       ...(i.call ? { call: i.call } : {}),
     };

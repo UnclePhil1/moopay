@@ -109,7 +109,7 @@
   <header>
     <img src="/app/assets/moopay-logo.png" alt="MooPay">
     <span class="spacer"></span>
-    <a class="how" href="/guide" target="_blank" rel="noopener">How it works</a>
+    <a class="how" href="/docs" target="_blank" rel="noopener">How it works</a>
     <span class="pill" id="nohist" hidden title="Your chat is not saved. Type /history to change that">Chat not saved</span>
     <span class="pill" id="frozen" hidden title="Nothing can leave this account. Type /unfreeze to lift it">Frozen</span>
     <span class="pill" id="temp" hidden title="Ends after an hour of not using it, or when you sign out">Temporary session</span>
@@ -250,7 +250,9 @@ function openSheet(url) {
   remember(url); // a reload brings the window back where it was
   const close = () => { box.remove(); window.removeEventListener("message", onMsg); remember(null); };
   const onMsg = (e) => {
-    if (e.origin !== location.origin || !e.data || e.data.moopay !== "delivered") return;
+    if (e.origin !== location.origin || !e.data) return;
+    if (e.data.moopay === "close") return close();
+    if (e.data.moopay !== "delivered") return;
     if (!e.data.wait) { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); return; }
     // A stake or unstake is not done when it is signed: keep the window up until the agent reports the result in the chat.
     let tries = 0;
@@ -289,7 +291,7 @@ function card(c) {
       ...c.rows.map((r) => row(short(r.to) + " (" + r.chain + ")", r.amount)), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
     case "confirm_send": {
       const go = h("button", { class: "btn", onclick: () => { openSheet(c.url); go.textContent = "Open again"; } }, c.button || "Confirm and sign");
-      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), c.to ? row(c.toLabel || "To", short(c.to) + " (" + c.chain + ")") : null,
+      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), c.to ? row(c.toLabel || "To", short(c.to) + " (" + c.chain + ")") : null, c.notice ? h("div", { class: "sub", style: "margin:8px 0 0;color:#f4efe6;font-weight:600" }, c.notice) : null,
         h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
     }
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => openSheet(c.url) }, c.button)));

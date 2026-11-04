@@ -481,7 +481,9 @@ test("stake from another chain: payout wallet first, the user signs in a window,
   assert.deepEqual([pay.kind, pay.status], ["stake", "AWAITING_YOUR_SIGNATURE"]);
   const pid = card.url.split("/").pop()!;
   const view = await a.svc.payIntentView(pid);
-  assert.deepEqual(view.stake, { payout: "" }, "the page asks for the payout wallet");
+  assert.equal(view.stake?.payout, "", "the page asks for the payout wallet");
+  assert.match(view.stake?.notice ?? "", /at least \$1 of NEAR/, "no gas wallet and no NEAR in the agent wallet: say so before signing");
+  assert.match((r.card as { notice?: string }).notice ?? "", new RegExp(a.u.accountId));
   assert.equal(view.fromChain, "sol");
   assert.equal(view.recipient, a.u.accountId, "the money lands in the agent wallet, which stakes it");
   const sol = view.assets.find((x) => x.chain === "sol" && x.native)!;
@@ -526,6 +528,14 @@ test("stake from another chain: with no NEAR for the first fee it waits, then fi
   assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
   assert.equal(pay.status, "STAKED");
   assert.equal(a.near.transfers.at(-1)?.to, "me.near");
+});
+
+test("stake notice: not shown when a gas wallet lends the fee, or the agent wallet already holds NEAR", async () => {
+  const lent = agent({ accountId: "sponsor.near", secretKey: "ed25519:x", dailyMax: 1 }); rhea(lent);
+  assert.equal(((await lent.ops.stakeRnear(lent.u, { amountUsd: "20", fromChain: "sol", payout: "me.near" }, false, {}, CTX)).card as { notice?: string }).notice, undefined);
+  const funded = agent(); rhea(funded);
+  funded.near.nearBalances.set(funded.u.accountId, 3n * NEAR_1);
+  assert.equal(((await funded.ops.stakeRnear(funded.u, { amountUsd: "20", fromChain: "sol", payout: "me.near" }, false, {}, CTX)).card as { notice?: string }).notice, undefined);
 });
 
 test("stake from another chain: with a gas wallet the first fee is lent, and paid back out of the user's own reserve", async () => {
@@ -586,6 +596,28 @@ test("unstake: the user signs with the wallet that holds the rNEAR; the agent fo
   a.near.views.set("lst.rhealab.near.get_account_details.me.near", { unstaked_balance: "0", can_withdraw: false });
   assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, true);
   assert.deepEqual([pay.status, pay.settled], ["WITHDRAWN", true]);
+});
+
+test("unstake can be cancelled until it is signed, and never after", async () => {
+  const a = agent(); rhea(a);
+  a.near.otherTokens.set("lst.rhealab.near|me.near", NEAR_1);
+  const r = await a.ops.unstakeRnear(a.u, { wallet: "me.near" }, CTX);
+  const pid = (r.card as { url: string }).url.split("/").pop()!;
+  assert.deepEqual(a.ops.cancelUnstake(a.u).result["status"], "cancelled");
+  assert.equal(a.u.payments[0]?.status, "CANCELLED");
+  assert.throws(() => a.svc.cancelCall(pid), code("NOTE_NOT_FOUND"), "the window is closed");
+  assert.equal(a.ops.cancelUnstake(a.u).result["status"], "nothing_to_cancel");
+  const again = await a.ops.unstakeRnear(a.u, { wallet: "me.near" }, CTX);
+  const id2 = (again.card as { url: string }).url.split("/").pop()!;
+  assert.deepEqual(a.svc.cancelCall(id2), { ok: true }, "the window's own Cancel button");
+  assert.throws(() => a.svc.cancelCall(id2));
+  assert.equal((await a.ops.refresh(a.u, a.u.payments[0]!, CTX)).changed, true);
+  assert.equal(a.u.payments[0]?.status, "EXPIRED", "the agent notices the window is gone");
+  const signed = await a.ops.unstakeRnear(a.u, { wallet: "me.near" }, CTX);
+  void signed;
+  a.near.views.set("lst.rhealab.near.get_account_details.me.near", { unstaked_balance: NEAR_1.toString(), can_withdraw: false });
+  await a.ops.refresh(a.u, a.u.payments[0]!, CTX);
+  assert.match(String(a.ops.cancelUnstake(a.u).result["note"]), /already signed/);
 });
 
 test("stake: the agent wallet is used when it can pay, and a missing payout wallet sends the user to the window", async () => {

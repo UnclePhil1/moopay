@@ -591,14 +591,18 @@ export class AgentOps {
     const dest = await this.destAsset("near", "NEAR");
     // The window asks for the network fee reserve on top, like every fee here; what staking does not use stays in the agent wallet.
     const usdText = (Math.ceil((Number(o.nearAmt + STAKE_GAS_ROOM + STAKE_GAS_ROOM / 2n) / 1e24) * o.nearUsd * 100) / 100).toFixed(2);
-    const payId = this.svc.newPayIntent({ destinationChain: "near", destinationAssetId: dest.assetId, recipient: u.accountId, payAmount: usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), stake: { payout: o.payout } });
+    // Without a gas wallet to lend the first fee, the agent wallet has to hold a little NEAR of its own: say so before the user signs.
+    const feeNear = Math.ceil((1 / o.nearUsd) * 100) / 100;
+    const notice = !this.sponsor && (await this.near.nearBalance(u.accountId)) < BigInt(Math.round(feeNear * 1e6)) * 10n ** 18n
+      ? `Important: your agent wallet needs at least $1 of NEAR (about ${feeNear} NEAR) to pay the network fee for staking. Send it to ${u.accountId} first, or your stake will wait until it arrives.` : undefined;
+    const payId = this.svc.newPayIntent({ destinationChain: "near", destinationAssetId: dest.assetId, recipient: u.accountId, payAmount: usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), stake: { payout: o.payout, notice } });
     const price = await rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>);
     const shown = fmt(o.nearAmt, 24, 4), expected = fmt((o.nearAmt * 10n ** 24n) / price, 24, 4);
     const pay: Payment = { id: id(), kind: "stake", amountUsd: o.amt, chain: "near", recipient: o.payout ?? "your payout wallet", status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId, expected: `${expected} rNEAR`, stakeNear: fmt(o.nearAmt, 24, 24) };
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
     return {
-      result: { status: "needs_your_signature", paymentId: pay.id, note: "A Stake button is on the user's screen. They press it, give the NEAR wallet that should receive the rNEAR if it isn't filled in, pick the wallet they pay from and sign. Nothing has been sent or taken yet. Do not say it failed and do not paste the link." },
-      card: { kind: "confirm_send", title: `Stake ${shown} NEAR with Rhea`, url: `${ctx.origin}/p/${payId}`, amount: `${shown} NEAR (about ${usd(o.amt)}), you receive about ${expected} rNEAR`, button: "Stake", ...(o.payout ? { to: o.payout, chain: "NEAR", toLabel: "rNEAR goes to" } : {}), id: pay.id },
+      result: { status: "needs_your_signature", paymentId: pay.id, note: "A Stake button is on the user's screen. They press it, give the NEAR wallet that should receive the rNEAR if it isn't filled in, pick the wallet they pay from and sign. Nothing has been sent or taken yet. Do not say it failed and do not paste the link." + (notice ? ` Also tell the user: ${notice}` : "") },
+      card: { kind: "confirm_send", title: `Stake ${shown} NEAR with Rhea`, url: `${ctx.origin}/p/${payId}`, amount: `${shown} NEAR (about ${usd(o.amt)}), you receive about ${expected} rNEAR`, button: "Stake", ...(notice ? { notice } : {}), ...(o.payout ? { to: o.payout, chain: "NEAR", toLabel: "rNEAR goes to" } : {}), id: pay.id },
     };
   }
 
@@ -663,6 +667,18 @@ export class AgentOps {
     const card = this.callWindow(u, ctx, pay, { wallet, method: all ? "unstake_all" : "unstake", args: all ? {} : { amount: worth.toString() }, title: `Unstake ${fmt(units, 24, 4)} rNEAR`, button: "Unstake", lines: [["Unstaking", `${fmt(units, 24, 4)} rNEAR`], ["You get back", `about ${pay.expected}`], ["Ready to withdraw", "in a day or two"], ["Wallet", wallet]] });
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
     return { result: { status: "needs_your_signature", paymentId: pay.id, note: "An Unstake button is on the user's screen. They press it and sign with their own NEAR wallet, the one that holds the rNEAR. Nothing has happened yet. I will tell them when the NEAR is ready to withdraw (a day or two). Do not paste the link." }, card };
+  }
+
+  /** Backs out of an unstake that has not been signed yet. Once signed it is on the blockchain and the delay runs. */
+  cancelUnstake(u: UserRec): Out {
+    const open = u.payments.filter((x) => x.kind === "unstake" && x.status === "AWAITING_YOUR_SIGNATURE");
+    if (!open.length) {
+      const running = u.payments.find((x) => x.kind === "unstake" && !x.settled);
+      return { result: { status: "nothing_to_cancel", note: running ? "The unstake was already signed, so it is on the blockchain and can't be cancelled; the NEAR comes back after the delay." : "There is no unstake waiting to be signed." } };
+    }
+    for (const p of open) { if (p.payId) this.svc.cancelCall(p.payId); p.status = "CANCELLED"; p.settled = true; }
+    this.store.save();
+    return { result: { status: "cancelled", cancelled: open.length }, card: { kind: "note", text: "Cancelled. Nothing was unstaked and your rNEAR is untouched." } };
   }
 
   /** Once the delay is over: a window to sign the withdrawal that sends the unstaked NEAR to the user's wallet. */
