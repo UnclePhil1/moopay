@@ -243,8 +243,12 @@ const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
 
 /* cards */
 /** Pay and sign without leaving the chat: the pay page opens as a sheet over it. */
+const SHEET_KEY = "moopay:sheet";
+const remember = (url) => { try { url ? sessionStorage.setItem(SHEET_KEY, url) : sessionStorage.removeItem(SHEET_KEY); } catch {} };
 function openSheet(url) {
-  const close = () => { box.remove(); window.removeEventListener("message", onMsg); };
+  document.querySelectorAll(".sheet").forEach((x) => x.remove());
+  remember(url); // a reload brings the window back where it was
+  const close = () => { box.remove(); window.removeEventListener("message", onMsg); remember(null); };
   const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.moopay === "delivered") { void poll(); setTimeout(() => void poll(), 2500); setTimeout(close, 2500); } };
   const box = h("div", { class: "sheet", onclick: (e) => { if (e.target === box) close(); } },
     h("div", { class: "box" }, h("button", { class: "x", onclick: close, "aria-label": "Close" }, "\u00d7"), h("iframe", { src: url + (url.includes("?") ? "&" : "?") + "embed=1", allow: "clipboard-write" })));
@@ -531,6 +535,7 @@ async function boot() {
     for (const a of s.approvals || []) agent().append(card(a));
     nudge(s.account?.balanceUsd);
   } catch (e) { $("state").textContent = "Offline"; }
+  try { const open = sessionStorage.getItem(SHEET_KEY); if (open && new URL(open, location.href).origin === location.origin) openSheet(open); } catch {}
   setInterval(() => { if (!busy) void poll(); }, 6000);
 }
 void boot();

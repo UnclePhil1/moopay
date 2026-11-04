@@ -134,9 +134,42 @@ function accountId(): string | undefined {
   return selector.store.getState().accounts.find((a) => a.active)?.accountId ?? selector.store.getState().accounts[0]?.accountId;
 }
 
-function connect(): Promise<string> {
+/** Asks which wallet to sign with. Nothing opens until the person picks one. */
+function choose<T>(title: string, options: { label: string; go: () => Promise<T> }[]): Promise<T> {
+  const box = $("pickbox"), list = $("picklist");
+  $("picktitle").textContent = title;
+  list.replaceChildren();
+  return new Promise<T>((resolve, reject) => {
+    const done = (fn: () => void) => { box.classList.add("hidden"); fn(); };
+    const add = (label: string, ghost: boolean, onClick: () => void) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = ghost ? "btn ghost" : "btn"; b.textContent = label; b.onclick = onClick;
+      list.append(b);
+    };
+    for (const o of options) add(o.label, false, () => done(() => o.go().then(resolve, reject)));
+    add("Cancel", true, () => done(() => reject(new Error("Wallet connection was cancelled."))));
+    box.classList.remove("hidden");
+  });
+}
+
+/** Wallets that announce themselves in this browser (EIP-6963), so every installed EVM wallet can be offered by name. */
+interface EvmWallet { info: { name: string }; provider: Eip1193 }
+const evmWallets: EvmWallet[] = [];
+window.addEventListener("eip6963:announceProvider", (e) => { const d = (e as CustomEvent<EvmWallet>).detail; if (!evmWallets.some((x) => x.provider === d.provider)) evmWallets.push(d); });
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+let pickedNear: string | undefined;
+async function connect(): Promise<string> {
   const existing = accountId();
-  if (existing) return Promise.resolve(existing);
+  if (existing && pickedNear === existing) return existing;
+  if (existing) {
+    const keep = await choose("Sign with", [{ label: `Continue with ${existing}`, go: async () => true }, { label: "Use a different wallet", go: async () => false }]);
+    if (keep) return (pickedNear = existing);
+    await (await selector.wallet()).signOut();
+  }
+  return pickedNear = await pickNear();
+}
+function pickNear(): Promise<string> {
   const modal = setupModal(selector, { description: "Choose the wallet you will pay from." });
   return new Promise((resolve, reject) => {
     const sub = selector.store.observable.subscribe((s) => {
@@ -275,15 +308,23 @@ async function findSolWallet(): Promise<WsWallet | undefined> {
 
 type SolSigner = { account: string; send(tx: Uint8Array, bh: string): Promise<string | undefined> };
 async function solSigner(): Promise<SolSigner> {
-  const ws = await findSolWallet();
-  if (ws) {
-    const { accounts } = (await ws.features["standard:connect"].connect()) as { accounts: readonly WsAccount[] };
-    const acc = accounts[0] ?? ws.accounts[0];
-    if (!acc) throw new Error(`${ws.name} did not share an account. Unlock it and try again.`);
-    return { account: acc.address, send: async (tx) => { const r = (await ws.features["solana:signAndSendTransaction"].signAndSendTransaction({ account: acc, chain: "solana:mainnet", transaction: tx })) as { signature?: Uint8Array }[]; return r?.[0]?.signature ? b58encode(r[0].signature) : undefined; } };
-  }
+  await findSolWallet();
   const ph = w.phantom?.solana ?? w.solana;
-  if (ph) return { account: (await ph.connect()).publicKey.toString(), send: async (tx) => { const r = (await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } })) as { signature?: string } | undefined; return r?.signature; } };
+  const options = wsWallets.filter(canSend).map((ws) => ({ label: ws.name, go: () => wsSigner(ws) }));
+  if (ph && !options.length) options.push({ label: "Phantom", go: async () => phantomSigner(ph) });
+  if (intent.wcProjectId || !options.length) options.push({ label: options.length ? "Another wallet (phone or app)" : "Connect a wallet", go: wcSolSigner });
+  return choose("Choose the Solana wallet to sign with", options);
+}
+async function wsSigner(ws: WsWallet): Promise<SolSigner> {
+  const { accounts } = (await ws.features["standard:connect"].connect()) as { accounts: readonly WsAccount[] };
+  const acc = accounts[0] ?? ws.accounts[0];
+  if (!acc) throw new Error(`${ws.name} did not share an account. Unlock it and try again.`);
+  return { account: acc.address, send: async (tx) => { const r = (await ws.features["solana:signAndSendTransaction"].signAndSendTransaction({ account: acc, chain: "solana:mainnet", transaction: tx })) as { signature?: Uint8Array }[]; return r?.[0]?.signature ? b58encode(r[0].signature) : undefined; } };
+}
+async function phantomSigner(ph: Phantom): Promise<SolSigner> {
+  return { account: (await ph.connect()).publicKey.toString(), send: async (tx) => { const r = (await ph.request({ method: "signAndSendTransaction", params: { message: b58encode(tx) } })) as { signature?: string } | undefined; return r?.signature; } };
+}
+async function wcSolSigner(): Promise<SolSigner> {
   const conn = await wcConnect("sol");
   return {
     account: conn.account,
@@ -328,13 +369,16 @@ async function sendOther(a: Asset) {
     if (q.direct && sig) await reportPaid(sig);
     return q;
   }
-  const eth = w.ethereum;
-  let conn: Conn;
-  if (eth) {
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  const injected = (eth: Eip1193) => async (): Promise<Conn> => {
     const account = ((await eth.request({ method: "eth_requestAccounts" })) as string[])[0]!;
     if (a.chainId) await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x" + a.chainId.toString(16) }] });
-    conn = { account, request: (method, params) => eth.request({ method, params: params as unknown[] }) };
-  } else conn = await wcConnect(a.chain);
+    return { account, request: (method, params) => eth.request({ method, params: params as unknown[] }) };
+  };
+  const options = evmWallets.map((x) => ({ label: x.info.name, go: injected(x.provider) }));
+  if (!options.length && w.ethereum) options.push({ label: "Browser wallet", go: injected(w.ethereum) });
+  if (intent.wcProjectId || !options.length) options.push({ label: options.length ? "Another wallet (phone or app)" : "Connect a wallet", go: () => wcConnect(a.chain) });
+  const conn = await choose<Conn>(`Choose the wallet to sign with on ${chainName(a.chain)}`, options);
   say("msg", "Preparing your payment…");
   const q = await getQuote(a.assetId, conn.account);
   $("addr").textContent = q.depositAddress;
