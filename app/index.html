@@ -277,8 +277,8 @@ function card(c) {
       h("div", { class: "code" }, h("code", {}, c.link), h("button", { onclick: (e) => copy(c.link, e.target) }, "Copy")),
       ...c.rows.map((r) => row(short(r.to) + " (" + r.chain + ")", r.amount)), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
     case "confirm_send": {
-      const go = h("button", { class: "btn", onclick: () => { openSheet(c.url); go.textContent = "Open again"; } }, "Confirm and sign");
-      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), row("To", short(c.to) + " (" + c.chain + ")"),
+      const go = h("button", { class: "btn", onclick: () => { openSheet(c.url); go.textContent = "Open again"; } }, c.button || "Confirm and sign");
+      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), c.to ? row(c.toLabel || "To", short(c.to) + " (" + c.chain + ")") : null,
         h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
     }
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => openSheet(c.url) }, c.button)));

@@ -12,7 +12,7 @@ import { mainnet, base as baseNet, arbitrum, optimism, polygon, bsc, avalanche, 
 interface Asset { assetId: string; symbol: string; decimals: number; contract: string; native: boolean; chain: string; chainId?: number }
 interface Intent {
   destinationChain: string; destinationSymbol: string; destinationDecimals: number;
-  recipient: string; payAmount: string; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string;
+  recipient: string; payAmount: string; assets: Asset[]; wcProjectId?: string; fromChain?: string; fromSymbol?: string; stake?: { payout: string };
 }
 interface Quote {
   depositAddress: string; depositMemo?: string; chain: string; direct?: boolean;
@@ -171,7 +171,8 @@ async function track(depositAddress: string, manual = false) {
     try {
       const s = await api<{ state: string; txHash?: string; explorerUrl?: string; direct?: boolean }>(`${base}/status`);
       if (s.state === "SUCCESS") {
-        $("title").textContent = "Delivered";
+        $("title").textContent = intent.stake ? "Staking" : "Delivered";
+        if (intent.stake) { $("doneline").textContent = "Your money arrived."; $("donenote").textContent = "MooPay is staking it now and sending the rNEAR to your wallet. You'll see it in your chat."; }
         if (window.parent !== window) window.parent.postMessage({ moopay: "delivered" }, location.origin);
         $("deposit").classList.add("hidden");
         const done = $("done");
@@ -349,11 +350,30 @@ async function sendOther(a: Asset) {
   return q;
 }
 
+/** Staking asks where the rNEAR goes before anything is signed. Paying with a NEAR wallet can offer that same wallet. */
+async function settlePayout(a: Asset): Promise<boolean> {
+  if (!intent.stake) return true;
+  const input = $<HTMLInputElement>("payout");
+  if (!input.value.trim() && a.chain === "near") {
+    const account = await connect();
+    $("usetext").textContent = `Receive your rNEAR in ${account}?`;
+    $("usebox").classList.remove("hidden");
+    const yes = await new Promise<boolean>((res) => { $("useyes").onclick = () => res(true); $("useno").onclick = () => res(false); });
+    $("usebox").classList.add("hidden");
+    if (yes) input.value = account;
+  }
+  const address = input.value.trim();
+  if (!address) { say("msg", "Enter the NEAR wallet that should receive your rNEAR.", "err"); input.focus(); return false; }
+  await api(`${base}/payout`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) });
+  return true;
+}
+
 async function manualQuote() {
   const a = chosen();
   const refund = $<HTMLInputElement>("refund").value.trim();
   if (!refund) return say("msg", "Enter your address on that chain first.", "err");
   try {
+    if (!(await settlePayout(a))) return;
     const q = await getQuote(a.assetId, refund);
     $("addr").textContent = q.depositAddress;
     showManual(q, a);
@@ -366,6 +386,7 @@ async function send() {
   btn.disabled = true;
   try {
     const a = chosen();
+    if (!(await settlePayout(a))) { btn.disabled = false; return; }
     if (a.chain !== "near") {
       say("msg", "Connect your wallet…");
       const q = await sendOther(a);
@@ -413,11 +434,12 @@ async function main() {
     say("top-msg", e instanceof Error ? e.message : "This link is not valid.", "err");
     return;
   }
-  const setTitle = () => { $("title").textContent = `Send $${intent.payAmount}`; };
+  const setTitle = () => { $("title").textContent = `${intent.stake ? "Stake" : "Send"} $${intent.payAmount}`; };
   setTitle();
-  $("sub").textContent = `to ${CHAINS[intent.destinationChain] ?? intent.destinationChain}`;
+  $("sub").textContent = intent.stake ? "into rNEAR on Rhea Finance" : `to ${CHAINS[intent.destinationChain] ?? intent.destinationChain}`;
   $("summary").innerHTML = "";
-  const rows: [string, string][] = [["They receive", intent.destinationSymbol], ["Recipient", short(intent.recipient)]];
+  const rows: [string, string][] = intent.stake ? [["You receive", "rNEAR, earning yield"]] : [["They receive", intent.destinationSymbol], ["Recipient", short(intent.recipient)]];
+  if (intent.stake) { $("payoutbox").classList.remove("hidden"); $<HTMLInputElement>("payout").value = intent.stake.payout; $("estlabel").textContent = "You stake (plus a small network reserve)"; }
   for (const [k, v] of rows) {
     const r = document.createElement("div");
     r.className = "row";
@@ -439,7 +461,7 @@ async function main() {
     const near = ch.value === "near";
     $("manual").classList.toggle("hidden", near);
     $("refundbox").classList.add("hidden");
-    $("send").textContent = "Make transfer";
+    $("send").textContent = intent.stake ? "Stake" : "Make transfer";
     ddAsset.sync();
   };
   if (intent.fromChain && chains.includes(intent.fromChain)) { ch.value = intent.fromChain; ddChain.sync(); }

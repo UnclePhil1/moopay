@@ -361,9 +361,19 @@ export class MooPayService {
   }
 
   /** A pay page for the agent to hand over: any destination, any chain to pay from. */
-  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined }): string {
+  newPayIntent(i: { destinationChain: string; destinationAssetId: string; recipient: string; payAmount: string; fromChain?: string | undefined; fromSymbol?: string | undefined; stake?: { payout?: string | undefined } | undefined }): string {
     parseDecimal(i.payAmount, 6);
-    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}) }).id;
+    return this.pay.create({ destinationChain: i.destinationChain, destinationAssetId: i.destinationAssetId, recipient: i.recipient, payAmount: i.payAmount, slippageBps: 100, ...(i.fromChain ? { fromChain: i.fromChain } : {}), ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}), ...(i.stake ? { stake: i.stake.payout ? { payout: i.stake.payout } : {} } : {}) }).id;
+  }
+
+  /** The NEAR wallet a staking payment's rNEAR goes to, once the payer has given it on the pay page. */
+  stakePayout(id: string): string | undefined { return this.pay.get(id).stake?.payout; }
+
+  /** The pay page asks for the payout wallet before it asks for any signature. */
+  setStakePayout(id: string, address: string): { ok: true } {
+    if (!isNearAccountId(address)) throw new MoopayError("BAD_RECIPIENT", "that is not a NEAR wallet address, like alice.near");
+    this.pay.setPayout(id, address);
+    return { ok: true };
   }
 
   private async solRpc(method: string, params: unknown[]): Promise<any> { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -420,6 +430,7 @@ export class MooPayService {
       ...(process.env["WALLETCONNECT_PROJECT_ID"] ? { wcProjectId: process.env["WALLETCONNECT_PROJECT_ID"] } : {}),
       ...(i.fromChain ? { fromChain: i.fromChain } : {}),
       ...(i.fromSymbol ? { fromSymbol: i.fromSymbol } : {}),
+      ...(i.stake ? { stake: { payout: i.stake.payout ?? "" } } : {}),
     };
   }
 
@@ -542,6 +553,7 @@ export class MooPayService {
   /** Creates the real 1Click deposit address and the exact transfer for the user's wallet to sign. */
   async payQuote(id: string, originAssetId: string, refundTo: string) {
     const { i, out, asset } = await this.payInputs(id, originAssetId);
+    if (i.stake && !i.stake.payout) throw new MoopayError("INVALID_INPUT", "Tell us the NEAR wallet that should receive your rNEAR first.");
     const okRefund = asset.chain === "near" ? isNearAccountId(refundTo) : asset.chain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(refundTo) : EVM_ADDR.test(refundTo);
     if (!okRefund) throw new MoopayError("INVALID_INPUT", `refundTo must be your ${asset.chain === "near" ? "NEAR account" : asset.chain === "sol" ? "Solana" : "EVM"} address`);
     if (this.isDirect(i, asset)) { // same chain, same coin: no swap, so no solver wait and no fee

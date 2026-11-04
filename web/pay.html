@@ -73,12 +73,16 @@
     <div id="summary"></div>
 
     <div id="form" class="hidden">
+      <div id="payoutbox" class="hidden">
+        <label for="payout">NEAR wallet that receives your rNEAR</label>
+        <input id="payout" placeholder="alice.near" autocomplete="off" spellcheck="false">
+      </div>
       <label for="chain">Pay from</label>
       <select id="chain"></select>
       <label for="asset">Pay with</label>
       <select id="asset"></select>
       <div class="row" style="margin-top:18px"><span>You pay (fees included)</span><b id="pay">…</b></div>
-      <div class="row"><span>They get exactly</span><b id="est">…</b></div>
+      <div class="row"><span id="estlabel">They get exactly</span><b id="est">…</b></div>
       <button class="btn" id="send" type="button">Make transfer</button>
       <button class="btn ghost" id="manual" type="button">Pay by deposit address instead</button>
       <div id="refundbox" class="hidden">
@@ -87,6 +91,11 @@
         <button class="btn" id="getaddr" type="button">Get deposit address</button>
       </div>
       <div class="msg" id="msg"></div>
+      <div id="usebox" class="hidden">
+        <p class="msg" id="usetext"></p>
+        <button class="btn" id="useyes" type="button">Yes, use it</button>
+        <button class="btn ghost" id="useno" type="button">Use another wallet</button>
+      </div>
     </div>
 
     <div id="deposit" class="hidden">
@@ -96,9 +105,9 @@
       <div class="msg" id="dmsg"></div>
     </div>
     <div id="done" class="hidden">
-      <p class="okline">Your money has arrived.</p>
+      <p class="okline" id="doneline">Your money has arrived.</p>
       <a id="tx" class="btn linkbtn" target="_blank" rel="noopener noreferrer"></a>
-      <p class="msg">Go back to your chat and say "done". Your AI can confirm it with MooPay.</p>
+      <p class="msg" id="donenote">Go back to your chat and say "done". Your AI can confirm it with MooPay.</p>
     </div>
     <div class="msg" id="top-msg"></div>
   </div>

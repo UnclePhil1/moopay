@@ -462,6 +462,58 @@ test("stake rNEAR: pays with USDC when the wallet holds no spare NEAR, convertin
   assert.ok(a.near.calls.some((c) => c.method === "deposit_and_stake"));
 });
 
+test("stake from another chain: payout wallet first, the user signs in a window, the agent stakes what lands", async () => {
+  const a = agent(); rhea(a);
+  const SOL = "So11111111111111111111111111111111111111112";
+  const r = await a.ops.stakeRnear(a.u, { amountUsd: "20", fromChain: "sol", fromSymbol: "SOL" }, false, {}, CTX);
+  assert.equal(r.result["status"], "needs_your_signature");
+  const card = r.card as { kind: string; url: string; button: string };
+  assert.deepEqual([card.kind, card.button], ["confirm_send", "Stake"]);
+  assert.equal(a.near.calls.length, 0, "nothing moves before the user signs");
+  const pay = a.u.payments[0]!;
+  assert.deepEqual([pay.kind, pay.status], ["stake", "AWAITING_YOUR_SIGNATURE"]);
+  const pid = card.url.split("/").pop()!;
+  const view = await a.svc.payIntentView(pid);
+  assert.deepEqual(view.stake, { payout: "" }, "the page asks for the payout wallet");
+  assert.equal(view.fromChain, "sol");
+  assert.equal(view.recipient, a.u.accountId, "the money lands in the agent wallet, which stakes it");
+  const sol = view.assets.find((x) => x.chain === "sol" && x.native)!;
+  await assert.rejects(a.svc.payQuote(pid, sol.assetId, SOL), /NEAR wallet/, "no signature is asked for before the payout wallet is known");
+  assert.throws(() => a.svc.setStakePayout(pid, "not a wallet!"), code("BAD_RECIPIENT"));
+  a.svc.setStakePayout(pid, "me.near");
+  await a.svc.payQuote(pid, sol.assetId, SOL);
+  assert.throws(() => a.svc.setStakePayout(pid, "evil.near"), code("INVALID_INPUT"), "the payout wallet is fixed once the payment starts");
+
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, false, "still waiting for the swap");
+  assert.equal(pay.recipient, "me.near");
+  a.oc.statuses.set("dep-1", "SUCCESS");
+  a.near.nearBalances.set(a.u.accountId, NEAR_1 / 20n);
+  a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, 5n * NEAR_1); // the swap lands wNEAR
+  const done = await a.ops.refresh(a.u, pay, CTX);
+  assert.equal(done.changed, true);
+  assert.equal(pay.status, "STAKED");
+  assert.equal((done.card as { kind: string; to: string }).to, "me.near");
+  const stake = a.near.calls.find((c) => c.method === "deposit_and_stake")!;
+  assert.equal(stake.deposit, 4n * NEAR_1, "$20 at $5 a NEAR");
+  assert.equal(a.near.transfers.at(-1)?.to, "me.near", "the rNEAR goes to the wallet given on the page");
+  assert.equal(await a.near.ftBalance("lst.rhealab.near", a.u.accountId), 0n);
+  assert.equal((await a.ops.refresh(a.u, pay, CTX)).changed, false, "a settled stake never runs twice");
+  assert.equal(a.near.calls.filter((c) => c.method === "deposit_and_stake").length, 1);
+});
+
+test("stake: the agent wallet is used when it can pay, and a missing payout wallet sends the user to the window", async () => {
+  const a = agent(); rhea(a);
+  a.near.nearBalances.set(a.u.accountId, 3n * NEAR_1);
+  const win = await a.ops.stakeRnear(a.u, { amount: "1" }, false, {}, CTX);
+  assert.equal(win.result["status"], "needs_your_signature", "no payout wallet yet: the window asks for it");
+  await a.ops.rules(a.u, { payoutAddress: "me.near" });
+  assert.equal((await a.ops.stakeRnear(a.u, { amount: "1" }, false, {}, CTX)).result["status"], "staked", "enough in the agent wallet: no window");
+  const other = await a.ops.stakeRnear(a.u, { amount: "1", payout: "other.near", fromChain: "eth", fromSymbol: "USDT" }, false, {}, CTX);
+  const view = await a.svc.payIntentView((other.card as { url: string }).url.split("/").pop()!);
+  assert.deepEqual([view.stake, view.fromChain, view.fromSymbol], [{ payout: "other.near" }, "eth", "USDT"]);
+  await assert.rejects(a.ops.stakeRnear(a.u, { amount: "1", payout: "NOT valid", fromChain: "sol" }, false, {}, CTX), code("BAD_RECIPIENT"));
+});
+
 import { plain } from "../src/agent/loop.js";
 
 test("plain: markdown is stripped and bullets become a numbered list", () => {

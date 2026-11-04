@@ -21,6 +21,8 @@ export interface PayIntent {
   direct?: boolean;
   /** The transaction (signature or hash) the payer's wallet reported for a direct payment. */
   sig?: string;
+  /** A staking payment: the money lands in the agent wallet and is staked for `payout`, which the page asks for before anything is signed. */
+  stake?: { payout?: string };
 }
 
 const TTL_MS = 30 * 60 * 1000;
@@ -63,6 +65,14 @@ export class PayHub {
   }
 
   setSig(id: string, sig: string): void { this.get(id).sig = sig; }
+
+  setPayout(id: string, payout: string): void {
+    const i = this.get(id);
+    if (!i.stake) throw new MoopayError("INVALID_INPUT", "this payment does not stake anything");
+    if (i.stake.payout === payout) return;
+    if (i.payer) throw new MoopayError("INVALID_INPUT", "the payout wallet can't change once the payment has started");
+    i.stake.payout = payout;
+  }
 
   private sweep(): void {
     const cutoff = this.now() - TTL_MS;

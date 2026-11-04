@@ -26,6 +26,8 @@ export interface Payment {
   status: string; createdAt: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;
+  /** a stake paid from the user's own wallet: how much NEAR to stake once the money lands (24 decimals) */
+  stakeNear?: string;
 }
 export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
@@ -39,6 +41,8 @@ export interface UserRec {
   masterHash: string; sessions: Session[];
   /** panic switch: nothing leaves the wallet and no rule changes until it is lifted with the recovery code */
   frozen?: boolean;
+  /** where the rNEAR from a stake in progress goes, when it is not the payout wallet in the rules */
+  rnearTo?: string;
   /** the user chose not to keep chat history: it stays in memory for context but is never written to disk or shown again after a reload */
   noHistory?: boolean;
   spent: { day: string; usd: number }; known: string[];

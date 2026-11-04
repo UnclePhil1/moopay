@@ -105,6 +105,10 @@ async function main(): Promise<void> {
           const b = (await readJson(req)) as { tx?: unknown } | undefined;
           return sendJson(service.directDone(id, typeof b?.tx === "string" ? b.tx : ""));
         }
+        if (rest[2] === "payout" && req.method === "POST") {
+          const b = (await readJson(req)) as { address?: unknown } | undefined;
+          return sendJson(service.setStakePayout(id, typeof b?.address === "string" ? b.address.trim() : ""));
+        }
         if (rest[2] === "sol-check" && req.method === "GET") return sendJson(await service.solCheck(url.searchParams.get("owner") ?? "", url.searchParams.get("mint") ?? undefined, url.searchParams.get("to") ?? undefined));
         if (rest[2] === "sol-send" && req.method === "POST") {
           const b = (await readJson(req)) as { tx?: unknown } | undefined;
