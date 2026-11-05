@@ -1,4 +1,4 @@
-import { Account, FailoverRpcProvider, JsonRpcProvider } from "near-api-js";
+import { Account, FailoverRpcProvider, JsonRpcProvider, KeyPair } from "near-api-js";
 import { verifyMessage } from "near-api-js/nep413";
 import { MoopayError } from "../../util/errors.js";
 import type { Config } from "../../../config/index.js";
@@ -16,6 +16,8 @@ export interface NearOps {
   nearBalance(accountId: string): Promise<bigint>;
   /** Throws unless `signature` is a valid NEP-413 signature by an access key of `accountId`. */
   verifyOwner(p: { accountId: string; publicKey: string; signature: Buffer; payload: { message: string; recipient: string; nonce: Buffer } }): Promise<void>;
+  /** Creates `newId` under `parentId` (signed with the parent key), controlled by the key of `forSecretKey`, with `deposit` yocto. */
+  createAccount(p: { parentId: string; parentKey: string; newId: string; forSecretKey: string; deposit: bigint }): Promise<{ txHash: string }>;
   /** Native NEAR transfer from the note account, signed with the note key. */
   sendNear(p: { accountId: string; secretKey: string; to: string; amount: bigint }): Promise<{ txHash: string }>;
   /** Wraps native NEAR into wNEAR (wrap.near near_deposit) so it can be swapped like any token. */
@@ -76,6 +78,17 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const all = [e, ...((e as { errors?: unknown[] }).errors ?? [])];
         if (all.some((x) => x instanceof Error && /does not exist|UNKNOWN_ACCOUNT|AccountDoesNotExist/i.test(`${x.name} ${x.message}`))) return 0n;
         throw rpcDown();
+      }
+    },
+
+    async createAccount({ parentId, parentKey, newId, forSecretKey, deposit }) {
+      try {
+        const publicKey = KeyPair.fromString(forSecretKey as never).getPublicKey().toString();
+        const out = await new Account(parentId, provider, parentKey as never).createAccount({ newAccountId: newId, publicKey, nearToTransfer: deposit });
+        return { txHash: (out as unknown as { transaction: { hash: string } }).transaction.hash };
+      } catch (e) {
+        if (process.env["MOOPAY_DEBUG"]) console.error("[moopay] create account failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
+        throw new MoopayError("DEPOSIT_FAILED", "could not create that account");
       }
     },
 

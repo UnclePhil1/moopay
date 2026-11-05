@@ -24,6 +24,10 @@
   .pill { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid var(--line); border-radius:999px; font-size:12.5px; color:var(--muted); }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); } .dot.work { background:var(--warn); animation:pulse 1s infinite; }
   @keyframes pulse { 50% { opacity:.3; } }
+  .banner { display:flex; align-items:center; gap:12px; margin:0 auto; width:min(720px,100%); padding:10px 20px; font-size:13.5px; color:var(--muted); }
+  .banner[hidden] { display:none; }
+  .banner p { flex:1; margin:0; } .banner b { color:#f4efe6; }
+  .banner button { background:none; border:0; color:var(--muted); font-size:20px; line-height:1; padding:2px 6px; } .banner button:hover { color:#f4efe6; }
   #scroll { flex:1; min-height:0; overflow-y:auto; }
   .wrap { width:min(720px,100%); margin:0 auto; padding:22px 20px 16px; }
   .empty { text-align:center; padding:12vh 0 20px; }
@@ -115,6 +119,7 @@
     <span class="pill" id="temp" hidden title="Ends after an hour of not using it, or when you sign out">Temporary session</span>
     <span class="pill"><span class="dot" id="dot"></span><span id="state">Ready</span></span>
   </header>
+  <div class="banner" id="banner" hidden><p id="bannerText"></p><button id="bannerX" aria-label="Close">×</button></div>
   <div id="scroll"><div class="wrap" id="chat"></div></div>
   <div class="composer">
     <div id="palette" hidden></div>
@@ -122,7 +127,7 @@
       <input id="input" placeholder="Tell MooPay what to do, or type / for shortcuts" aria-label="Message">
       <button id="send" type="submit" aria-label="Send" disabled><svg viewBox="0 0 24 24"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg></button>
     </form>
-    <div class="note">MooPay keeps only a small working float. Everything above it goes to your own wallet.</div>
+    <div class="note">Your agent wallet keeps up to your float. Everything above it goes to your own wallet.</div>
   </div>
 </div>
 
@@ -267,7 +272,7 @@ function openSheet(url) {
 function card(c) {
   switch (c.kind) {
     case "account": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your agent wallet"),
-      h("div", { class: "sub" }, "Balance"), h("div", { class: "big" }, "$" + Number(c.balanceUsd).toFixed(2)), row("Spent today", usd(c.spentToday || 0)),
+      h("div", { class: "sub" }, "Balance"), h("div", { class: "big" }, "$" + Number(c.balanceUsd).toFixed(2)), row("Spent today", usd(c.spentToday || 0)), row("moo points", String(c.points || 0)),
       h("div", { class: "sub", style: "margin-top:10px" }, "Deposit address (NEAR network)"), h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
       h("div", { class: "sub", style: "margin-top:10px" }, "It's a real NEAR wallet. ", h("a", { href: c.explorer, target: "_blank", rel: "noopener noreferrer" }, "See it on the blockchain"), ". Take your money out any time with /withdraw."),
       c.setupSteps?.length ? h("div", { style: "margin-top:12px" }, c.setupSteps.map((s, i) => h("div", { class: "step" }, h("span", { class: "i" }, (i + 1) + "."), s))) : h("div", { style: "margin-top:10px" }, h("span", { class: "tag ok" }, "Ready")));
@@ -539,13 +544,38 @@ function start() {
       h("a", { class: "chip", href: "/guide", target: "_blank", rel: "noopener", style: "text-decoration:none" }, "How it works"))));
 }
 
+/** Asks a new user for a name once, before the chat. It becomes their wallet address (name + suffix). True when a name was set. */
+async function pickName(suffix) {
+  let problem = "";
+  for (;;) {
+    const v = await ask({ title: "Pick your name", text: (problem ? problem + " " : "") + "This becomes your wallet address, like uncle" + suffix + ". Anyone can send money to it from a NEAR wallet or another MooPay agent. It is public on the blockchain and can't be changed later.", confirm: "Continue", cancel: "Skip for now",
+      input: { placeholder: "your name", check: (x) => (/^[a-z0-9]+([-_][a-z0-9]+)*$/i.test(x) && x.length >= 3 && x.length <= 20 ? "" : "Use 3 to 20 letters or numbers (- and _ allowed in the middle).") } });
+    if (v === null) { try { sessionStorage.setItem("moopay.nameSkipped", "1"); } catch {} return false; }
+    const r = await api("name", { method: "POST", body: JSON.stringify({ name: v }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) return true;
+    problem = j.message || "That didn't work. Try another name.";
+  }
+}
+
+/** A closable notice above the chat about how much the agent wallet keeps. Closing it is remembered for that amount. */
+function floatNotice(floatUsd) {
+  if (!floatUsd) return;
+  const key = "moopay.floatNotice." + floatUsd;
+  try { if (localStorage.getItem(key)) return; } catch {}
+  $("bannerText").replaceChildren(h("b", {}, "Up to " + usd(floatUsd)), " can stay in your agent wallet. Anything above that is sent to your payout wallet.");
+  $("banner").hidden = false;
+  $("bannerX").onclick = () => { $("banner").hidden = true; try { localStorage.setItem(key, "1"); } catch {} };
+}
+
 async function boot() {
   start(); $("temp").hidden = !isTemp();
   if (!(await unlockOnBoot())) { await say(agent(), "MooPay is locked. Reload the page to enter your passphrase, or type /restore and paste your recovery code."); return; }
   try {
-    const s = await (await api("state")).json();
+    let s = await (await api("state")).json();
     if (s.code) throw new Error(s.message);
-    lastEvent = s.lastEventId || 0; aiInfo = s.ai; $("frozen").hidden = !s.frozen; saveChat = s.saveChat !== false; $("nohist").hidden = saveChat;
+    if (s.names?.needed && !isTemp() && !sessionStorage.getItem("moopay.nameSkipped") && (await pickName(s.names.suffix))) s = await (await api("state")).json();
+    floatNotice(s.account?.rules?.floatUsd); lastEvent = s.lastEventId || 0; aiInfo = s.ai; $("frozen").hidden = !s.frozen; saveChat = s.saveChat !== false; $("nohist").hidden = saveChat;
     if (!s.live) { $("dot").style.background = "var(--warn)"; $("state").textContent = "AI not connected"; }
     if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); b.append(h("div", { class: "txt" }, m.content)); } } }
     else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }

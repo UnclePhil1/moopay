@@ -977,3 +977,58 @@ test("send USDT to a NEAR wallet: straight from the wallet's USDT when it has it
     assert.equal(a.oc.quotes.length, 0, "nothing was swapped");
   } finally { TOKENS.pop(); }
 });
+
+test("moo points: 10 per finished payment above $10, once, and nothing for self-sends, small or unfinished payments", async () => {
+  const { earnPoints } = await import("../../src/agent/policy.js");
+  const a = await agent();
+  const pay = (over: Record<string, unknown>) => ({ id: Math.random().toString(36), kind: "send", amountUsd: 20, chain: "near", recipient: "bob.near", status: "DELIVERED", createdAt: 0, ...over }) as never;
+  a.u.rules.payoutAddress = "me.near";
+  a.u.payments.push(pay({}), pay({ amountUsd: 10 }), pay({ status: "PROCESSING" }), pay({ status: "REFUNDED" }), pay({ recipient: "me.near" }), pay({ recipient: a.u.accountId }), pay({ kind: "sweep" }), pay({ kind: "claim", status: "CLAIMED" }), pay({ kind: "claim", status: "WAITING_TO_BE_CLAIMED" }), pay({ kind: "stake", status: "STAKED" }));
+  assert.equal(earnPoints(a.u), 30, "send, claimed claim and stake");
+  assert.equal(a.u.points, 30);
+  assert.equal(earnPoints(a.u), 0, "never twice for the same payment");
+  a.u.payments[2]!.status = "DELIVERED";
+  assert.equal(earnPoints(a.u), 10, "a payment that finishes later earns then");
+  assert.equal(a.u.points, 40);
+});
+
+test("a new account starts with a $500 float", async () => {
+  const a = await agent();
+  assert.equal(a.u.rules.floatUsd, 500);
+});
+
+test("moo points: a real send over $10 earns 10 and says so in chat; $5 earns none", async () => {
+  const a = await agent();
+  a.fund(40);
+  await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  assert.equal(a.u.points ?? 0, 0);
+  await a.ops.send(a.u, { amountUsd: "12", chain: "near", recipient: BOB });
+  assert.equal(a.u.points, 10);
+  assert.ok(a.u.events.some((e) => /earned 10 moo points/.test(e.text)));
+});
+
+test("wallet names: a new account gets name.parent with the same key; taken, reserved, used and unconfigured names are refused", async () => {
+  const a = await agent();
+  const named = new AgentOps(a.svc, a.store, a.now, undefined, { accountId: "moopay.near", secretKey: "ed25519:x" });
+  const oldId = a.u.accountId, oldKey = a.store.keyOf(a.u).secretKey;
+  const r = await named.setName(a.u, " Uncle ");
+  assert.equal(r.result["address"], "uncle.moopay.near");
+  assert.equal(a.u.accountId, "uncle.moopay.near");
+  assert.deepEqual(a.near.created.map((c) => [c.parentId, c.newId]), [["moopay.near", "uncle.moopay.near"]]);
+  assert.equal(a.store.keyOf(a.u).accountId, "uncle.moopay.near");
+  assert.equal(a.store.keyOf(a.u).secretKey, oldKey, "same key, new account");
+  assert.notEqual(oldId, a.u.accountId);
+  assert.ok(a.u.events.some((e) => /uncle\.moopay\.near/.test(e.text)));
+  await assert.rejects(named.setName(a.u, "other"), /already have a name/);
+
+  const b = a.store.open("n".repeat(43));
+  await assert.rejects(named.setName(b, "uncle"), /taken/);
+  await assert.rejects(named.setName(b, "admin"), /reserved/);
+  await assert.rejects(named.setName(b, "a"), /3 to 20/);
+  await assert.rejects(named.setName(b, "bad name"), /lowercase/);
+  a.near.nearBalances.set("someone.moopay.near", 1n);
+  await assert.rejects(named.setName(b, "someone"), /taken/, "already on the chain");
+  a.near.tokenBalances.set(b.accountId, 5_000_000n);
+  await assert.rejects(named.setName(b, "fresh"), /before the account is used/);
+  await assert.rejects(a.ops.setName(a.store.open("m".repeat(43)), "fresh"), /not switched on/);
+});

@@ -59,3 +59,35 @@ export const remaining = (ak: AgentKey, now: number) => ({
   today: ak.dailyUsd === undefined ? null : Math.max(0, ak.dailyUsd - (ak.spent.day === today(now) ? ak.spent.usd : 0)),
   total: ak.totalUsd === undefined ? null : Math.max(0, ak.totalUsd - ak.totalSpent),
 });
+
+/** Payments above this many dollars earn points. */
+export const POINTS_MIN_USD = 10;
+export const POINTS_PER_PAYMENT = 10;
+const EARNED = new Set(["DELIVERED", "STAKED", "CLAIMED"]);
+
+/**
+ * Gives 10 moo points to each finished payment above $10, once. Refunds, failures and unclaimed claims earn nothing,
+ * and neither does money moved to the user's own wallets. Returns the points added now.
+ */
+export function earnPoints(u: UserRec): number {
+  const own = new Set([u.accountId, u.rules.payoutAddress].filter(Boolean));
+  let added = 0;
+  for (const p of u.payments) {
+    if (p.pts || !["send", "claim", "stake"].includes(p.kind) || !EARNED.has(p.status) || !(p.amountUsd > POINTS_MIN_USD) || own.has(p.recipient)) continue;
+    p.pts = POINTS_PER_PAYMENT;
+    added += POINTS_PER_PAYMENT;
+  }
+  if (added) u.points = (u.points ?? 0) + added;
+  return added;
+}
+
+/** Words nobody may take as a wallet name, so no one can pose as MooPay, a chain or a service. */
+const RESERVED = new Set(["moopay", "moopayagent", "moo", "admin", "administrator", "support", "help", "team", "staff", "official", "security", "root", "system", "agent", "bot", "wallet", "near", "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "usdc", "usdt", "rhea", "rnear", "stake", "pay", "payment", "claim", "mod", "www", "api", "app", "test", "null", "undefined"]);
+
+/** Why a wallet name cannot be used, in words for the user; undefined when it is fine. */
+export function nameProblem(name: string): string | undefined {
+  if (name.length < 3 || name.length > 20) return "Use 3 to 20 characters.";
+  if (!/^[a-z0-9]+([-_][a-z0-9]+)*$/.test(name)) return "Use only lowercase letters, numbers, - and _, and start and end with a letter or number.";
+  if (RESERVED.has(name)) return "That name is reserved. Try another.";
+  return undefined;
+}

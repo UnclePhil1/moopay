@@ -8,7 +8,7 @@ The agent wallet is a NEAR account made for you. The agent uses it to pay quickl
 ## How it works
 
 - The address is a NEAR implicit account. The key is made from a seed kept on the server.
-- You keep a small float in it. The default is $25. Extra money is swept to your payout wallet.
+- The wallet keeps up to your float. The default is $500. Anything above it is swept to your payout wallet.
 - You can withdraw at any time.
 
 ## Payout wallet

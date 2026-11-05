@@ -41,3 +41,15 @@ test("seed file: plain by default, encrypted with SEED_KEY, plain files migrate,
   writeFileSync(enc, sealed.slice(0, -4) + (sealed.endsWith("AAAA") ? "BBBB" : "AAAA"));
   await assert.rejects(() => loadSeed(enc, new Vault("k")), /does not match/, "tampering is detected");
 });
+
+test("seed file: a seed written by the old AES-GCM format still opens, and moves to the new format", async () => {
+  const { createCipheriv, randomBytes, scryptSync } = await import("node:crypto");
+  const file = join(mkdtempSync(join(tmpdir(), "moopay-legacy-")), "old.seed");
+  const seed = randomBytes(32), iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", scryptSync("prod-key", "moopay.seedfile.v1", 32), iv);
+  const body = Buffer.concat([c.update(seed), c.final()]);
+  writeFileSync(file, "enc1:" + Buffer.concat([iv, c.getAuthTag(), body]).toString("base64"));
+  assert.deepEqual(await loadSeed(file, new Vault("prod-key")), seed);
+  assert.ok(readFileSync(file, "utf8").startsWith("enc2:"), "rewritten in the new format");
+  assert.deepEqual(await loadSeed(file, new Vault("prod-key")), seed);
+});

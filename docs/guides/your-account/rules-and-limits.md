@@ -3,11 +3,13 @@ title: "Rules and limits"
 description: "Set how much the agent can spend and when it must ask you."
 ---
 
+Your float applies to new accounts. An account made before the default changed keeps its own float until you change it.
+
 Rules are plain code on the server. The AI cannot change them or get around them.
 
 | Rule | Default | What it does |
 | :- | :- | :- |
-| Float | $25 | How much stays in the agent wallet. |
+| Float | $500 | How much stays in the agent wallet. |
 | Daily cap | $50 | The most the agent can spend in a day. |
 | New recipient limit | $10 | The most to a new address before it asks you. |
 | Auto-approve limit | $25 | Payments above this need your OK. |

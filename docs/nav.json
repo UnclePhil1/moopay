@@ -3,7 +3,7 @@
     { "name": "Guides", "slug": "guides", "groups": [
       { "name": "Get started", "slug": "get-started", "pages": ["what-is-moopay", "quick-start", "how-it-works", "faq"] },
       { "name": "Using MooPay", "slug": "using-moopay", "pages": ["send-money", "private-claims", "group-payments", "add-money", "scheduled-payments", "stake-rnear", "commands"] },
-      { "name": "Your account", "slug": "your-account", "pages": ["agent-wallet", "rules-and-limits", "recovery-code", "privacy"] },
+      { "name": "Your account", "slug": "your-account", "pages": ["agent-wallet", "rules-and-limits", "moo-points", "recovery-code", "privacy"] },
       { "name": "Resources", "slug": "resources", "pages": ["supported-chains", "fees", "third-parties", "safety-and-trust", "troubleshooting"] }
     ] },
     { "name": "Developers", "slug": "developers", "groups": [

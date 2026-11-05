@@ -29,6 +29,7 @@ export async function followPayments(ops: AgentOps, store: AgentStore, u: UserRe
       : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
       : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
     if (text) store.event(u, text, r.card ?? (p.kind === "unstake" ? undefined : { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link }));
+    if (r.earned) ops.pointsEvent(u, r.earned);
   }
   store.save();
 }

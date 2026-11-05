@@ -24,7 +24,7 @@ export interface AgentKey {
 }
 export interface Payment {
   id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake" | "unstake"; amountUsd: number; chain: string; recipient: string;
-  status: string; createdAt: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
+  status: string; createdAt: number; /** moo points this payment earned, set once */ pts?: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;
   /** a stake paid from the user's own wallet: how much NEAR to stake once the money lands (24 decimals) */
@@ -53,12 +53,16 @@ export interface UserRec {
   spent: { day: string; usd: number }; known: string[];
   payments: Payment[]; approvals: Approval[]; tasks: Task[]; events: AgentEvent[]; nextEventId: number;
   sponsoredAt?: number; agents: AgentKey[];
+  /** moo points earned by payments the agent made for this user (see earnPoints) */
+  points?: number;
+  /** the name the user chose; their wallet address is then <name>.<parent account> */
+  name?: string;
   /** one shared link, one private claim per named wallet */
   groups?: { id: string; at: number; entries: { receiver: string; chain: string; claimKey: string }[] }[];
   chat: { id?: string; at?: number; role: "user" | "assistant"; content: string }[]; seen: { usdc: string; near: string }; msgTimes: number[];
 }
 
-export const DEFAULT_RULES: Rules = { floatUsd: 25, dailyCapUsd: 50, newRecipientLimitUsd: 10, approveAboveUsd: 25 };
+export const DEFAULT_RULES: Rules = { floatUsd: 500, dailyCapUsd: 50, newRecipientLimitUsd: 10, approveAboveUsd: 25 };
 export const hashKey = (key: string): string => createHash("sha256").update("moopay.agentkey|" + key).digest("hex");
 export const userIdOf = (deviceToken: string): string => createHash("sha256").update("moopay.device|" + deviceToken).digest("hex");
 
@@ -94,7 +98,10 @@ export class AgentStore {
   }
 
   private wallet(id: string) { return deriveNoteAccount(createHmac("sha256", this.seed).update("moopay.agent|" + id).digest()); }
-  keyOf(u: UserRec) { return this.wallet(u.id); }
+  /** The key never changes; a named account is just another account controlled by the same key. */
+  keyOf(u: UserRec) { const w = this.wallet(u.id); return u.name ? { ...w, accountId: u.accountId } : w; }
+  nameTaken(name: string): boolean { for (const u of this.users.values()) if (u.name === name) return true; return false; }
+  setName(u: UserRec, name: string, accountId: string): void { u.name = name; u.accountId = accountId; this.save(); }
 
   /** Who is behind this token? A recovery code (master) opens or creates the account; a session token only opens it, and never outlives its hour. */
   auth(token: string, now = Date.now()): { u: UserRec; master: boolean } {

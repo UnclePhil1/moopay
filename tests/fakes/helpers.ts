@@ -67,6 +67,12 @@ export class FakeNear {
   async view(contractId: string, method: string, args?: { account_id?: string }) { return this.views.get(`${contractId}.${method}.${args?.account_id}`) ?? this.views.get(`${contractId}.${method}`) ?? null; }
   wraps: bigint[] = [];
   async wrapNear(p: { accountId: string; amount: bigint }) { this.wraps.push(p.amount); return { txHash: `wrap-${this.wraps.length}` }; }
+  created: { parentId: string; newId: string; deposit: bigint }[] = [];
+  async createAccount(p: { parentId: string; newId: string; deposit: bigint }) {
+    this.created.push({ parentId: p.parentId, newId: p.newId, deposit: p.deposit });
+    this.nearBalances.set(p.newId, p.deposit);
+    return { txHash: `create-${this.created.length}` };
+  }
   async sendNear(p: { accountId: string; to: string; amount: bigint }) {
     this.transfers.push({ ...p, secretKey: "", tokenContract: "NEAR" });
     return { txHash: `tx-${this.transfers.length}` };

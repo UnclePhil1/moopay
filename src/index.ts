@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { loadConfig } from "../config/index.js";
 import { loadDotEnv } from "../config/paths.js";
-import { createService, sponsorFromEnv } from "./agent/index.js";
+import { createService, namesFromEnv, sponsorFromEnv } from "./agent/index.js";
 import { pickProvider } from "./ai/providers/index.js";
 import { startServer } from "./server/index.js";
 import { makeAgent } from "./server/routes/agent.js";
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   if (!vault.enabled) console.error("[moopay] warning: SEED_KEY is not set, so state and seed files are stored unencrypted");
 
   const service = await createService(cfg, vault);
-  const agent = await makeAgent({ svc: service, stateFile: cfg.stateFile, vault, sponsor: sponsorFromEnv(), ...(await pickProvider()) });
+  const agent = await makeAgent({ svc: service, stateFile: cfg.stateFile, vault, sponsor: sponsorFromEnv(), names: namesFromEnv(), ...(await pickProvider()) });
   agent.startWorker();
   setInterval(() => void service.claimSweep().catch(() => undefined), 10 * 60 * 1000).unref();
 

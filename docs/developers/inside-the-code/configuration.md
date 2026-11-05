@@ -15,6 +15,7 @@ Set these in `.env` or as secrets on your host. See `.env.example`.
 | `ANTHROPIC_API_KEY` | Other AI option. |
 | `AGENT_MODEL` | Override the model. |
 | `GAS_SPONSOR_ACCOUNT`, `GAS_SPONSOR_KEY`, `GAS_SPONSOR_DAILY_MAX` | Pays first small network fees. |
+| `NAME_PARENT_ACCOUNT`, `NAME_PARENT_KEY`, `NAME_DAILY_MAX` | Creates named wallets under that account. Off unless both are set. |
 | `SEED_KEY` | Encrypts seeds at rest. |
 | `STATE_FILE` | Where the journal is kept. |
 | `MOOPAY_HOST`, `MOOPAY_PUBLIC_HOST` | Hosting and public links. |

@@ -47,6 +47,7 @@ Rule: `src/server` and `src/ai` reach wallets and chains only through `src/agent
 | `MOOPAY_HTTP_TOKEN` | Path token for the MCP connector (24+ characters). |
 | `CHAT_RETENTION_DAYS`, `AI_USER_DAILY`, `AI_IP_DAILY`, `AI_TOTAL_DAILY` | Chat expiry and daily AI message caps. |
 | `GAS_SPONSOR_ACCOUNT`, `GAS_SPONSOR_KEY`, `GAS_SPONSOR_DAILY_MAX` | Optional account that lends the first small network fee. |
+| `NAME_PARENT_ACCOUNT`, `NAME_PARENT_KEY`, `NAME_DAILY_MAX` | Account that creates named wallets (`name.<account>`), its key, and how many names may be made per day (default 50). Names are off unless both are set. |
 | `ALERT_WEBHOOK_URL` | Slack or Discord webhook for owner alerts. |
 
 `scripts/backup.mjs` makes and restores encrypted backups of the state files (`BACKUP_KEY`).

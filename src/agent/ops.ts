@@ -7,7 +7,7 @@ import { isClaimChain, validAddress } from "./chains/index.js";
 import { RNEAR, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, unstaking, WRAP } from "./rhea.js";
 import type { MooPayService } from "./service.js";
 import { alertOwner } from "../util/alert.js";
-import { agentDeny, decide, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
+import { agentDeny, decide, earnPoints, nameProblem, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
 import type { AgentKey, Approval, AgentStore, GroupItem, Payment, Rules, Task, UserRec } from "./store.js";
 import { hashKey } from "./store.js";
 
@@ -44,6 +44,11 @@ const usd = (n: number) => "$" + n.toFixed(2);
 const id = () => randomBytes(6).toString("base64url");
 
 export interface Sponsor { accountId: string; secretKey: string; dailyMax: number }
+/** The NEAR account that creates the named wallets (name.<accountId>). Both values must be set for names to work. */
+export interface NameParent { accountId: string; secretKey: string }
+/** Funds a new named account: enough for its storage and a first small fee. */
+const NAME_DEPOSIT = 5_000_000_000_000_000_000_000n; // 0.005 NEAR
+const NAME_STORAGE_USDC = 1_250_000_000_000_000_000_000n; // NEP-145 registration so USDC can be sent to the new name
 const SPONSOR_AMOUNT = 50_000_000_000_000_000_000_000n; // 0.05 NEAR, enough for a few dozen transfers
 const AGENT_KEY_DEFAULT_HOURS = 24 * 7;
 const ADVANCE = 50_000_000_000_000_000_000_000n; // 0.05 NEAR lent to a wallet that holds wNEAR but no NEAR; paid back out of that wallet once it has staked
@@ -69,7 +74,7 @@ export function approvalCard(a: Approval): Record<string, unknown> {
 }
 
 export class AgentOps {
-  constructor(private readonly svc: MooPayService, private readonly store: AgentStore, private readonly now: () => number = Date.now, private readonly sponsor?: Sponsor) {}
+  constructor(private readonly svc: MooPayService, private readonly store: AgentStore, private readonly now: () => number = Date.now, private readonly sponsor?: Sponsor, private readonly names?: NameParent) {}
   private get near() { return this.svc.nearOps; }
 
   /** Everything the wallet holds. `totalUsd` counts USDC, USDT and NEAR together; fees are never shown separately. */
@@ -150,7 +155,7 @@ export class AgentOps {
     if (!u.rules.payoutAddress) todo.push("Tell me your own NEAR wallet so I can send back anything above your float");
     const data = {
       address: u.accountId, explorer: "https://nearblocks.io/address/" + u.accountId, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
-      spentToday: spentToday(u, this.now()), schedules: u.tasks.map((t) => ({ id: t.id, text: t.text })), pendingApprovals: u.approvals.filter((a) => a.status === "pending").length, setupSteps: todo,
+      points: u.points ?? 0, spentToday: spentToday(u, this.now()), schedules: u.tasks.map((t) => ({ id: t.id, text: t.text })), pendingApprovals: u.approvals.filter((a) => a.status === "pending").length, setupSteps: todo,
     };
     return { result: data, card: { kind: "account", ...data } };
   }
@@ -264,7 +269,7 @@ export class AgentOps {
     return this.destAsset(o.chain, o.sym).then((dest) => {
       const payId = this.svc.newPayIntent({ destinationChain: o.chain, destinationAssetId: dest.assetId, recipient: o.recipient, payAmount: o.usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), fund: o.fund });
       const pay: Payment = { id: id(), kind: o.fund ? "fund" : "send", amountUsd: o.amt, chain: o.chain, recipient: o.recipient, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId };
-      u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+      u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
       const url = `${ctx.origin}/p/${payId}`;
       const title = o.fund ? `Add ${o.what} to your agent wallet` : `Send ${o.what} to ${o.recipient.length > 20 ? o.recipient.slice(0, 8) + "…" + o.recipient.slice(-6) : o.recipient}`;
       return {
@@ -281,7 +286,7 @@ export class AgentOps {
     const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
     this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     this.spend(u, amt, this.recipientKey("near", to), ak);
-    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return pay;
   }
 
@@ -292,7 +297,7 @@ export class AgentOps {
     const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
     this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     this.spend(u, amt, this.recipientKey("near", to), ak);
-    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return pay;
   }
 
@@ -336,6 +341,7 @@ export class AgentOps {
     }
     this.spend(u, amt, this.recipientKey(chain, p.recipient), ak);
     u.payments.unshift(base); u.payments.length = Math.min(u.payments.length, 100);
+    this.earn(u);
     this.store.save();
     return base;
   }
@@ -386,6 +392,45 @@ export class AgentOps {
     this.spend(u, amt, this.recipientKey(chain, p.receiver), who.ak);
     u.payments.unshift(pay); this.store.save();
     return { result: { status: "created", claimLink: link, paymentId: pay.id, rule: chain === "near" ? "Only the receiver's wallet can claim, within 24 hours; otherwise it comes back to the user's agent wallet." : `Only that ${chain.toUpperCase()} wallet can claim, by signing with it, within 24 hours; they receive USDC on ${chain.toUpperCase()} (a small swap fee comes out of the amount). Otherwise it comes back to the user's agent wallet.` }, card: { kind: "claim", id: pay.id, amountUsd: amt, receiver: p.receiver, chain, link } };
+  }
+
+  /* ---- wallet name ---- */
+  private named: number[] = [];
+  /** Whether names are switched on, and what the address will end with. */
+  get nameSuffix(): string | undefined { return this.names ? "." + this.names.accountId : undefined; }
+
+  /** Checks a name without taking it. */
+  async nameCheck(u: UserRec, raw: string): Promise<{ ok: boolean; id?: string; reason?: string }> {
+    if (!this.names) return { ok: false, reason: "Wallet names are not switched on yet." };
+    if (u.name) return { ok: false, reason: "You already have a name." };
+    const name = raw.trim().toLowerCase(), bad = nameProblem(name);
+    if (bad) return { ok: false, reason: bad };
+    const id = name + "." + this.names.accountId;
+    if (this.store.nameTaken(name) || (await this.near.nearBalance(id)) > 0n) return { ok: false, reason: "That name is taken." };
+    return { ok: true, id };
+  }
+
+  /** Gives a brand-new account its name. The wallet is then <name>.<parent>, and its key does not change. */
+  async setName(u: UserRec, raw: string): Promise<Out> {
+    this.active(u);
+    const c = await this.nameCheck(u, raw);
+    if (!c.ok) throw new MoopayError("INVALID_INPUT", c.reason!);
+    const b = await this.balances(u);
+    if (u.payments.length || b.totalUsd > 0 || b.nat > 0n) throw new MoopayError("INVALID_INPUT", "A name can only be chosen before the account is used, so no money is left behind at the old address.");
+    const day = 86_400_000, cap = Number(process.env["NAME_DAILY_MAX"] ?? 50);
+    this.named = this.named.filter((t) => this.now() - t < day);
+    if (this.named.length >= cap) { void alertOwner("names-daily", `the daily limit of ${cap} new wallet names was reached.`, this.now()); throw new MoopayError("UPSTREAM_TIMEOUT", "New names are paused for today. Try again tomorrow."); }
+    const k = this.store.keyOf(u), name = raw.trim().toLowerCase();
+    try { await this.near.createAccount({ parentId: this.names!.accountId, parentKey: this.names!.secretKey, newId: c.id!, forSecretKey: k.secretKey, deposit: NAME_DEPOSIT }); }
+    catch { throw new MoopayError("UPSTREAM_TIMEOUT", "I couldn't create that name right now. Try again in a moment, or pick another."); }
+    try { // best effort: a registered account can receive USDC from any wallet
+      const usdc = await this.svc.usdcAsset();
+      await this.near.call({ accountId: this.names!.accountId, secretKey: this.names!.secretKey, contractId: usdc.contract, method: "storage_deposit", args: { account_id: c.id, registration_only: true }, deposit: NAME_STORAGE_USDC, gas: 12n * 10n ** 12n });
+    } catch { /* the wallet that sends USDC can register it instead */ }
+    this.named.push(this.now());
+    this.store.setName(u, name, c.id!);
+    this.store.event(u, `Your wallet is now ${c.id}. Copy it and send money to it from any NEAR wallet or another MooPay agent.`);
+    return { result: { status: "named", address: c.id } };
   }
 
   /* ---- rules, schedules, approvals ---- */
@@ -581,7 +626,7 @@ export class AgentOps {
     const r = await this.runStake(u, nearAmt, payout);
     const pay: Payment = { id: id(), kind: "stake", amountUsd: amt, chain: "near", recipient: payout, status: "STAKED", createdAt: this.now(), txHash: r.tx, settled: true, expected: `${r.rnear} rNEAR`, ...(who.ak ? { agentId: who.ak.id } : {}) };
     this.spend(u, amt, this.recipientKey("near", payout), who.ak);
-    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return { result: { status: "staked", staked: `${r.shown} NEAR`, receives: `about ${r.rnear} rNEAR`, to: payout, delivered: r.delivered, ...(r.apy ? { apyPercent: r.apy } : {}), note: r.delivered ? "rNEAR is in the user's own wallet; to unstake they sign in a window, call unstake_rnear" : "rNEAR is in the agent wallet and will be forwarded to the payout wallet shortly" }, card: r.card };
   }
 
@@ -599,7 +644,7 @@ export class AgentOps {
     const price = await rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>);
     const shown = fmt(o.nearAmt, 24, 4), expected = fmt((o.nearAmt * 10n ** 24n) / price, 24, 4);
     const pay: Payment = { id: id(), kind: "stake", amountUsd: o.amt, chain: "near", recipient: o.payout ?? "your payout wallet", status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId, expected: `${expected} rNEAR`, stakeNear: fmt(o.nearAmt, 24, 24) };
-    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return {
       result: { status: "needs_your_signature", paymentId: pay.id, note: "A Stake button is on the user's screen. They press it, give the NEAR wallet that should receive the rNEAR if it isn't filled in, pick the wallet they pay from and sign. Nothing has been sent or taken yet. Do not say it failed and do not paste the link." + (notice ? ` Also tell the user: ${notice}` : "") },
       card: { kind: "confirm_send", title: `Stake ${shown} NEAR with Rhea`, url: `${ctx.origin}/p/${payId}`, amount: `${shown} NEAR (about ${usd(o.amt)}), you receive about ${expected} rNEAR`, button: "Stake", ...(notice ? { notice } : {}), ...(o.payout ? { to: o.payout, chain: "NEAR", toLabel: "rNEAR goes to" } : {}), id: pay.id },
@@ -665,7 +710,7 @@ export class AgentOps {
     const all = units === held;
     const pay: Payment = { id: id(), kind: "unstake", amountUsd: 0, chain: "near", recipient: wallet, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), expected: `${fmt(worth, 24, 4)} NEAR` };
     const card = this.callWindow(u, ctx, pay, { wallet, method: all ? "unstake_all" : "unstake", args: all ? {} : { amount: worth.toString() }, title: `Unstake ${fmt(units, 24, 4)} rNEAR`, button: "Unstake", lines: [["Unstaking", `${fmt(units, 24, 4)} rNEAR`], ["You get back", `about ${pay.expected}`], ["Ready to withdraw", "in a day or two"], ["Wallet", wallet]] });
-    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.store.save();
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return { result: { status: "needs_your_signature", paymentId: pay.id, note: "An Unstake button is on the user's screen. They press it and sign with their own NEAR wallet, the one that holds the rNEAR. Nothing has happened yet. I will tell them when the NEAR is ready to withdraw (a day or two). Do not paste the link." }, card };
   }
 
@@ -736,7 +781,24 @@ export class AgentOps {
   }
 
   /** Looks at 1Click / the claim desk; returns what changed so the worker can tell the user. */
-  async refresh(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown }> {
+  async refresh(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown; earned?: number }> {
+    const out = await this.refreshOne(u, p, ctx);
+    const earned = out.changed ? earnPoints(u) : 0;
+    if (earned) this.store.save();
+    return earned ? { ...out, earned } : out;
+  }
+
+  /** Says in chat that payments earned moo points. The caller saves. */
+  pointsEvent(u: UserRec, earned: number): void {
+    this.store.event(u, `You earned ${earned} moo points. You have ${u.points ?? 0} in total.`);
+  }
+
+  private earn(u: UserRec): void {
+    const n = earnPoints(u);
+    if (n) this.pointsEvent(u, n);
+  }
+
+  private async refreshOne(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown }> {
     if (p.settled) return { changed: false };
     if (p.kind === "unstake") return this.refreshUnstake(p, ctx, u);
     const before = p.status;
@@ -788,6 +850,7 @@ export class AgentOps {
     const p = u.payments.find((x) => x.id === paymentId);
     if (!p) throw new MoopayError("NOTE_NOT_FOUND", "no payment with that id");
     const r = await this.refresh(u, p, ctx);
+    if (r.earned) { this.pointsEvent(u, r.earned); this.store.save(); }
     return { result: { id: p.id, status: p.status, ...(r.link ? { transaction: r.link } : {}) }, card: { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link } };
   }
 

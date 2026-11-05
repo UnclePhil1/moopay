@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { asMoopayError, MoopayError } from "../../util/errors.js";
 import { toJson } from "../../util/json.js";
-import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type Sponsor, type UserRec } from "../../agent/index.js";
+import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type Sponsor, type UserRec } from "../../agent/index.js";
 import { plain, runTurn, type Ctl, type Llm } from "../../ai/loop.js";
 import { alertOwner } from "../../util/alert.js";
 import type { Vault } from "../../storage/index.js";
@@ -13,7 +13,7 @@ const MAX_BODY = 8 * 1024;
 const DELETE_MAX_USD = 0.5;
 const MSGS_PER_MINUTE = 12;
 
-export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined;
+export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined; names?: NameParent | undefined;
   /** AI messages allowed per day: per user, per IP, and across the whole server (a ceiling on what the AI can cost) */
   aiDaily?: { user: number; ip: number; total: number };
   vault?: Vault | undefined }
@@ -25,8 +25,8 @@ export async function makeAgent(d: AgentDeps) {
   const apiLimit = rateLimiter(240, 60_000, now), strictLimit = rateLimiter(12, 60_000, now), chatLimit = rateLimiter(40, 60_000, now);
   const day = 24 * 3_600_000, cap = d.aiDaily ?? { user: Number(process.env["AI_USER_DAILY"] ?? 100), ip: Number(process.env["AI_IP_DAILY"] ?? 300), total: Number(process.env["AI_TOTAL_DAILY"] ?? 5000) };
   const userDay = rateLimiter(cap.user, day, now), ipDay = rateLimiter(cap.ip, day, now), totalDay = rateLimiter(cap.total, day, now);
-  const STRICT = new Set(["session", "reset", "delete", "signout", "export", "freeze"]);
-  const ops = new AgentOps(d.svc, store, now, d.sponsor);
+  const STRICT = new Set(["name", "session", "reset", "delete", "signout", "export", "freeze"]);
+  const ops = new AgentOps(d.svc, store, now, d.sponsor, d.names);
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
 
@@ -105,7 +105,13 @@ export async function makeAgent(d: AgentDeps) {
         for (let i = 0; i < u.chat.length; i++) { const m = u.chat[i]!; if (!m.id) { m.id = randomUUID(); const n = u.chat[i + 1]; if (m.role === "user" && n && n.role === "assistant" && !n.id) n.id = m.id; } }
         const a = await ops.account(u).catch(() => undefined);
         const lastId = u.events.at(-1)?.id ?? 0;
-        json(res, 200, { frozen: Boolean(u.frozen), account: a?.result ?? { address: u.accountId }, saveChat: !u.noHistory, chat: (u.noHistory ? [] : u.chat).slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map(approvalCard), live: Boolean(d.llm), ai: d.ai ?? null });
+        json(res, 200, { frozen: Boolean(u.frozen), points: u.points ?? 0, names: ops.nameSuffix ? { suffix: ops.nameSuffix, needed: !u.name && !u.payments.length } : null, account: a?.result ?? { address: u.accountId }, saveChat: !u.noHistory, chat: (u.noHistory ? [] : u.chat).slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map(approvalCard), live: Boolean(d.llm), ai: d.ai ?? null });
+        return true;
+      }
+      if (op === "name" && req.method === "POST") {
+        needMaster("Choosing a name");
+        const b = await bodyOf(req);
+        json(res, 200, (await ops.setName(u, typeof b["name"] === "string" ? b["name"] : "")).result);
         return true;
       }
       if (op === "export" && req.method === "POST") {
