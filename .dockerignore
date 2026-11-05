@@ -1,6 +1,6 @@
 node_modules
 dist
-web/dist
+src/web/public/dist
 .env
 .git
 moopay-state.json*

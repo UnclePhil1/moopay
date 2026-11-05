@@ -9,11 +9,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Account, JsonRpcProvider, KeyPair } from "near-api-js";
-import { makeNearOps } from "../src/lib/origin.js";
-import { MooPayService } from "../src/lib/service.js";
-import { Ledger } from "../src/lib/state.js";
-import type { OneClick, Token } from "../src/lib/oneclick.js";
-import { ETH_ADDR, ETH_USDC, FakeOneClick, TOKENS } from "../test/helpers.js";
+import { makeNearOps } from "../src/agent/chains/near.js";
+import { MooPayService } from "../src/agent/service.js";
+import { Ledger } from "../src/storage/ledger.js";
+import type { OneClick, Token } from "../src/agent/intents/oneclick.js";
+import { ETH_ADDR, ETH_USDC, FakeOneClick, TOKENS } from "../tests/fakes/helpers.js";
 
 const RPC = "https://rpc.testnet.near.org";
 const TOKEN = "wrap.testnet";
@@ -57,7 +57,7 @@ class TestnetOneClick extends FakeOneClick {
 
 const oc = new TestnetOneClick();
 const service = new MooPayService({
-  ledger: new Ledger(join(mkdtempSync(join(tmpdir(), "moopay-testnet-")), "state.json")),
+  ledger: await Ledger.open(join(mkdtempSync(join(tmpdir(), "moopay-testnet-")), "state.json")),
   oneClick: oc as unknown as OneClick,
   near: ops,
   confidentiality: "basic",

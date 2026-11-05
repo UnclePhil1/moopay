@@ -3,13 +3,13 @@ title: "FAQ"
 description: "Find quick answers to common questions about MooPay."
 ---
 
+## What is MooPay?
+
+An AI money agent. You tell it in plain words to send, split, schedule or stake money, and it sends to Bitcoin, Solana, Ethereum and NEAR and takes money in from many other chains. See [What is MooPay](/docs/guides/get-started/what-is-moopay).
+
 ## Do I need to sign up?
 
 No. MooPay makes a wallet for your browser. Save the recovery code so you can come back.
-
-## Does MooPay charge a fee?
-
-MooPay adds no fee of its own. Swaps through 1Click and network fees still apply. See [Fees](/docs/guides/resources/fees).
 
 ## Can I use it without the agent wallet?
 
@@ -17,7 +17,7 @@ Yes. When the agent wallet cannot cover a payment, you sign in your own wallet.
 
 ## Which chains work?
 
-Bitcoin, Solana, Ethereum, NEAR and several other EVM chains. See [Supported chains](/docs/guides/resources/supported-chains).
+You can send to Bitcoin, Solana, Ethereum and NEAR. You can pay from many other chains too. See [Supported chains](/docs/guides/resources/supported-chains).
 
 ## Is it private?
 

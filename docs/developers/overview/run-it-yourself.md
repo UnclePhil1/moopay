@@ -15,7 +15,7 @@ You need Node 22 and an AI key.
 npm install
 cp .env.example .env
 npm run build
-npm run start:http
+npm start
 ```
 
 Open the address it prints, then go to `/agent`.

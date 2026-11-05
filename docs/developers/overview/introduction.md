@@ -3,7 +3,7 @@ title: "Introduction"
 description: "Get a map of MooPay for developers."
 ---
 
-MooPay is a TypeScript app that runs on Node 22. It has a chat server, a pay window, a claim page, and a small API for outside agents.
+MooPay is an AI money agent written in TypeScript for Node 22. It has a chat server, a pay window, a claim page, and a small API for outside agents.
 
 :::cards
 - [Architecture](/docs/developers/overview/architecture) See the parts and how they connect.

@@ -8,14 +8,14 @@ npm test
 npx tsc -p tsconfig.json --noEmit
 ```
 
-Tests use `tsx --test` and live in `test/`. They use fake NEAR and 1Click helpers from `test/helpers.ts`, so they run with no network and no money.
+Tests use `tsx --test` and live in `tests/unit/`. They use fake NEAR and 1Click helpers from `tests/fakes/helpers.ts`, so they run with no network and no money.
 
 | File | Covers |
 | :- | :- |
 | `agent.test.ts` | Tools, policy, staking, funding, keys. |
 | `service.test.ts` | Pay intents and quotes. |
 | `claims.test.ts` | Claim flows. |
-| `guard.test.ts` | Page headers and limits. |
+| `security.test.ts` | Page headers and limits. |
 | `addresses.test.ts` | Address checks. |
 | `crypto.test.ts` | Crypto helpers. |
 

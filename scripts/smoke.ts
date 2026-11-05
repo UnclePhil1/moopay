@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { commitmentOf, deriveNoteAccount, parseSecret } from "../src/lib/crypto.js";
+import { commitmentOf, deriveNoteAccount, parseSecret } from "../src/agent/crypto.js";
 
 const USDC = "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
 const ETH_USDC = "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near";
@@ -56,7 +56,7 @@ const nearPort = (nearRpc.address() as AddressInfo).port;
 const stateFile = join(mkdtempSync(join(tmpdir(), "moopay-smoke-")), "state.json");
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ["--import", "tsx", "src/server.ts"],
+  args: ["--import", "tsx", "src/ai/mcp/stdio.ts"],
   env: {
     PATH: process.env["PATH"] ?? "",
     NEAR_NETWORK: "mainnet",
@@ -73,7 +73,7 @@ const client = new Client({ name: "smoke", version: "0" });
 await client.connect(transport);
 
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-assert.deepEqual(tools, ["mint_private_claim_deposit", "route_cross_chain_intent"]);
+assert.deepEqual(tools, ["check_claim", "check_payment", "list_supported_assets", "mint_private_claim_deposit", "route_cross_chain_intent"]);
 console.log("tools/list:", tools.join(", "));
 
 const parse = (r: unknown) => JSON.parse(((r as { content: { text: string }[] }).content[0]!).text);

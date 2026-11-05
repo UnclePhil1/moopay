@@ -1,7 +1,7 @@
 /* No-funds check against the real 1Click API: tokens + dry quotes only. Moves nothing. */
 import { existsSync } from "node:fs";
-import { loadConfig } from "../src/lib/config.js";
-import { OneClick } from "../src/lib/oneclick.js";
+import { loadConfig } from "../config/index.js";
+import { OneClick } from "../src/agent/intents/oneclick.js";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 const cfg = loadConfig();

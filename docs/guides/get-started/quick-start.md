@@ -3,14 +3,14 @@ title: "Quick start"
 description: "Send your first payment with MooPay in a few minutes."
 ---
 
-You do not need an account or an email. Open the app and start typing.
+Open the agent and type your first request. No account and no email.
 
 :::steps
 1. Open [moopay.cash/agent](/agent). MooPay makes a private wallet for this browser.
 2. Save your recovery code when it shows. Type `/recovery` any time to see it again. You need it to get back in on a new browser.
 3. Type what you want, for example: `Send $5 to <wallet address>`.
 4. If the agent wallet has money, it pays at once. If not, a window opens. Pick your wallet and sign.
-5. Watch the chat. The agent tells you when the money lands.
+5. Stay in the terminal. The agent reports the moment the money lands.
 :::
 
 ## Add money first (optional)

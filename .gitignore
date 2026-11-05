@@ -10,3 +10,4 @@ moopay-state.json*
 *.pem
 .env.*
 !.env.example
+src/web/public/dist

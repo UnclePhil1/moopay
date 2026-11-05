@@ -1,9 +1,9 @@
 ---
 title: "Commands"
-description: "Look up every slash command you can type in the chat."
+description: "Look up every slash command the agent understands."
 ---
 
-Type `/` in the chat to see the list.
+Type `/` in the terminal to see the list.
 
 | Command | What it does |
 | :- | :- |

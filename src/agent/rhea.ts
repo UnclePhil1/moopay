@@ -1,4 +1,4 @@
-import { MoopayError } from "../lib/errors.js";
+import { MoopayError } from "../util/errors.js";
 
 /*
  * Rhea Finance rNEAR liquid staking (https://github.com/rhea-finance/rnear-sdk). Staking is one contract call,

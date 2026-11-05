@@ -3,7 +3,7 @@ title: "Fees"
 description: "See what you pay when you use MooPay."
 ---
 
-MooPay adds no fee of its own. You may still pay these.
+These fees come from the networks and services MooPay uses.
 
 | Fee | When | Who gets it |
 | :- | :- | :- |

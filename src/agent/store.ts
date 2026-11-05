@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { deriveNoteAccount } from "../lib/crypto.js";
-import { loadSeed } from "../lib/seedfile.js";
+import { deriveNoteAccount } from "./crypto.js";
+import { SealedFile, Vault } from "../storage/index.js";
+import { UserFileSchema } from "../storage/schema.js";
+import { loadSeed } from "../storage/seed.js";
 import { recipientKey } from "./policy.js";
 
 /*
@@ -75,11 +76,16 @@ export class AgentStore {
   private users = new Map<string, UserRec>();
   private byMaster = new Map<string, UserRec>();
   private bySession = new Map<string, UserRec>();
-  private readonly seed: Buffer;
-  constructor(private readonly file: string) {
-    if (existsSync(file)) for (const u of (JSON.parse(readFileSync(file, "utf8")) as { users: UserRec[] }).users) this.add(u);
-    this.seed = loadSeed(`${file}.seed`);
+  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[]) {
+    for (const u of users) this.add(u);
   }
+
+  static async open(path: string, vault: Vault = new Vault()): Promise<AgentStore> {
+    const { file, value } = await SealedFile.open(path, UserFileSchema, vault, "state:agent");
+    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[]);
+  }
+
+  flush(): Promise<void> { return this.file.flush(); }
 
   private add(u: UserRec): void {
     u.agents ??= []; u.masterHash ??= u.id; for (const m of u.chat) m.at ??= Date.now(); u.sessions = (u.sessions ?? []).filter((x) => x.expiresAt > Date.now());
@@ -172,8 +178,6 @@ export class AgentStore {
   }
 
   save(): void {
-    const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) }), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    this.file.save({ users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
   }
 }

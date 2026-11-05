@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>moo pay staking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=Syne:wght@800&family=Xmind:wght@900&display=swap" rel="stylesheet">
+<style>
+  html, body { margin:0; height:100%; background:#0A0A0A; overflow:hidden; }
+  body { display:grid; place-items:center; }
+  canvas { width:min(100vw,100vh); height:min(100vw,100vh); display:block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1080"></canvas>
+<script>
+/*
+  MooPay staking bumper. 1080x1080, 20.00s, 120 BPM, loops (frame 0 == frame 20).
+  Everything is drawn by seek(t), a pure function of time. No transitions, no timers for state.
+  ?t=3.2   show one still     ?sub=1   fewer motion blur subframes     R   record a WebM of one loop
+*/
+(() => {
+const W = 1080, DUR = 20, BEAT = 0.5, SHUTTER = 1 / 120;
+const SUB = Math.max(1, +(new URLSearchParams(location.search).get("sub") ?? 4));
+const C = { bg: "#0A0A0A", fg: "#F4EFE6", mute: "#AAA49A", line: "#262626" };
+const F = {
+  d: (s) => `900 ${s}px Xmind, "Archivo Black", Impact, sans-serif`,
+  s: (s) => `800 ${s}px Syne, sans-serif`,
+  m: (s) => `500 ${s}px "IBM Plex Mono", monospace`,
+};
+const mkCanvas = () => { const c = document.createElement("canvas"); c.width = c.height = W; return c; };
+const main = document.getElementById("c"), mx = main.getContext("2d");
+const sub = mkCanvas(), sx = sub.getContext("2d");
+const inc = mkCanvas(), ix = inc.getContext("2d");
+const msk = mkCanvas(), kx = msk.getContext("2d");
+msk.width = msk.height = W / 2; /* the wipe mask is soft anyway: half size keeps the heavy strokes cheap */
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const wrap = (t) => ((t % DUR) + DUR) % DUR;
+/** Closed-form step response of a damped spring: 0 before t0, settles on 1. */
+const spr = (t, t0, f = 2.4, z = 0.55) => {
+  if (t < t0) return 0;
+  const x = t - t0, w = 2 * Math.PI * f, d = w * Math.sqrt(1 - z * z);
+  return 1 - Math.exp(-z * w * x) * (Math.cos(d * x) + (z * w / d) * Math.sin(d * x));
+};
+const easeOut = (e) => 1 - Math.pow(1 - clamp(e), 3);
+/** One hit per beat: 0 on the downbeat, quick attack, decay. */
+const beatV = (t) => { const x = ((t % BEAT) + BEAT) % BEAT; return x < 0.06 ? x / 0.06 : Math.exp(-(x - 0.06) * 9); };
+const rng = (seed) => () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const ALPHA = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"];
+/** Seeded Fisher-Yates: every glyph gets its own fixed shuffle. */
+const shuffled = (seed) => { const r = rng(seed), a = ALPHA.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+/* ---------- type ---------- */
+function mkLine(text, o = {}) {
+  const { font = F.d, width = 936, max = 300, size: fixed, track = -0.06, x = 72 } = o;
+  sx.letterSpacing = "0px"; sx.font = font(100);
+  const total = sx.measureText(text).width + (text.length - 1) * track * 100;
+  const size = fixed ?? Math.min(max, Math.floor(100 * width / total));
+  sx.font = font(size);
+  const xs = [...text].map((_, i) => sx.measureText(text.slice(0, i + 1)).width - sx.measureText(text[i]).width + i * track * size);
+  const w = sx.measureText(text).width + (text.length - 1) * track * size;
+  const cap = sx.measureText("H").actualBoundingBoxAscent;
+  return { text, font, size, xs, w, cap, x, y: 0, shuf: [...text].map((_, i) => shuffled(text.length * 31 + i * 7 + text.charCodeAt(i))) };
+}
+const snap8 = (v) => Math.round(v / 8) * 8;
+const stackH = (ls, gap) => ls.reduce((a, l) => a + l.cap, 0) + gap * (ls.length - 1);
+function stack(ls, top, gap) { let y = top; for (const l of ls) { y += l.cap; l.y = snap8(y); y = l.y + gap; } return y; }
+const centre = (ls, gap, lo = 120, hi = 984) => stack(ls, snap8((lo + hi - stackH(ls, gap)) / 2), gap);
+
+function drawLine(ctx, l, st, { color = C.fg, dx = 0, dy = 0, am = 1 } = {}) {
+  ctx.font = l.font(l.size); ctx.textBaseline = "alphabetic"; ctx.textAlign = "left"; ctx.letterSpacing = "0px";
+  for (let i = 0; i < l.text.length; i++) {
+    const c0 = l.text[i]; if (c0 === " ") continue;
+    const g = st(i); if (!g || !(g.a > 0.003)) continue;
+    ctx.save(); ctx.globalAlpha = clamp(g.a * am); ctx.fillStyle = color;
+    if (g.blur > 0.4) ctx.filter = `blur(${g.blur.toFixed(1)}px)`;
+    ctx.translate(l.x + l.xs[i] + dx, l.y + (g.y || 0) + dy);
+    if (g.s) ctx.scale(g.s, g.s);
+    ctx.fillText(g.ch || c0, 0, 0);
+    ctx.restore();
+  }
+}
+/** Print misregistration on impact frames only: two offset copies at 40%, then the real line. */
+function ink(ctx, l, st, acc, color = C.fg) {
+  if (acc > 0.02) {
+    drawLine(ctx, l, st, { color: C.fg, dx: 4 * acc, dy: -3 * acc, am: 0.4 * acc });
+    drawLine(ctx, l, st, { color: C.mute, dx: -4 * acc, dy: 3 * acc, am: 0.4 * acc });
+  }
+  drawLine(ctx, l, st, { color });
+}
+const glyphIn = (t, ts, { dist = 260, f = 2.4, z = 0.55 } = {}) => { const p = spr(t, ts, f, z), c = clamp(p); return { y: (1 - p) * dist, a: clamp(p * 4), blur: (1 - c) * 14 }; };
+const glyphOut = (t, te, dist = -220) => { const q = spr(t, te, 3, 0.9), c = clamp(q); return { y: q * dist, a: 1 - clamp(q * 1.4), blur: c * 10 }; };
+/** Glyph state from an in-time and an out-time. */
+const seq = (t, tin, tout, o) => { const a = glyphIn(t, tin, o); if (t < tout) return a; const b = glyphOut(t, tout); return { y: a.y + b.y, a: a.a * b.a, blur: Math.max(a.blur, b.blur) }; };
+/** 1/16 note stagger, squeezed so a long line still lands inside a second. */
+const stag = (n) => Math.min(0.125, 1 / n);
+
+function crumb(ctx, txt, x, y, t, t0, t1, { align = "left", color = C.fg, size = 26 } = {}) {
+  if (t < t0 || t >= t1) return;
+  const n = Math.min(txt.length, Math.floor((t - t0) * 45) + 1);
+  ctx.save(); ctx.font = F.m(size); ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "alphabetic";
+  ctx.letterSpacing = `${size * 0.02}px`;
+  const full = ctx.measureText(txt).width, part = txt.slice(0, n);
+  ctx.textAlign = "left"; const x0 = align === "center" ? x - full / 2 : align === "right" ? x - full : x;
+  ctx.fillText(part, x0, y); ctx.restore();
+}
+
+/* ---------- layout (built once fonts are ready) ---------- */
+let LA, LB, LC, LD, LU, LL, A_BASE;
+function layout() {
+  LA = [mkLine("STAKE", { max: 360 }), mkLine("ANYTHING", { max: 360 })]; centre(LA, 32, 120, 900); A_BASE = snap8(LA[1].y + 64);
+  LB = [mkLine("ANY COIN"), mkLine("BECOMES"), mkLine("rNEAR", { max: 300 })]; centre(LB, 48, 190, 940);
+  LC = [mkLine("YOUR WALLET"), mkLine("YOUR rNEAR")]; centre(LC, 40, 120, 984);
+  LD = ["TYPE", "PICK", "SIGN"].map((s) => mkLine(s, { font: F.s, size: 150, track: -0.04 })); stack(LD, 128, 28);
+  LU = [mkLine("UNSTAKE", { font: F.s, track: -0.04, max: 190 }), mkLine("ANY TIME", { font: F.s, track: -0.04, max: 190 })]; centre(LU, 44, 120, 840);
+  LL = mkLine("moo pay", { width: 700, max: 220, track: -0.05 }); LL.x = 540 - LL.w / 2; LL.y = 640;
+}
+
+/* ---------- timeline ---------- */
+const IMPACTS = [0, 2.5, 3, 3.5, 4, 6.5, 10.5, 11, 11.5, 13.25, 14.5, 15];
+const accent = (t) => IMPACTS.reduce((m, ti) => Math.max(m, t >= ti && t < ti + 0.2 ? 1 - (t - ti) / 0.2 : 0), 0);
+const CUTS = [[2.5, 1], [6.5, -1], [10.5, 1], [14.5, -1]];
+const camera = (t) => {
+  let pan = 0; for (const [tc, dir] of CUTS) if (t >= tc) pan += dir * 150 * (1 - spr(t, tc, 2.2, 0.8));
+  let s = 1 + 0.008 * beatV(t);
+  if (t >= 4.5 && t < 6.5) s += 0.08 * spr(t, 4.5, 1.4, 0.9);
+  if (t >= 13.25 && t < 14.5) s += 0.06 * spr(t, 13.25, 1.6, 0.9);
+  return { pan, s };
+};
+
+/* scene A: STAKE ANYTHING */
+function sceneA(ctx, t, acc) {
+  if (t >= 2.6) return;
+  LA.forEach((l, k) => {
+    const mk = (tt) => (i) => seq(tt, (k ? 0.5 : 0) + i * stag(l.text.length), 2.2 + k * 0.1 + i * 0.015, { dist: 320, f: 2.2, z: 0.5 });
+    for (let j = 3; j >= 1; j--) drawLine(ctx, l, mk(t - j * 0.035), { color: C.mute, am: 0.3 / j });
+    ink(ctx, l, mk(t), acc);
+  });
+  const e = easeOut(t / 2.2), L = 936 * e, fade = 1 - clamp((t - 2.2) / 0.3);
+  if (L < 1) return;
+  ctx.save(); ctx.globalAlpha = fade; ctx.strokeStyle = C.mute; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(72, A_BASE); ctx.lineTo(72 + L, A_BASE); ctx.stroke();
+  ctx.strokeStyle = C.fg; ctx.lineWidth = 3; ctx.beginPath();
+  for (let x = 0; x < L; x += 8) { const i = x / 8, h = 3 + 22 * Math.abs(Math.sin(i * 0.55 + t * 6)) * (0.35 + 0.65 * beatV(t)) * (x > L - 160 ? 1 : 0.45); ctx.moveTo(72 + x, A_BASE - h); ctx.lineTo(72 + x, A_BASE + h); }
+  ctx.stroke(); ctx.restore();
+}
+
+/* scene B: ANY COIN BECOMES rNEAR */
+const B_SNAP = [3, 3.5, 4];
+function stB(t, k) {
+  const l = LB[k];
+  return (i) => {
+    const s0 = 2.5 + k * 0.25, snap = B_SNAP[k] + i * 0.02;
+    if (t < s0) return null;
+    if (t < snap) return { a: 0.6, y: 0, blur: 2, ch: l.shuf[i][(Math.floor(t * 24) + i) % ALPHA.length] };
+    const p = spr(t, snap, 2.6, 0.6);
+    return { a: 1, y: (1 - p) * 28, blur: (1 - clamp(p)) * 6 };
+  };
+}
+function sceneB(ctx, t, acc) {
+  if (t < 2.5 || t >= 6.5) return;
+  LB.forEach((l, k) => {
+    const r = easeOut((t - B_SNAP[k]) / 0.5);
+    if (r > 0) { ctx.fillStyle = C.line; ctx.fillRect(72, l.y + 22, 936 * r, 2); }
+    ink(ctx, l, stB(t, k), t >= 2.5 && t < 6.5 ? acc : 0);
+  });
+  crumb(ctx, "ANY CHAIN", 1008, 150, t, 4.5, 99, { align: "right", color: C.mute });
+  crumb(ctx, "RHEA", 72, 150, t, 5, 99, { color: C.mute });
+  crumb(ctx, "SOL ETH USDC BTC", 72, 950, t, 5.5, 99, { color: C.mute });
+}
+
+/* scene C: cream poster, wipe through the outgoing letterforms */
+function posterC(ctx, t) {
+  ctx.fillStyle = C.fg; ctx.fillRect(0, 0, W, W);
+  LC.forEach((l, k) => {
+    drawLine(ctx, l, (i) => seq(t, 6.8 + k * 0.2 + i * 0.02, 99, { dist: 70, f: 2.6, z: 0.7 }), { color: C.bg });
+  });
+  const u = easeOut((t - 9) / 0.4); if (u > 0) { ctx.fillStyle = C.bg; ctx.fillRect(72, LC[1].y + 22, 936 * u, 12); }
+  crumb(ctx, "YOU SIGN", 72, 112, t, 8.5, 10.5, { color: C.bg });
+  crumb(ctx, "RNEAR TO YOU", 72, 990, t, 9.5, 10.5, { color: C.bg });
+}
+function sceneC(ctx, t, acc) {
+  if (t < 6.5 || t >= 10.5) return;
+  const m = clamp(spr(t, 6.5, 0.9, 0.95));
+  if (m > 0.985) { posterC(ctx, t); return; }
+  LB.forEach((l, k) => ink(ctx, l, stB(t, k), t < 6.7 ? acc : 0));
+  posterC(ix, t);
+  kx.setTransform(0.5, 0, 0, 0.5, 0, 0); kx.clearRect(0, 0, W, W); kx.font = LB[0].font(1); kx.lineJoin = "round"; kx.fillStyle = kx.strokeStyle = "#fff";
+  LB.forEach((l) => { kx.font = l.font(l.size); kx.textBaseline = "alphabetic"; kx.letterSpacing = "0px"; kx.lineWidth = 1100 * m * m;
+    [...l.text].forEach((c, i) => { if (c === " ") return; kx.fillText(c, l.x + l.xs[i], l.y); if (m > 0.01) kx.strokeText(c, l.x + l.xs[i], l.y); }); });
+  ix.save(); ix.globalCompositeOperation = "destination-in"; ix.drawImage(msk, 0, 0, W, W); ix.restore();
+  ctx.drawImage(inc, 0, 0);
+}
+
+/* scene D: TYPE PICK SIGN, terminal block, strike becomes underline */
+const TERM = { x: 144, y: 600, w: 792, h: 280 };
+const TERM_LINES = [["> stake $20 into rNEAR", 11.75], ["> pay with: SOL wallet", 12.4], ["> sign. earn.", 13]];
+const ORBIT = ["RHEA", "rNEAR", "ANY CHAIN", "1-2 DAYS", "NO SIGN-UP", "/STAKE"];
+function perimeter(u, x, y, w, h) {
+  const P = 2 * (w + h); let d = ((u % 1) + 1) % 1 * P;
+  if (d < w) return [x + d, y]; d -= w; if (d < h) return [x + w, y + d]; d -= h; if (d < w) return [x + w - d, y + h]; d -= w; return [x, y + h - d];
+}
+function sceneD(ctx, t, acc) {
+  if (t < 10.5 || t >= 14.5) return;
+  const out = t >= 13.4 ? 1 - clamp((t - 13.4) / 0.25) : 1;
+  LD.forEach((l, k) => ink(ctx, l, (i) => seq(t, 10.5 + k * 0.5 + i * stag(4), 13.4 + i * 0.02), t < 12 ? acc : 0));
+  const tr = clamp(spr(t, 11.5, 2.2, 0.8));
+  if (out > 0 && tr > 0) {
+    ctx.save(); ctx.globalAlpha = out; ctx.strokeStyle = C.fg; ctx.lineWidth = 3; ctx.strokeRect(TERM.x, TERM.y, TERM.w * tr, TERM.h);
+    crumb(ctx, "STAKE.TXT", TERM.x + 36, TERM.y + 44, t, 11.6, 13.75, { color: C.mute, size: 22 });
+    TERM_LINES.forEach(([txt, t0], k) => crumb(ctx, txt, TERM.x + 36, TERM.y + 128 + k * 60, t, t0, 13.75, { size: 34 }));
+    const n = TERM_LINES.length, last = TERM_LINES[n - 1][1] + TERM_LINES[n - 1][0].length / 45;
+    if (t > last && Math.floor(t * 2) % 2 === 0) { ctx.fillStyle = C.fg; ctx.fillRect(TERM.x + 36 + 232, TERM.y + 128 + 2 * 60 - 26, 16, 32); }
+    ctx.restore();
+    if (t > 11.9) ORBIT.forEach((c, k) => {
+      const [px, py] = perimeter(k / ORBIT.length + (t - 11.9) * 0.07, TERM.x - 40, TERM.y - 40, TERM.w + 80, TERM.h + 80);
+      ctx.save(); ctx.globalAlpha = out * clamp((t - 11.9 - k * 0.1) * 4); crumb(ctx, c, clamp(px, 170, 910), py + 8, 99, 0, 100, { align: "center", color: C.mute, size: 24 }); ctx.restore();
+    });
+  }
+  /* strike across the block, then it drops and becomes the underline */
+  if (t >= 13) {
+    const p = clamp(spr(t, 13, 2.6, 0.7)), q = spr(t, 13.5, 2.4, 0.85);
+    const uy = snap8(LU[1].y + 40), sy = 776, y = sy + (uy - sy) * q, th = 14 - 6 * clamp(q);
+    ctx.fillStyle = C.fg; ctx.fillRect(72, y - th / 2, 936 * p, th);
+  }
+  if (t >= 13.25) LU.forEach((l, k) => ink(ctx, l, (i) => glyphIn(t, 13.25 + k * 0.25 + i * 0.03, { dist: 200, f: 2.4, z: 0.6 }), t < 13.5 ? acc : 0));
+}
+
+/* scene E: brand lock, hold, exit (everything is gone again at t = 20) */
+function sceneE(ctx, t, acc) {
+  if (t < 14.5) return;
+  const ex = easeOut((t - 19.4) / 0.55), live = 1 - ex;
+  const breath = t >= 17.5 && t < 19.4 ? 0.012 * Math.sin(Math.PI * (t - 17.5) / 1.9) : 0;
+  ctx.save(); ctx.translate(540, 540); ctx.scale(1 + breath, 1 + breath); ctx.translate(-540, -540);
+  /* L bracket: thick bar + thin rule */
+  const bp = clamp(spr(t, 14.5, 2.2, 0.8)) * live, rp = clamp(spr(t, 14.75, 2.2, 0.8)) * live;
+  ctx.fillStyle = C.fg; if (bp > 0.001) ctx.fillRect(72, 800 - 600 * bp, 28, 600 * bp + 2);
+  if (rp > 0.001) { ctx.fillStyle = C.mute; ctx.fillRect(72, 800, 936 * rp, 3); }
+  /* rings mark, drawn on */
+  const rn = clamp(spr(t, 14.9, 2, 0.85)) * live, k = 7, cy = 380;
+  ctx.save(); ctx.strokeStyle = C.fg; ctx.lineWidth = 4 * k; ctx.lineCap = "butt"; ctx.globalAlpha = clamp(rn * 3);
+  [10, 26].forEach((cx, n) => { ctx.beginPath(); ctx.arc(540 + (cx - 18) * k, cy, 8 * k, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * clamp(rn - n * 0.06), false); ctx.stroke(); });
+  ctx.restore();
+  ink(ctx, LL, (i) => seq(t, 15 + i * stag(7), 19.4 + i * 0.03, { dist: 200, f: 2.4, z: 0.6 }), t < 15.5 ? acc : 0);
+  crumb(ctx, "MOOPAY.CASH/AGENT", 540, 724, t, 16.25, 19.5, { align: "center", color: C.mute });
+  crumb(ctx, "/STAKE", 1008, 112, t, 16.5, 19.4, { align: "right", color: C.mute });
+  ctx.restore();
+}
+
+/* chrome: label, timecode and the 16 step beat meter. Hidden at both ends so the loop closes. */
+function chrome(ctx, t) {
+  const a = clamp(t / 0.5) * (1 - clamp((t - 19.5) / 0.4)); if (a <= 0) return;
+  const dark = t >= 7 && t < 10.5, col = dark ? C.bg : C.fg, dim = dark ? C.bg : C.mute;
+  ctx.save(); ctx.globalAlpha = a;
+  crumb(ctx, "MOOPAY / STAKING", 72, 64, 99, 0, 100, { color: col, size: 22 });
+  const tc = `00:${String(Math.floor(t)).padStart(2, "0")}.${String(Math.floor((t % 1) * 100)).padStart(2, "0")}`;
+  crumb(ctx, tc, 1008, 64, 99, 0, 100, { align: "right", color: dim, size: 22 });
+  const bi = Math.floor(t / BEAT) % 16;
+  for (let i = 0; i < 16; i++) {
+    const x = 72 + i * (936 - 48) / 15, on = i < bi, now = i === bi;
+    ctx.globalAlpha = a * (now ? 0.35 + 0.65 * beatV(t) : on ? 0.5 : 0.18); ctx.fillStyle = col; ctx.fillRect(x, 1024, 48, 8);
+  }
+  ctx.restore();
+}
+
+function render(ctx, t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.filter = "none"; ctx.letterSpacing = "0px";
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, W);
+  const acc = accent(t), cam = camera(t);
+  ctx.save(); ctx.translate(540 + cam.pan, 540); ctx.scale(cam.s, cam.s); ctx.translate(-540, -540);
+  sceneA(ctx, t, acc); sceneB(ctx, t, acc); sceneC(ctx, t, acc); sceneD(ctx, t, acc); sceneE(ctx, t, acc);
+  ctx.restore();
+  chrome(ctx, t);
+}
+
+/** Four subframes across a 180 degree shutter, averaged. */
+function seek(t) {
+  t = wrap(t);
+  mx.setTransform(1, 0, 0, 1, 0, 0); mx.globalAlpha = 1; mx.fillStyle = C.bg; mx.fillRect(0, 0, W, W);
+  for (let k = 0; k < SUB; k++) {
+    render(sx, Math.max(0, t - (k / SUB) * SHUTTER));
+    mx.globalAlpha = 1 / (k + 1); mx.drawImage(sub, 0, 0);
+  }
+  mx.globalAlpha = 1;
+}
+window.seek = seek; window.renderAt = (t) => { render(sx, t); return sx.getImageData(0, 0, W, W).data; };
+window.stills = () => [1.2, 3.4, 4.6, 6.9, 8.6, 11.8, 13, 14, 16, 19.7].map((t) => (seek(t), main.toDataURL("image/png")));
+
+/* ---------- boot ---------- */
+const ready = Promise.all([F.d(100), F.s(100), F.m(100)].map((f) => document.fonts.load(f, "AaBb0 rNEAR")));
+Promise.race([ready, new Promise((r) => setTimeout(r, 4000))]).then(() => {
+  layout();
+  const q = new URLSearchParams(location.search).get("t");
+  if (q !== null) { seek(+q); return; }
+  let t0 = null;
+  const tick = (now) => { if (t0 === null) t0 = now; seek((now - t0) / 1000); requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+  addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() !== "r" || typeof MediaRecorder === "undefined") return;
+    const rec = new MediaRecorder(main.captureStream(60), { mimeType: "video/webm;codecs=vp9", videoBitsPerSecond: 16e6 }), parts = [];
+    rec.ondataavailable = (d) => parts.push(d.data);
+    rec.onstop = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(parts, { type: "video/webm" })); a.download = "moopay-staking.webm"; a.click(); };
+    t0 = null; rec.start(); setTimeout(() => rec.stop(), DUR * 1000);
+  });
+});
+})();
+</script>
+</body>
+</html>

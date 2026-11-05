@@ -17,7 +17,7 @@ await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
 const oc = (fake.address() as AddressInfo).port;
 const TOKEN = "t".repeat(32);
 const PORT = 38333;
-const child = spawn(process.execPath, ["--import", "tsx", "src/http.ts"], {
+const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
   env: { PATH: process.env["PATH"] ?? "", ONECLICK_BASE_URL: `http://127.0.0.1:${oc}`, MOOPAY_HTTP_PORT: String(PORT), MOOPAY_HTTP_TOKEN: TOKEN, STATE_FILE: join(mkdtempSync(join(tmpdir(), "moopay-http-")), "s.json") },
   stdio: ["ignore", "ignore", "pipe"],
 });
@@ -31,7 +31,7 @@ assert.equal(bad.status, 404);
 const client = new Client({ name: "smoke-http", version: "0" });
 await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp/${TOKEN}`)));
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-assert.deepEqual(tools, ["mint_private_claim_deposit", "route_cross_chain_intent"]);
+assert.deepEqual(tools, ["check_claim", "check_payment", "list_supported_assets", "mint_private_claim_deposit", "route_cross_chain_intent"]);
 const r = await client.callTool({ name: "route_cross_chain_intent", arguments: { destinationChain: "eth", destinationAssetId: "x", recipient: "0xbad" } });
 console.log("tools over HTTP:", tools.join(", "), "| wrong token -> 404 | tool error ->", JSON.parse(((r as { content: { text: string }[] }).content[0]!).text).code);
 const link = JSON.parse(((await client.callTool({ name: "route_cross_chain_intent", arguments: {

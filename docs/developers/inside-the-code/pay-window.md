@@ -3,7 +3,7 @@ title: "Pay window"
 description: "Understand the signing page and its API."
 ---
 
-The pay window lives at `/p/<id>`. It is built from `web/pay.ts` and `web/pay.html`. The page talks to the server at `/papi/<id>/...`.
+The pay window lives at `/p/<id>`. It is built from `src/web/src/pay-logic.ts` and `src/web/public/pay.html`. The page talks to the server at `/papi/<id>/...`.
 
 ## Endpoints
 

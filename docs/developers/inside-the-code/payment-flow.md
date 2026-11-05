@@ -5,7 +5,7 @@ description: "Follow one payment through the code."
 
 ## 1. A tool is called
 
-The AI picks `send_money` from `src/agent/tools.ts`. The tool calls `ops.send`.
+The AI picks `send_money` from `src/ai/tools.ts`. The tool calls `ops.send`.
 
 ## 2. Policy decides
 
@@ -34,4 +34,4 @@ Same chain pays directly and is checked on chain. Cross chain asks 1Click for a 
 
 ## Add a tool
 
-Add an entry to the list in `src/agent/tools.ts` with a name, a clear description and an input schema. Put the work in `ops.ts`. Add a test in `test/agent.test.ts`.
+Add an entry to the list in `src/ai/tools.ts` with a name, a clear description and an input schema. Put the work in `ops.ts`. Add a test in `tests/unit/agent.test.ts`.

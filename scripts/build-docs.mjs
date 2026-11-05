@@ -1,8 +1,8 @@
-// Builds the docs site: docs/**/*.md + docs/nav.json -> web/dist/docs (HTML pages, .md copies, llms.txt).
+// Builds the docs site: docs/**/*.md + docs/nav.json -> src/web/public/dist/docs (HTML pages, .md copies, llms.txt).
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const SRC = "docs", OUT = "web/dist/docs";
+const SRC = "docs", OUT = "src/web/public/dist/docs";
 const ORIGIN = (process.env.DOCS_ORIGIN ?? "https://moopay.cash").replace(/\/$/, "");
 const nav = JSON.parse(readFileSync(join(SRC, "nav.json"), "utf8"));
 

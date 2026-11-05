@@ -1,9 +1,9 @@
 ---
 title: "Send money"
-description: "Pay a wallet on Bitcoin, Solana, Ethereum or NEAR from one chat."
+description: "Pay a wallet on Bitcoin, Solana, Ethereum or NEAR, using money from many other chains."
 ---
 
-Tell the agent the amount, the receiver and the chain. It handles the rest.
+Give the agent an amount, a receiver and a chain. It runs the whole payment.
 
 ## Examples
 

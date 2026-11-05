@@ -1,16 +1,18 @@
 ---
 title: "What is MooPay"
-description: "Learn what MooPay does and who it is for."
+description: "Meet the AI money agent that sends, splits, schedules and stakes across chains."
 ---
 
-MooPay is a chat where you tell an agent who to pay, and it sends the money. You can pay people on Bitcoin, Solana, Ethereum and NEAR. You do not need to know which chain they use or how to swap coins.
+MooPay is an AI money agent. Tell it what to do with your money in plain words: send it, split it, schedule it, stake it. It sends to Bitcoin, Solana, Ethereum and NEAR, takes money in from many other chains, and follows every move until it is done.
 
-You type something like "Send $20 to this wallet". The agent finds a route, sends it, and tells you when it lands.
+You never pick a bridge or swap a coin yourself. No sign-up.
+
+Type "Send $20 to this wallet" and you are done.
 
 ## What you can do
 
 :::cards
-- [Send money](/docs/guides/using-moopay/send-money) Pay any wallet on BTC, SOL, ETH or NEAR from one chat.
+- [Send money](/docs/guides/using-moopay/send-money) Pay any wallet on BTC, SOL, ETH or NEAR, with money from many chains.
 - [Private claims](/docs/guides/using-moopay/private-claims) Send money that only one wallet can open.
 - [Group payments](/docs/guides/using-moopay/group-payments) Pay many people in one request.
 - [Stake rNEAR](/docs/guides/using-moopay/stake-rnear) Earn yield with [Rhea Finance](https://rhea.finance).
@@ -30,7 +32,7 @@ You type something like "Send $20 to this wallet". The agent finds a route, send
 | Speed | The agent pays right away, inside your rules. | You approve each payment in a pop-up. |
 | Best for | Frequent, small payments. | One-off payments, or when you want full control. |
 
-The agent wallet is optional. If it is empty, the agent simply asks you to sign in your own wallet.
+The agent wallet is optional. If it is empty, the agent asks you to sign in your own wallet.
 
 :::note
 MooPay is new and has not been audited. Read [Safety and trust](/docs/guides/resources/safety-and-trust) before you put in more than you can afford to lose.

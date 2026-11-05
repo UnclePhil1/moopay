@@ -6,7 +6,7 @@ description: "See what happens between your message and the money arriving."
 When you ask for a payment, four things happen.
 
 :::steps
-1. **You ask.** The chat reads your message and works out the amount, the chain and the receiver.
+1. **You ask.** The agent reads your message and works out the amount, the chain and the receiver.
 2. **The rules check.** Your limits decide if it can run now, needs your OK, or is blocked. The AI cannot change these rules.
 3. **A route is found.** If the money and the receiver are on the same chain, it sends directly. If not, it uses [NEAR Intents](https://near-intents.org) (1Click) to swap and deliver across chains.
 4. **It is followed to the end.** The agent watches the payment and tells you when it lands or if it fails.
