@@ -4,6 +4,7 @@ import { SealedFile, Vault } from "../storage/index.js";
 import { UserFileSchema } from "../storage/schema.js";
 import { loadSeed } from "../storage/seed.js";
 import { recipientKey } from "./policy.js";
+import type { Preflight } from "./preflight.js";
 
 /*
  * One record per anonymous user. The browser keeps a random device token (the recovery code); only its hash is stored here.
@@ -12,7 +13,7 @@ import { recipientKey } from "./policy.js";
  * The user's agent wallet is a NEAR account whose key is derived from a server seed (the "float" design:
  * it only ever holds the small working balance the user loads, and sweeps the rest to their payout wallet).
  */
-export interface Rules { floatUsd: number; dailyCapUsd: number; newRecipientLimitUsd: number; approveAboveUsd: number; payoutAddress?: string; pendingPayout?: { address: string; at: number }; allowedChains?: string[]; allowedAssets?: string[] }
+export interface Rules { floatUsd: number; dailyCapUsd: number; newRecipientLimitUsd: number; approveAboveUsd: number; payoutAddress?: string; pendingPayout?: { address: string; at: number }; allowedChains?: string[]; allowedAssets?: string[]; /** send through the private route (beta) unless a payment says otherwise */ privateSends?: boolean }
 /** A leash for an outside AI agent (or a short-lived session). Always inside the user's own rules. */
 export interface AgentKey {
   id: string; name: string; hash: string; prefix: string; createdAt: number; expiresAt?: number; revoked?: boolean;
@@ -31,8 +32,10 @@ export interface Payment {
   stakeNear?: string;
   /** why a stake is waiting or failed, in words the user can act on */
   why?: string;
+  /** a private-route payment in progress (beta): `amt` in USDC units, `idem` makes a retried payout safe */
+  pv?: { step: "funding" | "swapping" | "paying"; amt: string; idem: string; req?: string; /** where it goes: the OutLayer chain id and the token that leaves the private balance; swapTo and minOut when the receiver's coin is not USDC */ out: { chain: string; token: string; swapTo?: string; minOut?: string } };
 }
-export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired" }
+export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; pf?: Preflight }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
 export interface GroupItem { chain: string; recipient: string; amountUsd?: string; amount?: string; assetSymbol?: string }
 export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; items?: GroupItem[]; every: "day" | "week" | "month"; nextAt: number; text: string }
@@ -53,6 +56,8 @@ export interface UserRec {
   spent: { day: string; usd: number }; known: string[];
   payments: Payment[]; approvals: Approval[]; tasks: Task[]; events: AgentEvent[]; nextEventId: number;
   sponsoredAt?: number; agents: AgentKey[];
+  /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
+  outlayer?: { key: string; account: string };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
   points?: number;
   /** the name the user chose; their wallet address is then <name>.<parent account> */
@@ -80,13 +85,19 @@ export class AgentStore {
   private users = new Map<string, UserRec>();
   private byMaster = new Map<string, UserRec>();
   private bySession = new Map<string, UserRec>();
-  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[]) {
+  /** Every payment ever made (a user's list keeps only the latest 100) and the most each wallet has held, in cents. For the team's numbers; kept forever. */
+  private ledger = new Map<string, Payment & { who: string }>();
+  private peaks = new Map<string, number>();
+  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[], ledger: Record<string, unknown> = {}, peaks: Record<string, number> = {}) {
     for (const u of users) this.add(u);
+    for (const [k, v] of Object.entries(ledger)) this.ledger.set(k, v as Payment & { who: string });
+    for (const [k, v] of Object.entries(peaks)) this.peaks.set(k, v);
+    this.remember();
   }
 
   static async open(path: string, vault: Vault = new Vault()): Promise<AgentStore> {
     const { file, value } = await SealedFile.open(path, UserFileSchema, vault, "state:agent");
-    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[]);
+    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[], value?.ledger, value?.peaks);
   }
 
   flush(): Promise<void> { return this.file.flush(); }
@@ -184,7 +195,17 @@ export class AgentStore {
     if (u.events.length > 100) u.events.shift();
   }
 
+  /** Copies every payment into the ledger as it is now (status changes included), and notes the most each wallet has held. */
+  private remember(): void {
+    for (const u of this.users.values()) {
+      for (const p of u.payments) this.ledger.set(p.id, { ...p, who: u.id });
+      const c = Number(u.seen?.usdc ?? 0); if (c > (this.peaks.get(u.id) ?? 0)) this.peaks.set(u.id, c);
+    }
+  }
+  history(): { rows: (Payment & { who: string })[]; peaks: Map<string, number> } { this.remember(); return { rows: [...this.ledger.values()], peaks: this.peaks }; }
+
   save(): void {
-    this.file.save({ users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
+    this.remember();
+    this.file.save({ ledger: Object.fromEntries(this.ledger), peaks: Object.fromEntries(this.peaks), users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
   }
 }

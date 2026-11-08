@@ -25,9 +25,10 @@ export async function followPayments(ops: AgentOps, store: AgentStore, u: UserRe
       : p.status === "STAKED" ? `Staked: you now hold about ${p.expected}, sent to ${p.recipient}. Ask me any time to unstake.`
       : p.status === "WAITING_FOR_FEE" ? `Your payment arrived, but I can't finish the stake yet. ${p.why}`
       : p.kind === "stake" && p.status === "FAILED" ? `I couldn't finish your stake${p.why ? `: ${p.why}` : ""}. Your money is safe in your agent wallet; ask me to try again.`
+      : p.pv && p.status === "REFUNDED" ? `The private payment of $${p.amountUsd.toFixed(2)} to ${p.recipient} did not finish. The money is on its way back to your agent wallet.`
       : p.status === "REFUNDED" ? `Refunded: your $${p.amountUsd.toFixed(2)} ${p.kind === "claim" ? "claim was not opened in time" : "payment did not go through"}, and the money is back ${p.payId ? "in your wallet" : "in your agent wallet"}.`
       : p.status === "EXPIRED" ? `The confirm link for your $${p.amountUsd.toFixed(2)} payment to ${p.recipient} expired before it was signed. Nothing was sent.`
-      : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.` : undefined;
+      : p.status === "FAILED" ? `Failed: the $${p.amountUsd.toFixed(2)} payment to ${p.recipient} did not go through.${p.why ? " " + p.why : ""}` : undefined;
     if (text) store.event(u, text, r.card ?? (p.kind === "unstake" ? undefined : { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link }));
     if (r.earned) ops.pointsEvent(u, r.earned);
   }

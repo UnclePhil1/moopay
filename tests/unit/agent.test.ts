@@ -18,13 +18,14 @@ import { MooPayService } from "../../src/agent/service.js";
 import { Ledger } from "../../src/storage/ledger.js";
 import { Stats } from "../../src/storage/stats.js";
 import type { OneClick } from "../../src/agent/intents/oneclick.js";
-import { ETH_ADDR, FakeNear, FakeOneClick, TOKENS } from "../fakes/helpers.js";
+import { ETH_ADDR, FakeNear, FakeOneClick, FakeOutLayer, TOKENS, USDC } from "../fakes/helpers.js";
+import type { OutLayer } from "../../src/agent/outlayer.js";
 
 const BOB = "bob.near";
 const TOKEN = "t".repeat(43);
 const USDC_CONTRACT = TOKENS[1]!.contractAddress!;
 
-async function agent(sponsor?: Sponsor) {
+async function agent(sponsor?: Sponsor, pr?: OutLayer) {
   const dir = mkdtempSync(join(tmpdir(), "moopay-agent-"));
   const oc = new FakeOneClick(), near = new FakeNear();
   let now = 1_800_000_000_000;
@@ -32,7 +33,7 @@ async function agent(sponsor?: Sponsor) {
   const claims = await ClaimDesk.open({ near: near as unknown as NearOps, tokens: () => svc.payAssets(), units: (t, tok) => svc.claimUnits(t, tok as never), swapOut: (p) => svc.claimSwapOut(p), file: join(dir, "c.json") });
   svc = new MooPayService({ ledger: await Ledger.open(join(dir, "s.json")), oneClick: oc as unknown as OneClick, near: near as unknown as NearOps, confidentiality: "basic", stats: await Stats.open(join(dir, "st.json")), claims });
   const store = await AgentStore.open(join(dir, "a.json"));
-  const ops = new AgentOps(svc, store, () => now, sponsor);
+  const ops = new AgentOps(svc, store, () => now, sponsor, undefined, pr);
   const u = store.open(TOKEN);
   const fund = (usd: number, nearUnits = 200_000_000_000_000_000_000_000n) => { near.tokenBalances.set(u.accountId, BigInt(Math.round(usd * 1e6))); near.nearBalances.set(u.accountId, nearUnits); };
   return { svc, oc, near, store, ops, u, fund, advance: (ms: number) => (now += ms), now: () => now };
@@ -1031,4 +1032,237 @@ test("wallet names: a new account gets name.parent with the same key; taken, res
   a.near.tokenBalances.set(b.accountId, 5_000_000n);
   await assert.rejects(named.setName(b, "fresh"), /before the account is used/);
   await assert.rejects(a.ops.setName(a.store.open("m".repeat(43)), "fresh"), /not switched on/);
+});
+
+test("preflight: a big first payment shows a card built from the payment: address, amounts and fees", async () => {
+  const a = await agent();
+  a.fund(100);
+  const r = await a.ops.send(a.u, { amountUsd: "15", chain: "near", recipient: BOB });
+  const pf = (r.card as { preflight: { intent: string; to: string; pay: string; fees: string; checks: string[]; notes: string[]; profile?: unknown } }).preflight;
+  assert.equal(pf.intent, "SEND · $15.00 · USDC · to bob.near · NEAR network");
+  assert.equal(pf.to, BOB);
+  assert.equal(pf.pay, "$15.00");
+  assert.equal(pf.fees, "none added", "a straight USDC transfer adds no swap fee");
+  assert.equal(pf.profile, undefined);
+  assert.ok(pf.checks.includes("This account exists on NEAR"));
+  assert.deepEqual(pf.notes, ["First payment to this address"]);
+  assert.equal(a.u.approvals[0]?.pf?.to, BOB, "kept with the approval, so the card survives a reload");
+});
+
+test("preflight: a cross-chain send shows what the receiver gets and what the route costs on top", async () => {
+  const a = await agent();
+  a.fund(100);
+  const r = await a.ops.send(a.u, { amountUsd: "20", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" });
+  const pf = (r.card as { preflight: { receive: string; pay: string; fees: string } }).preflight;
+  assert.match(pf.receive, /USDC$/);
+  assert.equal(pf.pay, "$20.20", "the fake route adds 1%");
+  assert.equal(pf.fees, "$0.20");
+});
+
+test("preflight: a small payment to an address that nearly matches a known one asks first", async () => {
+  const a = await agent();
+  a.fund(100);
+  await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: "alice-wonderland.near" }); // small, so it just goes and becomes known
+  const typo = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: "alice-wonderlend.near" });
+  assert.equal(typo.result["status"], "needs_approval");
+  assert.match(String(typo.result["reason"]), /almost the same as alice-wonderland\.near/);
+  assert.equal(a.near.transfers.length, 1, "only the first payment moved money");
+  const again = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: "alice-wonderland.near" });
+  assert.equal(again.result["status"], "sent", "the real address is not slowed down");
+});
+
+test("preflight: a named NEAR account that does not exist is refused, not asked about", async () => {
+  const a = await agent();
+  a.fund(100);
+  a.near.missing.add("ghost.near");
+  const r = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: "ghost.near" });
+  assert.equal(r.result["status"], "denied");
+  assert.match(String(r.result["reason"]), /does not exist on NEAR/);
+  assert.equal(a.near.transfers.length, 0);
+});
+
+/** An agent with the private route switched on, the user's setting on, and money in the wallet. */
+async function privateAgent() {
+  const ol = new FakeOutLayer();
+  const a = await agent(undefined, ol as unknown as OutLayer);
+  a.fund(100);
+  await a.ops.rules(a.u, { privateSends: true });
+  return { ...a, ol };
+}
+
+test("private route: pays the OutLayer deposit address, waits for the private balance, pays the receiver, then delivers", async () => {
+  const a = await privateAgent();
+  const r = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  assert.equal(r.result["status"], "sent");
+  assert.match(String(r.result["note"]), /private route/);
+  assert.equal(a.ol.registered, 1);
+  assert.equal(a.u.outlayer?.key, "wk_fake");
+  assert.deepEqual(a.ol.deposits, [{ chain: "near", token: "USDC", amount: "5000000" }]);
+  assert.equal(a.near.transfers.at(-1)?.to, "a".repeat(64), "the agent wallet paid the bridge address, not the receiver");
+  const p = a.u.payments[0]!;
+  assert.equal(p.status, "PRIVATE_FUNDING");
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "PRIVATE_FUNDING", "the private balance is still empty");
+  assert.equal(a.ol.withdraws.length, 0);
+  a.ol.confidential = 5_000_000n;
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "PRIVATE_SENDING");
+  assert.deepEqual(a.ol.withdraws[0]?.body, { chain: "near", to: BOB, amount: "5000000", token: USDC });
+  const out = await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "DELIVERED");
+  assert.equal(p.settled, true);
+  assert.equal(out.link, "https://nearblocks.io/txns/txdest");
+  assert.equal(a.u.spent.usd, 5, "it counts against the daily limit");
+});
+
+test("private route: when it cannot be used, it says so and sends nothing; a normal send still works when asked for", async () => {
+  const a = await privateAgent();
+  const plain = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB, private: false });
+  assert.equal(plain.result["status"], "sent");
+  assert.equal(a.near.transfers.at(-1)?.to, BOB);
+  assert.equal(a.ol.registered, 0, "no OutLayer wallet is made for a normal send");
+  const off = await agent();
+  off.fund(100);
+  const none = await off.ops.send(off.u, { amountUsd: "5", chain: "near", recipient: BOB, private: true });
+  assert.equal(none.result["status"], "not_private");
+  assert.match(String(none.result["reason"]), /isn't switched on/);
+  assert.equal(off.near.transfers.length, 0);
+  await assert.rejects(off.ops.rules(off.u, { privateSends: true }), code("INVALID_INPUT"));
+});
+
+test("private route: USDC to another chain leaves the private balance as USDC, no conversion", async () => {
+  process.env["MOOPAY_PRIVATE_ALL"] = "1"; // these paths are off by default
+  try {
+  const a = await privateAgent();
+  await a.ops.send(a.u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" });
+  const p = a.u.payments[0]!;
+  assert.equal(p.chain, "eth");
+  const funded = a.ol.deposits[0]!.amount;
+  a.ol.confidential = BigInt(funded);
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(a.ol.swaps.length, 0);
+  assert.deepEqual(a.ol.withdraws[0]?.body, { chain: "eth", to: ETH_ADDR, amount: funded, token: USDC });
+  const out = await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "DELIVERED");
+  assert.equal(out.link, "https://etherscan.io/tx/txdest");
+  } finally { delete process.env["MOOPAY_PRIVATE_ALL"]; }
+});
+
+test("private route: another coin is converted inside the private balance first, then the whole result is paid out", async () => {
+  process.env["MOOPAY_PRIVATE_ALL"] = "1"; // these paths are off by default
+  try {
+  const a = await privateAgent();
+  const SOL = "nep141:sol.omft.near";
+  await a.ops.send(a.u, { amountUsd: "5", chain: "sol", recipient: "11111111111111111111111111111111" });
+  const p = a.u.payments[0]!;
+  const funded = a.ol.deposits[0]!.amount;
+  a.ol.confidential = BigInt(funded);
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "PRIVATE_CONVERTING");
+  assert.deepEqual(a.ol.swaps[0], { token_in: USDC, token_out: SOL, amount_in: funded, min_amount_out: "49500000" });
+  assert.equal(a.ol.withdraws.length, 0, "nothing is paid out before the conversion ends");
+  a.ol.balances.set(SOL, 49_900_000n);
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "PRIVATE_SENDING");
+  assert.deepEqual(a.ol.withdraws[0]?.body, { chain: "sol", to: "11111111111111111111111111111111", amount: "49900000", token: SOL });
+  assert.match(a.ol.withdraws[0]!.idem, /-out$/);
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "DELIVERED");
+  } finally { delete process.env["MOOPAY_PRIVATE_ALL"]; }
+});
+
+test("private route: a conversion that fails sends the USDC back; a payout that fails after converting keeps it private and says where", async () => {
+  process.env["MOOPAY_PRIVATE_ALL"] = "1"; // these paths are off by default
+  try {
+  const a = await privateAgent();
+  await a.ops.send(a.u, { amountUsd: "5", chain: "sol", recipient: "11111111111111111111111111111111" });
+  const p = a.u.payments[0]!;
+  a.ol.confidential = BigInt(a.ol.deposits[0]!.amount);
+  await a.ops.refresh(a.u, p, CTX);
+  a.ol.requestStatus = "failed";
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "REFUNDED");
+  assert.equal(a.ol.withdraws.at(-1)?.body.token, USDC);
+  assert.equal(a.ol.withdraws.at(-1)?.body.to, a.u.accountId);
+
+  const b = await privateAgent();
+  await b.ops.send(b.u, { amountUsd: "5", chain: "sol", recipient: "11111111111111111111111111111111" });
+  const q = b.u.payments[0]!;
+  b.ol.confidential = BigInt(b.ol.deposits[0]!.amount);
+  await b.ops.refresh(b.u, q, CTX);
+  b.ol.balances.set("nep141:sol.omft.near", 49_900_000n);
+  await b.ops.refresh(b.u, q, CTX);
+  b.ol.requestStatus = "failed";
+  await b.ops.refresh(b.u, q, CTX);
+  assert.equal(q.status, "FAILED");
+  assert.match(q.why ?? "", /private balance \(wallet f+\)/);
+  assert.equal(b.ol.withdraws.length, 1, "no automatic send of the converted coin to the agent wallet");
+  } finally { delete process.env["MOOPAY_PRIVATE_ALL"]; }
+});
+
+test("private route: only USDC to a NEAR wallet is allowed for now; other chains and coins are refused and nothing moves", async () => {
+  const a = await privateAgent();
+  const eth = await a.ops.send(a.u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" });
+  assert.equal(eth.result["status"], "not_private");
+  assert.match(String(eth.result["reason"]), /only sends USDC to a NEAR wallet/);
+  const sol = await a.ops.send(a.u, { amountUsd: "5", chain: "sol", recipient: "11111111111111111111111111111111" });
+  assert.equal(sol.result["status"], "not_private");
+  assert.equal(a.near.transfers.length, 0);
+  assert.equal(a.ol.registered, 0);
+});
+
+test("private route: a second private payment waits for the first", async () => {
+  const a = await privateAgent();
+  await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  const second = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: "carol.near" });
+  assert.equal(second.result["status"], "not_private");
+  assert.match(String(second.result["reason"]), /still on its way/);
+});
+
+test("private route: if the bridge address cannot be had, nothing is sent", async () => {
+  const a = await privateAgent();
+  a.ol.failDeposit = true;
+  await assert.rejects(a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }), code("UPSTREAM_TIMEOUT"));
+  assert.equal(a.near.transfers.length, 0);
+  assert.equal(a.u.payments.length, 0);
+});
+
+test("private route: a payout that fails sends the money back to the agent wallet", async () => {
+  const a = await privateAgent();
+  await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  const p = a.u.payments[0]!;
+  a.ol.confidential = 5_000_000n;
+  await a.ops.refresh(a.u, p, CTX);
+  a.ol.requestStatus = "refunded";
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "REFUNDED");
+  assert.equal(p.settled, true);
+  const back = a.ol.withdraws.at(-1)!;
+  assert.equal(back.body.to, a.u.accountId);
+  assert.match(back.idem, /-back$/);
+});
+
+test("private route: money that never shows in the private balance ends the payment after 45 minutes", async () => {
+  const a = await privateAgent();
+  await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  const p = a.u.payments[0]!;
+  a.advance(46 * 60_000);
+  await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "FAILED");
+  assert.match(p.why ?? "", /never showed up/);
+  assert.equal(a.ol.withdraws.length, 0);
+});
+
+test("private route: a first big payment asks first, the card says it is private, and approving keeps it private", async () => {
+  const a = await privateAgent();
+  const r = await a.ops.send(a.u, { amountUsd: "15", chain: "near", recipient: BOB });
+  assert.equal(r.result["status"], "needs_approval");
+  assert.equal(a.ol.deposits.length, 0, "nothing moved before the OK");
+  const pf = (r.card as { preflight: { intent: string; notes: string[] } }).preflight;
+  assert.match(pf.intent, /PRIVATE ROUTE \(beta\)$/);
+  assert.ok(pf.notes.some((n) => /still public/.test(n)));
+  await a.ops.rules(a.u, { privateSends: false });
+  const done = await a.ops.resolve(a.u, r.result["approvalId"] as string, true, CTX);
+  assert.equal(done.result["status"], "sent");
+  assert.equal(a.ol.deposits.length, 1, "approved as private even though the setting was turned off meanwhile");
 });

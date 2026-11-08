@@ -320,7 +320,7 @@ function card(c) {
       h("div", { class: "sub", style: "margin-top:10px" }, "Ask me to unstake any time. The NEAR is ready to withdraw a day or two later and I'll tell you."));
     case "approval": return approvalCard(c);
     case "list": return c.items.length ? h("div", { class: "list" }, c.items.map((i) => h("div", { class: "li" }, h("b", {}, (i.kind === "claim" ? "Claim for " : i.kind === "sweep" ? "Sent to your wallet " : "Sent to ") + short(i.to) + " · " + usd(i.amountUsd)), h("span", {}, new Date(i.at).toLocaleString() + " · " + i.status.replaceAll("_", " ").toLowerCase())))) : h("div", { class: "sub" }, "Nothing yet.");
-    case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.pendingPayout ? row("Changing to", short(c.rules.pendingPayout.address) + " on " + new Date(c.rules.pendingPayout.at).toLocaleString()) : null, c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);
+    case "rules": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your rules"), row("Working float", usd(c.rules.floatUsd)), row("Daily limit", usd(c.rules.dailyCapUsd)), row("New recipient, ask above", usd(c.rules.newRecipientLimitUsd)), row("Always ask above", usd(c.rules.approveAboveUsd)), row("Payout wallet", c.rules.payoutAddress ? short(c.rules.payoutAddress) : "not set"), c.rules.privateSends ? row("Private sends", "on (beta)") : null, c.rules.pendingPayout ? row("Changing to", short(c.rules.pendingPayout.address) + " on " + new Date(c.rules.pendingPayout.at).toLocaleString()) : null, c.rules.allowedChains ? row("Only chains", c.rules.allowedChains.join(", ").toUpperCase()) : null, c.rules.allowedAssets ? row("Only assets", c.rules.allowedAssets.join(", ")) : null);
     case "agentkey": return h("div", { class: "card" }, h("div", { class: "sub" }, "Agent key for " + c.name + ". Copy it now; it is not shown again."),
       h("div", { class: "code" }, h("code", {}, c.key), h("button", { onclick: (e) => copy(c.key, e.target) }, "Copy")),
       c.dailyUsd ? row("Daily limit", usd(c.dailyUsd)) : null, c.totalUsd ? row("Total budget", usd(c.totalUsd)) : null, c.perPaymentUsd ? row("Per payment", usd(c.perPaymentUsd)) : null,
@@ -331,9 +331,19 @@ function card(c) {
     default: return h("div", { class: "sub" }, c.text || "");
   }
 }
+/* The check shown before anything moves: built by the server from the payment itself. */
+function preflight(p) {
+  return h("div", { style: "margin:10px 0;padding:10px;border:1px solid #333;border-radius:10px" },
+    h("div", { class: "sub" }, "You asked me to"), h("b", { style: "display:block;margin:2px 0 8px;word-break:break-word" }, p.intent),
+    h("div", { class: "sub" }, "Sending to this address"), h("div", { style: "word-break:break-all;font-weight:600;margin:2px 0 8px" }, p.to),
+    p.receive ? row("They receive", p.receive) : null, row("You pay", p.pay), row("Fees", p.fees),
+    p.warnings.map((t) => h("div", { style: "color:#ffb454;margin-top:6px" }, "⚠ " + t)),
+    p.notes.map((t) => h("div", { class: "sub", style: "margin-top:4px" }, "• " + t)),
+    p.checks.map((t) => h("div", { class: "sub", style: "margin-top:4px" }, "✓ " + t)));
+}
 function approvalCard(c) {
-  const ok = h("button", { class: "btn" }, "Approve"), no = h("button", { class: "btn ghost" }, "Decline");
-  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), (c.details || []).map(([k, v]) => h("div", { class: "row" }, h("span", {}, k), h("b", { style: "word-break:break-all;text-align:right;max-width:70%" }, v))), h("div", { class: "btns" }, ok, no));
+  const ok = h("button", { class: "btn" }, "Confirm"), no = h("button", { class: "btn ghost" }, "Decline");
+  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), c.preflight ? preflight(c.preflight) : null, (c.details || []).map(([k, v]) => h("div", { class: "row" }, h("span", {}, k), h("b", { style: "word-break:break-all;text-align:right;max-width:70%" }, v))), h("div", { class: "btns" }, ok, no));
   const act = async (yes) => {
     ok.disabled = no.disabled = true; el.style.opacity = ".7"; work(true, yes ? "Working…" : "Cancelling");
     try {

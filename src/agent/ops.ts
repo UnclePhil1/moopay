@@ -5,6 +5,8 @@ import { MoopayError, asMoopayError } from "../util/errors.js";
 import { isNearAccountId, parseDecimal } from "./pay.js";
 import { isClaimChain, validAddress } from "./chains/index.js";
 import { RNEAR, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, unstaking, WRAP } from "./rhea.js";
+import { preflight, type Preflight } from "./preflight.js";
+import { OutLayerError, type OutLayer } from "./outlayer.js";
 import type { MooPayService } from "./service.js";
 import { alertOwner } from "../util/alert.js";
 import { agentDeny, decide, earnPoints, nameProblem, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
@@ -21,6 +23,8 @@ export interface SendParams {
   amountUsd?: string | undefined; amount?: string | undefined; chain: string; recipient: string; assetSymbol?: string | undefined;
   /** true: pay from the agent wallet. false, or a fromChain: the user signs in their own wallet. Unset: the agent wallet only when it can cover it. */
   useAgentWallet?: boolean | undefined; fromChain?: string | undefined; fromSymbol?: string | undefined;
+  /** true: through the private route (beta). false: the normal route. Unset: the user's setting. */
+  private?: boolean | undefined;
 }
 
 const MAX_GROUP = 20;
@@ -51,6 +55,8 @@ const NAME_DEPOSIT = 5_000_000_000_000_000_000_000n; // 0.005 NEAR
 const NAME_STORAGE_USDC = 1_250_000_000_000_000_000_000n; // NEP-145 registration so USDC can be sent to the new name
 const SPONSOR_AMOUNT = 50_000_000_000_000_000_000_000n; // 0.05 NEAR, enough for a few dozen transfers
 const AGENT_KEY_DEFAULT_HOURS = 24 * 7;
+/** A private payment waits this long for its money to show in the private balance before it is given up on. */
+const PRIVATE_FUND_WAIT = 45 * 60_000;
 const ADVANCE = 50_000_000_000_000_000_000_000n; // 0.05 NEAR lent to a wallet that holds wNEAR but no NEAR; paid back out of that wallet once it has staked
 const SPONSOR_LOW = 2_000_000_000_000_000_000_000_000n; // alert below 2 NEAR
 const LOW_GAS = 20_000_000_000_000_000_000_000n; // 0.02 NEAR
@@ -70,11 +76,11 @@ export function approvalCard(a: Approval): Record<string, unknown> {
     const lines = (p["items"] as Record<string, unknown>[]).map((i): [string, string] => [String(i["recipient"] ?? i["receiver"]), `${i["amountUsd"] ? "$" + i["amountUsd"] : `${i["amount"]} ${i["assetSymbol"] ?? ""}`.trim()} (${String(i["chain"] ?? "near").toUpperCase()}${i["assetSymbol"] && i["amountUsd"] ? " " + String(i["assetSymbol"]).toUpperCase() : ""})`]);
     return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: lines };
   }
-  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: rows.filter((r): r is [string, string] => Boolean(r[1])) };
+  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: rows.filter((r): r is [string, string] => Boolean(r[1])), ...(a.pf ? { preflight: a.pf } : {}) };
 }
 
 export class AgentOps {
-  constructor(private readonly svc: MooPayService, private readonly store: AgentStore, private readonly now: () => number = Date.now, private readonly sponsor?: Sponsor, private readonly names?: NameParent) {}
+  constructor(private readonly svc: MooPayService, private readonly store: AgentStore, private readonly now: () => number = Date.now, private readonly sponsor?: Sponsor, private readonly names?: NameParent, private readonly pr?: OutLayer) {}
   private get near() { return this.svc.nearOps; }
 
   /** Everything the wallet holds. `totalUsd` counts USDC, USDT and NEAR together; fees are never shown separately. */
@@ -193,24 +199,30 @@ export class AgentOps {
     }
     // The agent wallet is optional: it pays only when asked to, or when it already holds enough. Otherwise the user signs in their own wallet.
     const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct, units)));
+    const priv = p.private ?? !!u.rules.privateSends;
+    if (priv) { const why = this.privateWhy(u, chain, own, dest.assetId === usdc.assetId); if (why) return { result: { status: "not_private", reason: why, hint: "Tell the user why. Send it the normal way only if they say so (call send_money again with private false)." } }; }
     if (own) return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt), fromChain: p.fromChain, fromSymbol: p.fromSymbol }, ctx!);
-    const expected = direct ? undefined : await this.preview(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
+    const quote = direct ? undefined : await this.preview(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
+    const expected = quote?.text;
     const denied = this.blocked(u, who, amt, chain, sym, p.recipient);
     if (denied) return { result: { status: "denied", reason: denied } };
-    const d = decide(u, amt, key, this.now());
+    let d = decide(u, amt, key, this.now());
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const what = coinUnits ? `${p.amount} ${sym}` : usd(amt);
-    const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}` + (expected ? ` (they get exactly ${expected}; fees are added on top)` : "");
-    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
+    const pf = approved ? undefined : await preflight(this.near, u, { chain, recipient: p.recipient, what, sym, receive: expected, private: priv, pay: usd(quote ? Math.max(quote.payUsd, amt) : amt), fees: quote && quote.payUsd - amt >= 0.005 ? usd(quote.payUsd - amt) : "none added" });
+    if (pf?.missing) return { result: { status: "denied", reason: `${p.recipient} does not exist on NEAR, so money sent there could be lost. Ask the user to check the address.` } };
+    if (pf?.warnings.length && d.action === "auto") d = { action: "ask", reason: pf.warnings[0]! };
+    const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
+    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf);
     let pay: Payment;
     try {
-      pay = direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
+      pay = priv ? await this.doPrivate(u, usdc, p, chain, sym, dest, destUnits, units, amt, who.ak) : direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
     } catch (e) {
       // Short on the agent wallet after all (fees, a price move): hand over to the user's own wallet instead of failing.
       if (ctx && !who.ak && p.useAgentWallet !== true && asMoopayError(e).code === "NOTE_NOT_FUNDED") return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt) }, ctx);
       throw e;
     }
-    return { result: { status: "sent", paymentId: pay.id, ...(expected ? { expected } : {}), note: pay.settled ? "delivered" : "on its way; I will tell the user when it lands" }, card: this.paymentCard(pay) };
+    return { result: { status: "sent", paymentId: pay.id, ...(expected ? { expected } : {}), note: pay.settled ? "delivered" : priv ? "on its way through the private route; it takes about a minute and I will tell the user when it lands" : "on its way; I will tell the user when it lands" }, card: this.paymentCard(pay) };
   }
 
   /* ---- group payouts: many receivers, chains and assets in one go ---- */
@@ -307,9 +319,9 @@ export class AgentOps {
     const r = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: out.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun, exactOutput: true })) as { amountIn: string; depositAddress?: string };
     return { dest, amountIn: BigInt(r.amountIn), depositAddress: r.depositAddress };
   }
-  private async preview(u: UserRec, usdc: { assetId: string; decimals: number }, out: bigint, chain: string, p: SendParams): Promise<string> {
+  private async preview(u: UserRec, usdc: { assetId: string; decimals: number }, out: bigint, chain: string, p: SendParams): Promise<{ text: string; payUsd: number }> {
     const r = await this.exactOut(u, usdc, out, chain, p, true);
-    return `${fmt(out, r.dest.decimals)} ${r.dest.symbol}`;
+    return { text: `${fmt(out, r.dest.decimals)} ${r.dest.symbol}`, payUsd: Number(r.amountIn) / 10 ** usdc.decimals };
   }
   private async destAsset(chain: string, symbol?: string) {
     let want = (symbol ?? NATIVE[chain] ?? "").toUpperCase();
@@ -361,6 +373,82 @@ export class AgentOps {
     if (!u.known.includes(key)) u.known.push(key);
   }
   private paymentCard(p: Payment) { return { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, expected: p.expected, tx: p.chain === "near" && p.txHash ? EXPLORER.near + p.txHash : undefined }; }
+
+  /* ---- the private route (beta): the agent wallet pays into the user's OutLayer wallet, which converts if needed and pays the receiver from a private balance ---- */
+  /** Why this payment cannot use the private route, in words for the user; undefined when it can. */
+  private privateWhy(u: UserRec, chain: string, ownWallet: boolean, nearUsdc: boolean): string | undefined {
+    if (!this.pr) return "The private route isn't switched on for this MooPay yet.";
+    // Only USDC to a NEAR wallet has been run live. Payouts to Solana failed three times in testing, so the rest stays off unless MOOPAY_PRIVATE_ALL=1.
+    if (!nearUsdc && process.env["MOOPAY_PRIVATE_ALL"] !== "1") return "The private route (beta) only sends USDC to a NEAR wallet for now. Other chains and coins are not available yet.";
+    if (chain === "btc") return "The private route can't pay Bitcoin addresses yet.";
+    if (ownWallet) return "The private route pays from the agent wallet, which doesn't hold enough for this.";
+    if (u.payments.some((x) => x.pv && !x.settled)) return "Another private payment is still on its way. Wait for it to land first.";
+    return undefined;
+  }
+  private async outlayerWallet(u: UserRec): Promise<{ key: string; account: string }> {
+    if (u.outlayer) return u.outlayer;
+    const w = await this.pr!.register();
+    u.outlayer = { key: w.api_key, account: w.near_account_id };
+    this.store.save(); // the key is shown once, so keep it before anything else happens
+    return u.outlayer;
+  }
+  /** How the receiver gets paid from the private balance: USDC leaves as it is, to any chain that lists USDC; anything else is swapped inside first. */
+  private privatePlan(usdc: { assetId: string }, dest: { assetId: string; blockchain: string; symbol: string }, destUnits: bigint): NonNullable<Payment["pv"]>["out"] {
+    if (dest.assetId === usdc.assetId) return { chain: "near", token: usdc.assetId };
+    if (dest.symbol.toUpperCase() === "USDC") return { chain: dest.blockchain, token: usdc.assetId };
+    return { chain: dest.blockchain, token: dest.assetId, swapTo: dest.assetId, minOut: ((destUnits * 99n) / 100n).toString() };
+  }
+  private async doPrivate(u: UserRec, usdc: { assetId: string; contract: string; decimals: number }, p: SendParams & { recipient: string }, chain: string, sym: string, dest: { assetId: string; blockchain: string; symbol: string }, destUnits: bigint, units: bigint, amt: number, ak?: AgentKey): Promise<Payment> {
+    const out = this.privatePlan(usdc, dest, destUnits);
+    // What goes in: the amount as asked, or, when it has to be converted or bridged, what the normal route says that costs with fees.
+    const fund = dest.assetId === usdc.assetId ? units : (await this.exactOut(u, usdc, destUnits, chain, { ...p, assetSymbol: sym }, true)).amountIn;
+    await this.ensureUsdc(u, fund);
+    if ((await this.balances(u)).nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", "I can't pay the network fee for this yet. Add a little more money (about $0.50) and try again.");
+    const ow = await this.outlayerWallet(u);
+    let dep;
+    try { dep = await this.pr!.depositAddress(ow.key, { chain: "near", token: "USDC", amount: fund.toString() }); }
+    catch (e) { throw new MoopayError("UPSTREAM_TIMEOUT", `The private route isn't available right now${e instanceof OutLayerError ? ` (${e.code})` : ""}. Nothing was sent.`); }
+    const k = this.store.keyOf(u);
+    const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: dep.deposit_address, amount: fund });
+    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain, recipient: p.recipient, status: "PRIVATE_FUNDING", createdAt: this.now(), txHash: r.txHash, pv: { step: "funding", amt: fund.toString(), idem: randomBytes(16).toString("hex"), out }, ...(ak ? { agentId: ak.id } : {}) };
+    this.spend(u, amt, this.recipientKey(chain, p.recipient), ak);
+    u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100);
+    this.store.save();
+    return pay;
+  }
+  /** Moves a private payment one step on: waits for the money in the private balance, converts it if needed, pays the receiver, follows it to the end. */
+  private async refreshPrivate(u: UserRec, p: Payment): Promise<{ changed: boolean; link?: string }> {
+    const pv = p.pv!, ow = u.outlayer;
+    if (!ow || !this.pr) return { changed: false };
+    const before = p.status, usdcId = (await this.svc.usdcAsset()).assetId, pr = this.pr;
+    const giveBack = async (why: string) => { // USDC is still in the private balance: send it home rather than leave it there
+      p.settled = true; p.why = why;
+      try { await pr.withdraw(ow.key, { chain: "near", to: u.accountId, amount: pv.amt, token: usdcId }, pv.idem + "-back"); p.status = "REFUNDED"; }
+      catch { p.status = "FAILED"; p.why += ` Your money is in your private balance (wallet ${ow.account}); I could not move it back yet.`; }
+    };
+    const stuck = (why: string) => { p.status = "FAILED"; p.settled = true; p.why = `${why} Your money is in your private balance (wallet ${ow.account}).`; };
+    const pay = async (token: string, amount: string) => { const op = await pr.withdraw(ow.key, { chain: pv.out.chain, to: p.recipient, amount, token }, pv.idem + (pv.out.swapTo ? "-out" : "")); pv.req = op.request_id; pv.step = "paying"; p.status = "PRIVATE_SENDING"; };
+    try {
+      if (pv.step === "funding") {
+        const have = BigInt((await pr.balance(ow.key, usdcId)).balance ?? "0");
+        if (have >= BigInt(pv.amt)) {
+          if (pv.out.swapTo) { const op = await pr.swap(ow.key, { token_in: usdcId, token_out: pv.out.swapTo, amount_in: pv.amt, ...(pv.out.minOut ? { min_amount_out: pv.out.minOut } : {}) }, pv.idem + "-swap"); pv.req = op.request_id; pv.step = "swapping"; p.status = "PRIVATE_CONVERTING"; }
+          else await pay(usdcId, pv.amt);
+        } else if (this.now() - p.createdAt > PRIVATE_FUND_WAIT) { p.status = "FAILED"; p.settled = true; p.why = `The money never showed up in your private balance (wallet ${ow.account}), so nothing was paid out.`; }
+      } else if (pv.step === "swapping") {
+        const r = await pr.request(ow.key, pv.req!);
+        if (r.status === "success") await pay(pv.out.token, BigInt((await pr.balance(ow.key, pv.out.token)).balance ?? "0").toString());
+        else if (["failed", "refunded", "needs_review"].includes(r.status)) await giveBack("The private payment could not convert your money.");
+      } else {
+        const r = await pr.request(ow.key, pv.req!);
+        const hash = ((r.result?.["swap_details"] as { destinationChainTxHashes?: string[] } | undefined)?.destinationChainTxHashes ?? [])[0];
+        if (r.status === "success") { p.status = "DELIVERED"; p.settled = true; if (hash) p.txHash = hash; this.svc.publicStatsStore?.record(pv.idem, p.amountUsd, u.accountId); }
+        else if (["failed", "refunded", "needs_review"].includes(r.status)) { if (pv.out.swapTo) stuck("The private payout did not finish."); else await giveBack("The private payout did not finish."); }
+      }
+    } catch (e) { if (!(e instanceof OutLayerError) || !e.retryable) { /* looked at again next round */ } }
+    if (p.status !== before) this.store.save();
+    return { changed: p.status !== before, ...(p.status === "DELIVERED" && p.txHash ? { link: (EXPLORER[p.chain] ?? "") + p.txHash } : {}) };
+  }
 
   /* ---- private claims ---- */
   async claim(u: UserRec, p: { amountUsd: string; receiver: string; chain?: string | undefined }, ctx: Ctx, approved = false, who: Who = {}): Promise<Out> {
@@ -440,6 +528,10 @@ export class AgentOps {
     for (const k of ["floatUsd", "dailyCapUsd", "newRecipientLimitUsd", "approveAboveUsd"] as const) {
       if (patch[k] !== undefined) { if (!(Number(patch[k]) > 0)) throw new MoopayError("INVALID_INPUT", `${k} must be above zero`); next[k] = Number(patch[k]); }
     }
+    if (patch.privateSends !== undefined) {
+      if (patch.privateSends && !this.pr) throw new MoopayError("INVALID_INPUT", "The private route isn't switched on for this MooPay yet.");
+      if (patch.privateSends) next.privateSends = true; else delete next.privateSends;
+    }
     for (const k of ["allowedChains", "allowedAssets"] as const) {
       if (patch[k] !== undefined) { const v = patch[k]!.map((x) => x.toLowerCase().trim()).filter(Boolean); if (v.length) next[k] = k === "allowedAssets" ? v.map((x) => x.toUpperCase()) : v; else delete next[k]; }
     }
@@ -502,8 +594,8 @@ export class AgentOps {
   }
   cancel(u: UserRec, taskId: string): Out { u.tasks = u.tasks.filter((t) => t.id !== taskId); this.store.save(); return { result: { status: "cancelled" } }; }
 
-  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string): Out {
-    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending" };
+  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight): Out {
+    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(pf ? { pf } : {}) };
     u.approvals.push(a); this.store.save();
     return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: approvalCard(a) };
   }
@@ -801,6 +893,7 @@ export class AgentOps {
   private async refreshOne(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown }> {
     if (p.settled) return { changed: false };
     if (p.kind === "unstake") return this.refreshUnstake(p, ctx, u);
+    if (p.pv) return this.refreshPrivate(u, p);
     const before = p.status;
     let link: string | undefined;
     if (p.kind === "stake" && p.status === "WAITING_FOR_FEE") { // the money is here; staking waits only for a first network fee

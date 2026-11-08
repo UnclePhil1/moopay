@@ -20,6 +20,9 @@ export const UserFileSchema = z.object({
     events: z.array(looseRecord).optional(),
     chat: z.array(looseRecord).optional(),
   }).passthrough()),
+  /** every payment ever made, kept after it drops out of a user's recent list, and the most each wallet has held */
+  ledger: z.record(z.string(), looseRecord).optional(),
+  peaks: z.record(z.string(), z.number()).optional(),
 });
 
 export const ClaimFileSchema = z.object({

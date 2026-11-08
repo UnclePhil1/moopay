@@ -48,9 +48,18 @@ Rule: `src/server` and `src/ai` reach wallets and chains only through `src/agent
 | `CHAT_RETENTION_DAYS`, `AI_USER_DAILY`, `AI_IP_DAILY`, `AI_TOTAL_DAILY` | Chat expiry and daily AI message caps. |
 | `GAS_SPONSOR_ACCOUNT`, `GAS_SPONSOR_KEY`, `GAS_SPONSOR_DAILY_MAX` | Optional account that lends the first small network fee. |
 | `NAME_PARENT_ACCOUNT`, `NAME_PARENT_KEY`, `NAME_DAILY_MAX` | Account that creates named wallets (`name.<account>`), its key, and how many names may be made per day (default 50). Names are off unless both are set. |
+| `MOOPAY_PRIVATE_ROUTE=1` | Switches on the private route (beta), described below. Off unless set. |
 | `ALERT_WEBHOOK_URL` | Slack or Discord webhook for owner alerts. |
 
 `scripts/backup.mjs` makes and restores encrypted backups of the state files (`BACKUP_KEY`).
+
+## Private route (beta)
+
+Off unless `MOOPAY_PRIVATE_ROUTE=1`. A user can turn on "private sends" in their rules, or ask for one payment to be private ("send $5 to bob.near privately"). For now it only sends **USDC to a NEAR wallet**, the one route that has run against the real service. Everything else is refused with a reason and never silently sent the normal way. The code for other chains and coins (conversion inside the private balance, USDC bridged out) is in place but off: payouts to Solana failed three times in live tests, with OutLayer reporting a failed 1Click delivery and no refund reason. Set `MOOPAY_PRIVATE_ALL=1` to switch it on for testing. Only one private payment can be in flight at a time, so a group payout with private sends on will not get past its first line.
+
+How it works: the agent wallet pays a bridge address from [OutLayer](https://app.outlayer.ai/docs/agent-custody), which credits a private balance held in the user's own OutLayer wallet; OutLayer then pays the receiver from that balance, after converting inside it when the receiver's coin is not USDC (so the receiver gets about the amount shown, within 1%). The conversion and other-chain paths are tested only against a fake. The wallet key OutLayer returns is kept in the encrypted state file. If the payout fails the money is sent back to the agent wallet; if it never reaches the private balance the payment ends after 45 minutes.
+
+What it does and does not hide: on the public chain the receiver gets paid by `intents.near` and the payer's OutLayer wallet does not appear, so the chain does not link the user's wallet to the receiver. The receiver and amount are public, OutLayer and the Defuse/1Click solvers can see the payment, and timing and amount can still link the deposit to the payout. OutLayer's own docs say its governance currently runs on single keys and the coordinator is closed source. It works on mainnet only, so it is only tested here against a fake. `scripts/outlayer-probe.ts` runs the real steps one at a time with small amounts.
 
 ## Deploy
 

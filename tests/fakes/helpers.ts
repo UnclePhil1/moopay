@@ -57,6 +57,9 @@ export class FakeNear {
   registered = new Set<string>();
   async storageRegistered(_t: string, a: string) { return this.registered.has(a); }
   async nearBalance(a: string) { return this.nearBalances.get(a) ?? 0n; }
+  /** Named accounts a test wants to look like they were never created. */
+  missing = new Set<string>();
+  async exists(a: string) { return !this.missing.has(a); }
   badSigner = false;
   async verifyOwner() { if (this.badSigner) throw new MoopayError("BAD_RECIPIENT", "the wallet signature did not check out"); }
   calls: { contractId: string; method: string; args: Record<string, unknown>; deposit: bigint; gas: bigint }[] = [];
@@ -110,3 +113,27 @@ export async function mintFunded(ctx: Awaited<ReturnType<typeof setup>>, amount 
 export const routeArgs = (secretKeyString: string, over: Record<string, unknown> = {}) => ({
   secretKeyString, destinationChain: "eth", destinationAssetId: ETH_USDC, recipient: ETH_ADDR, dryRun: false, ...over,
 });
+
+/** A stand-in for OutLayer's private route: a balance the test fills by hand, and a payout whose ending the test picks. */
+export class FakeOutLayer {
+  registered = 0;
+  deposits: { chain: string; token?: string; amount: string }[] = [];
+  withdraws: { body: { chain: string; to: string; amount: string; token: string }; idem: string }[] = [];
+  /** The private balance by token; `confidential` is the USDC part. */
+  balances = new Map<string, bigint>();
+  get confidential() { return this.balances.get(USDC) ?? 0n; }
+  set confidential(v: bigint) { this.balances.set(USDC, v); }
+  swaps: { token_in: string; token_out: string; amount_in: string; min_amount_out?: string }[] = [];
+  failDeposit = false;
+  requestStatus = "success";
+  async register() { this.registered++; return { api_key: "wk_fake", near_account_id: "f".repeat(64) }; }
+  async depositAddress(_k: string, p: { chain: string; token?: string; amount: string }) {
+    if (this.failDeposit) throw new (await import("../../src/agent/outlayer.js")).OutLayerError(503, "confidential_unavailable", "off");
+    this.deposits.push(p);
+    return { intent_id: "i1", deposit_address: "a".repeat(64), amount: p.amount };
+  }
+  async balance(_k: string, token?: string) { return { balance: (this.balances.get(token ?? USDC) ?? 0n).toString() }; }
+  async swap(_k: string, body: { token_in: string; token_out: string; amount_in: string; min_amount_out?: string }) { this.swaps.push(body); return { request_id: `swap-${this.swaps.length}`, status: "pending_deposit" }; }
+  async withdraw(_k: string, body: { chain: string; to: string; amount: string; token: string }, idem: string) { this.withdraws.push({ body, idem }); return { request_id: `req-${this.withdraws.length}`, status: "pending_deposit" }; }
+  async request() { return { status: this.requestStatus, result: { swap_details: { destinationChainTxHashes: ["txdest"] } } }; }
+}

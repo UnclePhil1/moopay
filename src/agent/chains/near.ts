@@ -12,6 +12,8 @@ export interface NearOps {
   ftBalance(tokenContract: string, accountId: string): Promise<bigint>;
   /** NEP-145 storage registration of `accountId` on the token contract. */
   storageRegistered(tokenContract: string, accountId: string): Promise<boolean>;
+  /** Whether the account exists on chain. Throws when the RPC cannot say. */
+  exists(accountId: string): Promise<boolean>;
   /** Native NEAR balance in yocto; 0 when the account does not exist yet. */
   nearBalance(accountId: string): Promise<bigint>;
   /** Throws unless `signature` is a valid NEP-413 signature by an access key of `accountId`. */
@@ -67,6 +69,17 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const r = await provider.callFunction({ contractId: tokenContract, method: "storage_balance_of", args: { account_id: accountId } });
         return r !== null && r !== undefined;
       } catch {
+        throw rpcDown();
+      }
+    },
+
+    async exists(accountId) {
+      try {
+        await provider.viewAccount({ accountId });
+        return true;
+      } catch (e) {
+        const all = [e, ...((e as { errors?: unknown[] }).errors ?? [])];
+        if (all.some((x) => x instanceof Error && /does not exist|UNKNOWN_ACCOUNT|AccountDoesNotExist/i.test(`${x.name} ${x.message}`))) return false;
         throw rpcDown();
       }
     },

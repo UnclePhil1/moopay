@@ -6,3 +6,4 @@ src/web/public/dist
 moopay-state.json*
 *.seed
 test
+src/stat

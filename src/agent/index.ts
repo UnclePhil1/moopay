@@ -7,6 +7,7 @@ import { makeNearOps } from "./chains/near.js";
 import { OneClick } from "./intents/oneclick.js";
 import { MooPayService } from "./service.js";
 import type { NameParent, Sponsor } from "./ops.js";
+import { OutLayer } from "./outlayer.js";
 
 /*
  * The agent gateway. Everything outside src/agent (the HTTP server, the AI loop, the MCP connector) reaches
@@ -17,6 +18,7 @@ export { AgentOps, approvalCard, type Ctx, type NameParent, type Out, type Spons
 export { AgentStore, SESSION_ENDED, SESSION_MS, type UserRec } from "./store.js";
 export { spentToday } from "./policy.js";
 export { followPayments, tick } from "./worker.js";
+export { OutLayer } from "./outlayer.js";
 
 export async function createService(cfg: Config, vault: Vault = new Vault()): Promise<MooPayService> {
   const near = makeNearOps(cfg);
@@ -49,4 +51,9 @@ export function sponsorFromEnv(env: NodeJS.ProcessEnv = process.env): Sponsor | 
 export function namesFromEnv(env: NodeJS.ProcessEnv = process.env): NameParent | undefined {
   const accountId = env["NAME_PARENT_ACCOUNT"], secretKey = env["NAME_PARENT_KEY"];
   return accountId && secretKey ? { accountId, secretKey } : undefined;
+}
+
+/** The optional private route (beta): off unless MOOPAY_PRIVATE_ROUTE=1. */
+export function privateRouteFromEnv(env: NodeJS.ProcessEnv = process.env): OutLayer | undefined {
+  return env["MOOPAY_PRIVATE_ROUTE"] === "1" ? new OutLayer() : undefined;
 }

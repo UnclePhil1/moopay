@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { asMoopayError, MoopayError } from "../../util/errors.js";
 import { toJson } from "../../util/json.js";
-import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type Sponsor, type UserRec } from "../../agent/index.js";
+import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type OutLayer, type Sponsor, type UserRec } from "../../agent/index.js";
 import { plain, runTurn, type Ctl, type Llm } from "../../ai/loop.js";
 import { alertOwner } from "../../util/alert.js";
 import type { Vault } from "../../storage/index.js";
@@ -13,7 +13,7 @@ const MAX_BODY = 8 * 1024;
 const DELETE_MAX_USD = 0.5;
 const MSGS_PER_MINUTE = 12;
 
-export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined; names?: NameParent | undefined;
+export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined; names?: NameParent | undefined; private?: OutLayer | undefined;
   /** AI messages allowed per day: per user, per IP, and across the whole server (a ceiling on what the AI can cost) */
   aiDaily?: { user: number; ip: number; total: number };
   vault?: Vault | undefined }
@@ -26,9 +26,11 @@ export async function makeAgent(d: AgentDeps) {
   const day = 24 * 3_600_000, cap = d.aiDaily ?? { user: Number(process.env["AI_USER_DAILY"] ?? 100), ip: Number(process.env["AI_IP_DAILY"] ?? 300), total: Number(process.env["AI_TOTAL_DAILY"] ?? 5000) };
   const userDay = rateLimiter(cap.user, day, now), ipDay = rateLimiter(cap.ip, day, now), totalDay = rateLimiter(cap.total, day, now);
   const STRICT = new Set(["name", "session", "reset", "delete", "signout", "export", "freeze"]);
-  const ops = new AgentOps(d.svc, store, now, d.sponsor, d.names);
+  const ops = new AgentOps(d.svc, store, now, d.sponsor, d.names, d.private);
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
+  // The team's numbers page lives in src/stat, which is kept out of git. When the folder is not there the page does not exist.
+  const statModule = import(new URL("../../stat/index.js", import.meta.url).href).then((m) => m as { handleStat(req: IncomingMessage, res: ServerResponse, path: string, users: () => UserRec[], now: number, history?: ReturnType<AgentStore["history"]>): boolean }).catch(() => undefined);
 
   const json = (res: ServerResponse, code: number, data: unknown) => { res.statusCode = code; res.setHeader("content-type", "application/json"); res.setHeader("cache-control", "no-store"); res.end(toJson(data)); };
   const bodyOf = async (req: IncomingMessage): Promise<Record<string, unknown>> => {
@@ -73,7 +75,7 @@ export async function makeAgent(d: AgentDeps) {
     const status = (e as { status?: number }).status;
     if (typeof status === "number") {
       console.error(`[moopay] AI error ${status}` + (process.env["MOOPAY_DEBUG"] ? `: ${(e as Error).message?.slice(0, 200)}` : ""));
-      if (status === 401 || status === 403) return "My AI key was rejected. The owner needs to check ANTHROPIC_API_KEY.";
+      if (status === 401 || status === 403) return "My AI key was rejected. The owner needs to check NEAR_AI_API_KEY or ANTHROPIC_API_KEY.";
       if (status === 404) return "The AI model set on the server was not found. The owner needs to check AGENT_MODEL.";
       if (status === 429 || status === 529 || status >= 500) return "The AI is busy right now. Please try again in a few seconds.";
       return "The AI could not process that. Please try again.";
@@ -91,6 +93,7 @@ export async function makeAgent(d: AgentDeps) {
       json(res, key ? 200 : 404, key ? { link: `${origin}/c/${key}` } : { message: "That wallet is not part of this group link. Check the address." });
       return true;
     }
+    if (p === "/stat" || p === "/stat/data") { const m = await statModule; if (m && m.handleStat(req, res, p, () => store.all(), now(), store.history())) return true; }
     if (!p.startsWith("/agent/api/")) return false;
     lastOrigin = origin;
     const ip = clientIp(req), op0 = p.slice("/agent/api/".length);
