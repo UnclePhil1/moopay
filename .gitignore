@@ -12,4 +12,3 @@ moopay-state.json*
 !.env.example
 src/web/public/dist
 .outlayer-probe.json
-src/stat
