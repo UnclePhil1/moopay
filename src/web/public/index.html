@@ -279,24 +279,24 @@ function card(c) {
     case "payment": {
       const tone = /DELIVERED|CLAIMED/.test(c.status) ? "ok" : /FAIL|REFUND/.test(c.status) ? "bad" : "";
       return h("div", { class: "card" }, h("div", { class: "sub" }, "Payment"), h("div", { class: "big" }, c.unit ? c.amountUsd + " " + c.unit : usd(c.amountUsd)),
-        row("To", short(c.recipient)), row("Network", CHAIN[c.chain] || c.chain), c.expected ? row("They get", "≈ " + c.expected) : null,
+        row("To", short(c.recipient)), row("Network", CHAIN[c.chain] || c.chain), c.expected ? row("They get", "≈ " + c.expected) : null, c.fees ? row("Fees", c.fees) : null, c.total ? row("Total", c.total) : null,
         row("Status", h("span", { class: "tag " + tone }, c.status.replaceAll("_", " ").toLowerCase())), c.tx ? row("Transaction", h("a", { href: c.tx, target: "_blank", rel: "noopener noreferrer" }, "View")) : null);
     }
     case "claim": return h("div", { class: "card" }, h("div", { class: "sub" }, "Private claim"), h("div", { class: "big" }, usd(c.amountUsd)),
       h("div", { class: "code" }, h("code", {}, c.link), h("button", { onclick: (e) => copy(c.link, e.target) }, "Copy")),
-      row("Only this wallet can claim", short(c.receiver) + (c.chain && c.chain !== "near" ? " (" + c.chain.toUpperCase() + ")" : "")), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
+      row("Only this wallet can claim", short(c.receiver) + (c.chain && c.chain !== "near" ? " (" + c.chain.toUpperCase() + ")" : "")), c.fees ? row("Fees", c.fees) : null, c.total ? row("Total", c.total) : null, row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
     case "deposit": return h("div", { class: "card" }, h("div", { class: "sub" }, "Send from your own wallet"),
       h("div", { class: "big" }, c.amount + " " + c.symbol), row("Network", CHAIN[c.chain] || c.chain.toUpperCase()), row("You send to", short(c.address)),
       h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
       c.memo ? row("Memo (required)", c.memo) : null, c.expected ? row("Result", c.expected) : null, c.expires ? row("Send before", new Date(c.expires).toLocaleTimeString()) : null,
       h("div", { class: "sub", style: "margin-top:10px" }, c.note));
-    case "batch": return h("div", { class: "card" }, h("h3", {}, c.title), ...c.rows.map((r) => h("div", {}, row(short(r.to) + " (" + r.chain + ")", r.amount + " \u00b7 " + r.status), r.url ? h("div", { class: "btns", style: "margin:4px 0 8px" }, h("button", { class: "btn", onclick: () => openSheet(r.url) }, "Confirm and sign")) : null)));
+    case "batch": return h("div", { class: "card" }, h("h3", {}, c.title), ...c.rows.map((r) => h("div", {}, row(short(r.to) + " (" + r.chain + ")", r.amount + " \u00b7 " + r.status), r.url ? h("div", { class: "btns", style: "margin:4px 0 8px" }, h("button", { class: "btn", onclick: () => openSheet(r.url) }, "Confirm and sign")) : null)), c.fees ? row("Fees", c.fees) : null, c.total ? row("Total", c.total) : null);
     case "groupclaim": return h("div", { class: "card" }, h("div", { class: "sub" }, "One link, a private claim for each wallet"), h("div", { class: "big" }, usd(c.total)),
       h("div", { class: "code" }, h("code", {}, c.link), h("button", { onclick: (e) => copy(c.link, e.target) }, "Copy")),
-      ...c.rows.map((r) => row(short(r.to) + " (" + r.chain + ")", r.amount)), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
+      ...c.rows.map((r) => row(short(r.to) + " (" + r.chain + ")", r.amount)), c.fees ? row("Fees", c.fees) : null, row("Total", c.totalPay || usd(c.total)), row("Expires", "in 24 hours"), row("If unclaimed", "comes back to you"));
     case "confirm_send": {
       const go = h("button", { class: "btn", onclick: () => { openSheet(c.url); go.textContent = "Open again"; } }, c.button || "Confirm and sign");
-      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), c.to ? row(c.toLabel || "To", short(c.to) + " (" + c.chain + ")") : null, c.notice ? h("div", { class: "sub", style: "margin:8px 0 0;color:#f4efe6;font-weight:600" }, c.notice) : null,
+      return h("div", { class: "card" }, h("h3", {}, c.title), row("Amount", c.amount), c.fees ? row("Fees", c.fees) : null, c.total ? row("Total", c.total) : null, c.to ? row(c.toLabel || "To", short(c.to) + " (" + c.chain + ")") : null, c.notice ? h("div", { class: "sub", style: "margin:8px 0 0;color:#f4efe6;font-weight:600" }, c.notice) : null,
         h("div", { class: "sub", style: "margin:8px 0 0" }, "Pick the wallet you want to pay from and sign. I will tell you when it lands."), h("div", { class: "btns" }, go));
     }
     case "link": return h("div", { class: "card" }, h("h3", {}, c.title), h("div", { class: "sub", style: "margin:4px 0 0" }, c.note), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => openSheet(c.url) }, c.button)));
@@ -336,7 +336,7 @@ function preflight(p) {
   return h("div", { style: "margin:10px 0;padding:10px;border:1px solid #333;border-radius:10px" },
     h("div", { class: "sub" }, "You asked me to"), h("b", { style: "display:block;margin:2px 0 8px;word-break:break-word" }, p.intent),
     h("div", { class: "sub" }, "Sending to this address"), h("div", { style: "word-break:break-all;font-weight:600;margin:2px 0 8px" }, p.to),
-    p.receive ? row("They receive", p.receive) : null, row("You pay", p.pay), row("Fees", p.fees),
+    p.receive ? row("They receive", p.receive) : null, row("Fees", p.fees), row("Total you pay", p.pay),
     p.warnings.map((t) => h("div", { style: "color:#ffb454;margin-top:6px" }, "⚠ " + t)),
     p.notes.map((t) => h("div", { class: "sub", style: "margin-top:4px" }, "• " + t)),
     p.checks.map((t) => h("div", { class: "sub", style: "margin-top:4px" }, "✓ " + t)));

@@ -20,6 +20,9 @@
   .tile b { display:block; font-size:24px; line-height:1.2; } .tile span { color:var(--muted); font-size:12.5px; }
   .bar { display:flex; align-items:center; gap:10px; margin:6px 0; font-size:13.5px; } .bar i { display:block; height:10px; border-radius:5px; background:var(--ok); min-width:2px; } .bar .l { width:170px; color:var(--muted); flex:none; } .bar .n { color:var(--text); }
   table { width:100%; border-collapse:collapse; font-size:13.5px; } td,th { text-align:right; padding:6px 8px; border-bottom:1px solid var(--line); } th:first-child,td:first-child { text-align:left; } th { color:var(--muted); font-weight:500; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+  .ctl { display:flex; gap:8px; align-items:center; } select, .btn { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:inherit; font-size:13.5px; text-decoration:none; cursor:pointer; }
+  .tw { overflow-x:auto; } td.l, th.l { text-align:left; } .okc { color:var(--ok); } .badc { color:var(--bad); }
     .err { color:var(--bad); font-size:13.5px; margin-top:8px; min-height:20px; }
 </style>
 </head>
@@ -33,13 +36,27 @@ const $ = (id) => document.getElementById(id);
 const h = (tag, attrs, ...kids) => { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); for (const k of kids.flat()) if (k != null) e.append(k.nodeType ? k : document.createTextNode(String(k))); return e; };
 const usd = (n) => "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const tile = (n, label) => h("div", { class: "tile" }, h("b", {}, n), h("span", {}, label));
+let pick = "all"; try { pick = localStorage.getItem("statPick") || "all"; } catch {}
+const when = (t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const bars = (rows, fmt = (x) => x) => { const max = Math.max(1, ...rows.map((r) => r[1])); return rows.map(([l, n]) => h("div", { class: "bar" }, h("span", { class: "l" }, l), h("i", { style: "width:" + Math.round((n / max) * 100) + "%" }), h("span", { class: "n" }, fmt(n)))); };
+const TYPE = { sending: "Sending", received: "Received", swapped: "Swapped", bridged: "Bridged", stakes: "Stakes", claims: "Claims", scheduled: "Scheduled", group: "Group payments" };
+function picker() {
+  const s = h("select", { "aria-label": "Which runs to show" }, h("option", { value: "all" }, "All data"), h("option", { value: "production" }, "Real site only"), h("option", { value: "development" }, "Test runs only"));
+  s.value = pick; s.onchange = () => { pick = s.value; try { localStorage.setItem("statPick", pick); } catch {} load().catch((e) => { $("err").textContent = e.message; }); };
+  return s;
+}
 function render(m) {
   const v = $("view"); v.replaceChildren(...[
-    h("h1", {}, "MooPay stats"), h("div", { class: "sub" }, "Updated " + new Date(m.generatedAt).toLocaleString() + ". Counts include our own test accounts."),
-    h("div", { class: "grid" }, h("div", { class: "tile hero" }, h("b", {}, m.agents.created), h("span", {}, "agents created = users (every user gets one agent wallet)")), h("div", { class: "tile hero" }, h("b", {}, usd(m.tvl.totalUsd)), h("span", {}, "total TVL: deposits + staking")), h("div", { class: "tile hero" }, h("b", {}, usd(m.money.movedUsd)), h("span", {}, "all money moved, " + m.money.transactions + " transactions"))),
-    h("h2", {}, "TVL"), h("div", { class: "grid" }, tile(usd(m.tvl.depositsUsd), "deposited (recorded, or held now if higher)"), tile(usd(m.tvl.stakingUsd), "staking TVL"), tile(m.tvl.stakers, "people staking"), tile(usd(m.tvl.heldNowUsd), "in agent wallets now")),
-    h("div", { class: "sub", style: "margin-top:8px" }, "Staking paid from an agent wallet is counted in both deposits and staking. Staking is worked out from our records at the dollar value when it was staked, not from live prices."),
+    h("div", { class: "top" }, h("div", {}, h("h1", {}, "MooPay stats"), h("div", { class: "sub" }, "Showing " + m.source + ". Updated " + new Date(m.generatedAt).toLocaleString() + ". Counts include our own test accounts.")),
+      h("div", { class: "ctl" }, picker(), h("a", { class: "btn", href: "/stat/export.csv?env=" + pick }, "Export CSV"))),
+    h("div", { class: "grid" }, h("div", { class: "tile hero" }, h("b", {}, m.agents.created), h("span", {}, "agents created = users (every user gets one agent wallet)")), h("div", { class: "tile hero" }, h("b", {}, usd(m.tvl.totalUsd)), h("span", {}, "total TVL: deposits + staking")), h("div", { class: "tile hero" }, h("b", {}, usd(m.tv.totalUsd)), h("span", {}, "TV, total volume: all money moved through MooPay" + (m.tv.since ? " since " + new Date(m.tv.since).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "") + ", " + m.tv.transactions + " transactions"))),
+    h("h2", {}, "Money moved, by kind"), h("div", { class: "grid" }, Object.entries(m.types).map(([k, t]) => tile(usd(t.usd), TYPE[k] + ", " + t.count))),
+    h("div", { style: "margin-top:12px" }, bars(Object.entries(m.types).map(([k, t]) => [TYPE[k], t.usd]), usd)),
+    h("h2", {}, "Live transactions"), h("div", { class: "tw" }, h("table", {}, h("tr", {}, h("th", { class: "l" }, "Time"), h("th", { class: "l" }, "Where"), h("th", { class: "l" }, "Kind"), h("th", {}, "Value"), h("th", {}, "Status")),
+      m.recent.length ? m.recent.map((r) => h("tr", {}, h("td", { class: "l" }, when(r.at)), h("td", { class: "l" }, r.host + (r.env === "production" ? "" : " (test)")), h("td", { class: "l" }, TYPE[r.type] || r.type), h("td", {}, usd(r.usd)), h("td", { class: r.ok ? "okc" : /FAIL|REFUND|EXPIRE/.test(r.status) ? "badc" : "" }, r.status))) : h("tr", {}, h("td", { class: "l", colspan: "5" }, "Nothing yet.")))),
+    h("div", { class: "sub", style: "margin-top:8px" }, "Everything below this point (TVL, people, funnel, health) is worked out from the accounts on this server only."),
+    h("h2", {}, "TVL"), h("div", { class: "grid" }, tile(usd(m.tvl.depositsUsd), "deposited (recorded, or held now if higher)"), tile(usd(m.tvl.stakingUsd), "staking TVL (still staked)"), tile(usd(m.tvl.stakedEverUsd), "staked, all time"), tile(m.tvl.stakers, "people staking"), tile(usd(m.tvl.heldNowUsd), "in agent wallets now")),
+    h("div", { class: "sub", style: "margin-top:8px" }, "TVL is what is held right now, so money you staked and then unstaked, or sent on, drops out of it; \"all money moved\" and \"staked, all time\" keep the history. Deposits only count what we recorded or saw in a wallet. Staking paid from an agent wallet is counted in both deposits and staking. Staking is worked out from our records at the dollar value when it was staked, not from live prices."),
     h("h2", {}, "People"), h("div", { class: "grid" }, tile(m.users.total, "users, all time"), tile(m.users.new24h, "new, 24h"), tile(m.users.new7d, "new, 7 days"), tile(m.users.new30d, "new, 30 days"), tile(m.users.active24h, "active, 24h"), tile(m.users.active7d, "active, 7 days"), tile(m.users.active30d, "active, 30 days"), tile(m.users.named, "picked a name"), tile(m.users.withPoints, "earned moo points"), tile(m.users.frozen, "frozen")),
     h("h2", {}, "Funnel"), bars(m.funnel.map((f) => [f.step, f.users])),
     h("h2", {}, "Money moved, by type"), h("div", { class: "grid" }, tile(usd(m.money.byKindUsd.deposits), "deposits"), tile(usd(m.money.byKindUsd.sends), "sent"), tile(usd(m.money.byKindUsd.claims), "private claims"), tile(usd(m.money.byKindUsd.staked), "staked"), tile(usd(m.money.byKindUsd.withdrawn), "withdrawn"), tile(usd(m.money.byKindUsd.sweptToPayout), "paid out above the float"), tile(usd(m.money.averageUsd), "average transaction"), tile(usd(m.money.largestUsd), "largest transaction"), tile(m.features.points, "moo points given")),
@@ -48,13 +65,15 @@ function render(m) {
     h("div", { style: "margin-top:14px" }, bars(Object.entries(m.money.byKind).sort((a, b) => b[1] - a[1]))),
     h("h2", {}, "Health"), h("div", { class: "grid" }, tile(m.health.failRate + "%", "failed or refunded"), tile(m.health.failed + " / " + m.health.settled, "failed / settled"), tile(m.approvals.approved, "approvals confirmed"), tile(m.approvals.declined, "approvals declined"), tile(m.approvals.expired, "approvals expired"), tile(m.approvals.pending, "approvals waiting"))].flat());
 }
+let timer;
 async function load() {
-  const r = await fetch("/stat/data", { cache: "no-store" });
+  const r = await fetch("/stat/data?env=" + pick, { cache: "no-store" });
+  if (r.status === 401) { clearInterval(timer); location.reload(); return; } // the two hours ran out: back to the password box
   if (!r.ok) throw new Error("Could not load the numbers.");
   render(await r.json()); $("err").textContent = "";
 }
 load().catch((e) => { $("err").textContent = e.message; });
-setInterval(() => load().catch(() => {}), 60000);
+timer = setInterval(() => { if (document.activeElement && document.activeElement.tagName === "SELECT") return; load().catch(() => {}); }, 10000);
 </script>
 </body>
 </html>

@@ -28,5 +28,5 @@ export function asMoopayError(err: unknown): MoopayError {
   if (err instanceof MoopayError) return err;
   // Unknown errors are not echoed: they may carry request bodies or credentials.
   console.error("[moopay] unexpected error:", err instanceof Error ? (process.env["MOOPAY_DEBUG"] ? `${err.name}: ${err.message}` : err.name) : typeof err);
-  return new MoopayError("INTERNAL", "Unexpected internal error");
+  return new MoopayError("INTERNAL", "Something went wrong on my side. If you were sending money, check your activity before trying again.");
 }

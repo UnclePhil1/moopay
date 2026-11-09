@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { swapServiceMessage } from "../../util/friendly.js";
 import { MoopayError, type ErrorCode } from "../../util/errors.js";
 
 /*
@@ -99,8 +100,8 @@ export class OneClick {
       });
     } catch (e) {
       if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError"))
-        throw new MoopayError("UPSTREAM_TIMEOUT", "1Click did not answer in time");
-      throw new MoopayError(failCode, "1Click is unreachable");
+        throw new MoopayError("UPSTREAM_TIMEOUT", "The swap service is slow to answer right now. Nothing was sent. Try again in a minute.");
+      throw new MoopayError(failCode, "I can't reach the swap service right now. Nothing was sent. Try again in a minute.");
     }
     const text = await res.text();
     let body: unknown;
@@ -114,7 +115,7 @@ export class OneClick {
         body && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string"
           ? (body as { message: string }).message.slice(0, 300)
           : `HTTP ${res.status}`;
-      throw new MoopayError(failCode, `1Click rejected the request: ${msg}`, { httpStatus: res.status });
+      throw new MoopayError(failCode, swapServiceMessage(msg, res.status), { httpStatus: res.status, reason: msg });
     }
     return body;
   }
@@ -129,7 +130,7 @@ export class OneClick {
       throw e;
     }
     const parsed = z.array(TokenSchema).safeParse(body);
-    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "1Click returned an unexpected /v0/tokens payload");
+    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "The swap service sent an answer I couldn't read. Try again in a minute.");
     this.tokenCache = { at: this.now(), tokens: parsed.data };
     return parsed.data;
   }
@@ -139,9 +140,19 @@ export class OneClick {
   }
 
   async quote(req: QuoteRequest): Promise<QuoteResponse> {
-    const body = await this.request("/v0/quote", { method: "POST", body: JSON.stringify(req) }, "QUOTE_FAILED");
+    let body: unknown;
+    try { body = await this.request("/v0/quote", { method: "POST", body: JSON.stringify(req) }, "QUOTE_FAILED"); }
+    catch (e) {
+      // "try at least N" is in the paying coin's smallest unit: say it in that coin.
+      const reason = e instanceof MoopayError ? e.details?.["reason"] : undefined;
+      if (typeof reason === "string") {
+        const coin = await this.findToken(req.originAsset).catch(() => undefined);
+        throw new MoopayError("QUOTE_FAILED", swapServiceMessage(reason, e instanceof MoopayError ? (e.details?.["httpStatus"] as number | undefined) : undefined, coin), e instanceof MoopayError ? e.details : undefined);
+      }
+      throw e;
+    }
     const parsed = QuoteResponseSchema.safeParse(body);
-    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "1Click returned an unexpected /v0/quote payload");
+    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "The swap service sent an answer I couldn't read. Try again in a minute.");
     return parsed.data;
   }
 
@@ -160,7 +171,7 @@ export class OneClick {
       "QUOTE_FAILED",
     );
     const parsed = StatusResponseSchema.safeParse(body);
-    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "1Click returned an unexpected /v0/status payload");
+    if (!parsed.success) throw new MoopayError("QUOTE_FAILED", "The swap service sent an answer I couldn't read. Try again in a minute.");
     return parsed.data;
   }
 }

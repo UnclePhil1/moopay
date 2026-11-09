@@ -334,7 +334,7 @@ test("one balance: NEAR counts as dollars, and a payment converts NEAR to USDC b
   // not enough in total: a plain message with the balance, nothing is swapped
   const b = await agent();
   b.near.tokenBalances.set(b.u.accountId, 0n); b.near.nearBalances.set(b.u.accountId, 200_000_000_000_000_000_000_000n);
-  await assert.rejects(b.ops.send(b.u, { amountUsd: "5", chain: "near", recipient: BOB }), /Your balance is \$1\.00/);
+  await assert.rejects(b.ops.send(b.u, { amountUsd: "5", chain: "near", recipient: BOB }), /Your agent wallet has \$1\.00.*Add about \$4\.10/);
 });
 
 test("send in coins: 0.1 NEAR goes straight from the wallet's NEAR, no swap", async () => {
@@ -870,7 +870,10 @@ test("an empty agent wallet hands over to a confirm-and-sign link instead of ref
   assert.equal(card.kind, "confirm_send");
   assert.match(card.url, /^https:\/\/moo\.test\/p\/[A-Za-z0-9_-]{6,}$/);
   assert.equal(a.near.transfers.length, 0, "nothing moved from the agent wallet");
-  assert.equal(a.oc.quotes.length, 0, "no quote until the user signs");
+  assert.ok(a.oc.quotes.every((q) => q.dry), "only a price check for the fee, nothing is created until the user signs");
+  const c5 = r.card as { fees?: string; total?: string; notice?: string };
+  assert.ok(c5.fees && c5.total, "the card shows fees and the total");
+  assert.match(c5.notice ?? "", /agent wallet has \$0\.00.*add about/i, "and says how much the agent wallet would need");
   assert.equal(a.u.payments[0]?.status, "AWAITING_YOUR_SIGNATURE");
   const view = await a.svc.payIntentView(card.url.split("/").pop()!);
   assert.equal(view.destinationChain, "eth");
@@ -1179,7 +1182,7 @@ test("private route: a conversion that fails sends the USDC back; a payout that 
   const p = a.u.payments[0]!;
   a.ol.confidential = BigInt(a.ol.deposits[0]!.amount);
   await a.ops.refresh(a.u, p, CTX);
-  a.ol.requestStatus = "failed";
+  a.ol.requestStatus = "refunded";
   await a.ops.refresh(a.u, p, CTX);
   assert.equal(p.status, "REFUNDED");
   assert.equal(a.ol.withdraws.at(-1)?.body.token, USDC);
@@ -1265,4 +1268,104 @@ test("private route: a first big payment asks first, the card says it is private
   const done = await a.ops.resolve(a.u, r.result["approvalId"] as string, true, CTX);
   assert.equal(done.result["status"], "sent");
   assert.equal(a.ol.deposits.length, 1, "approved as private even though the setting was turned off meanwhile");
+});
+
+test("every payment card shows the fee and the total, and a short wallet says how much to add", async () => {
+  const a = await agent();
+  a.fund(20);
+  const sent = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB });
+  const c = sent.card as { fees?: string; total?: string };
+  assert.equal(c.fees, "none added");
+  assert.equal(c.total, "$5.00");
+  const cross = await a.ops.send(a.u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" });
+  const cc = cross.card as { fees?: string; total?: string };
+  assert.match(String(cc.fees), /^\$|none added/);
+  assert.match(String(cc.total), /^\$5/);
+  // nothing in the agent wallet: the card and the message say what it would take
+  const empty = await agent(undefined, new FakeOutLayer() as unknown as OutLayer);
+  await empty.ops.rules(empty.u, { privateSends: true });
+  const priv = await empty.ops.send(empty.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX);
+  assert.equal(priv.result["status"], "not_private");
+  assert.match(String(priv.result["reason"]), /has \$0\.00.*about \$5\.10.*add about \$5\.10/i);
+  // enough money but no NEAR for the network fee and no sponsor: the message names the real shortage, not the balance
+  const gas = await agent(undefined, new FakeOutLayer() as unknown as OutLayer);
+  gas.fund(5); gas.near.nearBalances.set(gas.u.accountId, 0n);
+  await gas.ops.rules(gas.u, { privateSends: true });
+  const g = await gas.ops.send(gas.u, { amountUsd: "0.1", chain: "near", recipient: BOB }, false, {}, CTX);
+  assert.match(String(g.result["reason"]), /has \$5\.00, which covers this, but it holds no NEAR.*0\.05 NEAR to /);
+  const plain = await gas.ops.send(gas.u, { amountUsd: "0.1", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC", private: false }, false, {}, CTX);
+  assert.match((plain.card as { notice?: string }).notice ?? "", /holds no NEAR.*Send about 0\.05 NEAR to .*confirm below/i);
+});
+
+test("a conversion that is slow is watched, never started twice, and a lost answer never pays the swap address twice", async () => {
+  const a = await agent();
+  a.near.tokenBalances.set(a.u.accountId, 0n);
+  a.near.nearBalances.set(a.u.accountId, 200_000_000_000_000_000_000_000n);
+  a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, 4_000_000_000_000_000_000_000_000n); // 4 wNEAR at $5
+  const ops = a.ops as unknown as { pollMs: number; polls: number };
+  ops.pollMs = 1; ops.polls = 2;
+  // the transfer goes through, then the answer is lost
+  const deposits: string[] = [];
+  const send = a.near.transferFromNote.bind(a.near);
+  a.near.transferFromNote = async (p) => {
+    if (p.tokenContract !== "wrap.near") return send(p);
+    deposits.push(p.to);
+    a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, 4_000_000_000_000_000_000_000_000n - p.amount);
+    throw new Error("rpc timed out");
+  };
+  await assert.rejects(a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }), /still converting/);
+  assert.equal(deposits.length, 1, "the first try had gone through, so it is not sent again");
+  assert.equal(a.u.swaps?.length, 1, "the conversion is on the watch list");
+  // asking again while it runs does not start a second conversion
+  await assert.rejects(a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }), /already converting/);
+  assert.equal(deposits.length, 1);
+  // it ends later: the user is told, and the permanent ledger notes it
+  assert.deepEqual(await a.ops.followSwaps(a.u), [], "nothing to say while it is still going");
+  a.oc.statuses.set(deposits[0]!, "SUCCESS");
+  assert.match((await a.ops.followSwaps(a.u))[0] ?? "", /finished converting/);
+  assert.equal(a.u.swaps?.length, 0);
+  assert.ok(a.store.history().rows.some((r) => r.kind === "swap"));
+  // a failed one: the swap service has already returned the money, and the user is told
+  const b = await agent();
+  b.u.swaps = [{ addr: "dead", at: b.now() }];
+  b.oc.statuses.set("dead", "REFUNDED");
+  assert.match((await b.ops.followSwaps(b.u))[0] ?? "", /sent your money back/);
+  assert.equal(b.u.swaps.length, 0);
+});
+
+test("a claim paid out to another chain is only 'claimed' once the money has arrived there", async () => {
+  const a = await agent();
+  const p = { id: "c1", kind: "claim" as const, amountUsd: 1, chain: "sol", recipient: "R", status: "FUNDED", createdAt: a.now(), fundKey: "k" };
+  a.u.payments.push(p);
+  (a.svc as unknown as { claimFundState: () => Promise<unknown> }).claimFundState = async () => ({ state: "CLAIMED", deliverTo: "dep1" });
+  a.oc.statuses.set("dep1", "PROCESSING");
+  let r = await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "ON_ITS_WAY");
+  assert.equal(p.settled, undefined, "not done yet");
+  assert.equal(r.changed, true);
+  a.oc.statuses.set("dep1", "SUCCESS");
+  r = await a.ops.refresh(a.u, p, CTX);
+  assert.equal(p.status, "CLAIMED");
+  assert.equal(p.settled, true);
+  const q = { ...p, id: "c2", status: "FUNDED", settled: undefined as boolean | undefined };
+  a.u.payments.push(q);
+  a.oc.statuses.set("dep1", "REFUNDED");
+  await a.ops.refresh(a.u, q, CTX);
+  assert.equal(q.status, "REFUNDED", "the swap service returned it, so it is not 'claimed'");
+});
+
+test("the agent wallet is one pool: with no USDC but enough NEAR, a payment converts and goes, instead of asking the user to sign", async () => {
+  const a = await agent();
+  a.near.tokenBalances.set(a.u.accountId, 0n);
+  a.near.nearBalances.set(a.u.accountId, 4_000_000_000_000_000_000_000_000n); // 4 NEAR at $5 = $20
+  (a.ops as unknown as { pollMs: number }).pollMs = 1;
+  const send = a.near.transferFromNote.bind(a.near);
+  a.near.transferFromNote = async (p) => { const r = await send(p); if (p.tokenContract === "wrap.near") { a.oc.statuses.set(p.to, "SUCCESS"); a.near.tokenBalances.set(a.u.accountId, 5_000_000n); } return r; };
+  const r = await a.ops.send(a.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX);
+  assert.equal(r.result["status"], "sent", "paid from the agent wallet, no Confirm button");
+  // not enough in total: the user is asked to sign in their own wallet, with the reason
+  const b = await agent();
+  b.near.tokenBalances.set(b.u.accountId, 0n); b.near.nearBalances.set(b.u.accountId, 200_000_000_000_000_000_000_000n);
+  const r2 = await b.ops.send(b.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX);
+  assert.equal(r2.result["status"], "needs_your_signature");
 });

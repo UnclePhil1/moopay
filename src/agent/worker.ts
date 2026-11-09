@@ -43,6 +43,7 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
   if (await ops.sponsorGas(u, BigInt(Math.round(b.totalUsd * 1e6)), b.nat)) store.event(u, "I added a little NEAR so your agent wallet can pay its network fees.");
   u.seen = { usdc: String(cents), near: nat };
 
+  for (const text of await ops.followSwaps(u).catch(() => [])) store.event(u, text);
   await ops.forwardRnear(u).catch(() => undefined); // rNEAR never stays in the agent wallet
   await ops.repayAdvance(u);
   const swept = await ops.sweep(u);
@@ -52,12 +53,14 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
 
   for (const t of u.tasks.filter((x) => x.nextAt <= now)) {
     t.nextAt = now + PERIOD[t.every];
+    const had = new Set(u.payments.map((p) => p.id));
     try {
       const out = t.items ? await ops.sendMany(u, t.items, false) : await ops.send(u, { amountUsd: String(t.amountUsd), chain: t.chain, recipient: t.recipient, assetSymbol: t.assetSymbol }, false);
       const st = out.result["status"];
       if (st === "sent" || st === "group_done") store.event(u, `Scheduled payment sent: ${t.text}.`, out.card);
       else if (st === "needs_approval") store.event(u, `Your scheduled payment (${t.text}) needs your OK.`, out.card);
       else store.event(u, `Skipped a scheduled payment (${t.text}): ${String(out.result["reason"] ?? "not allowed by your rules")}.`);
+      for (const p of u.payments) if (!had.has(p.id)) p.tag = p.tag ?? "scheduled";
     } catch (e) { store.event(u, `Could not run a scheduled payment (${t.text}): ${msg(e)}`); }
   }
   store.save();

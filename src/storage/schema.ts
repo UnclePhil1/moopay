@@ -23,6 +23,8 @@ export const UserFileSchema = z.object({
   /** every payment ever made, kept after it drops out of a user's recent list, and the most each wallet has held */
   ledger: z.record(z.string(), looseRecord).optional(),
   peaks: z.record(z.string(), z.number()).optional(),
+  /** payments other MooPay runs reported to this one */
+  remote: z.record(z.string(), looseRecord).optional(),
 });
 
 export const ClaimFileSchema = z.object({

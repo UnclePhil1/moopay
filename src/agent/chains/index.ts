@@ -24,5 +24,5 @@ export function verifyWalletSignature(chain: string, address: string, message: s
   } catch {
     // fall through to the same message for any malformed or wrong signature
   }
-  throw new MoopayError("BAD_RECIPIENT", "the wallet signature did not check out");
+  throw new MoopayError("BAD_RECIPIENT", "That wallet signature wasn't accepted. Try signing again.");
 }

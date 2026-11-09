@@ -38,7 +38,7 @@ export class PayHub {
 
   create(i: Omit<PayIntent, "id" | "createdAt">): PayIntent {
     this.sweep();
-    if (this.intents.size >= MAX_INTENTS) throw new MoopayError("INTERNAL", "too many pending payments; try again shortly");
+    if (this.intents.size >= MAX_INTENTS) throw new MoopayError("INTERNAL", "There are a lot of payments waiting right now. Try again in a minute.");
     const intent: PayIntent = { ...i, id: randomBytes(9).toString("base64url"), createdAt: this.now() };
     this.intents.set(intent.id, intent);
     return intent;
@@ -47,7 +47,7 @@ export class PayHub {
   get(id: string): PayIntent {
     this.sweep();
     const i = this.intents.get(id);
-    if (!i) throw new MoopayError("NOTE_NOT_FOUND", "this payment link has expired; ask for a new one");
+    if (!i) throw new MoopayError("NOTE_NOT_FOUND", "This payment link has expired. Ask for a new one.");
     return i;
   }
 
@@ -77,7 +77,7 @@ export class PayHub {
     const i = this.get(id);
     if (!i.stake) throw new MoopayError("INVALID_INPUT", "this payment does not stake anything");
     if (i.stake.payout === payout) return;
-    if (i.payer) throw new MoopayError("INVALID_INPUT", "the payout wallet can't change once the payment has started");
+    if (i.payer) throw new MoopayError("INVALID_INPUT", "The payout wallet can't be changed once the payment has started.");
     i.stake.payout = payout;
   }
 
@@ -94,7 +94,7 @@ export function parseDecimal(value: string, decimals: number): bigint {
   const frac = m[2] ?? "";
   if (frac.length > decimals) throw new MoopayError("INVALID_INPUT", `payAmount has more than ${decimals} decimal places`);
   const out = BigInt(m[1]! + frac.padEnd(decimals, "0"));
-  if (out <= 0n) throw new MoopayError("INVALID_INPUT", "payAmount must be > 0");
+  if (out <= 0n) throw new MoopayError("INVALID_INPUT", "The amount has to be more than zero.");
   return out;
 }
 

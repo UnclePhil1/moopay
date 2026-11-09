@@ -1,5 +1,7 @@
 import type { UserRec } from "../agent/index.js";
 import type { Payment } from "../agent/store.js";
+import type { Row } from "../agent/report.js";
+import { where } from "../util/where.js";
 
 /* Team-only numbers, worked out from the user records the agent already keeps. Nothing extra is recorded, and no ids leave this file. */
 
@@ -12,9 +14,35 @@ const ALL = new Set(["send", "claim", "stake", "fund", "withdraw", "sweep"]);
 const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
 const round = (n: number) => Math.round(n * 100) / 100;
 
-export interface History { rows: (Payment & { who?: string })[]; peaks: Map<string, number> }
+export interface History { rows: (Payment & { who?: string })[]; peaks: Map<string, number>; remote?: Row[] }
+/** Which runs to count: everything, the real site only, or test runs only. */
+export type Pick = "all" | "production" | "development";
+export const pickOf = (s: string | null | undefined): Pick => (s === "production" || s === "development" ? s : "all");
+type Line = Payment & { who?: string; env: string; host: string; tag?: "scheduled" | "group" };
 
-export function metrics(users: UserRec[], now: number, history?: History) {
+/** The kind of movement, in the words the team uses. */
+export const typeOf = (p: { kind: string; chain: string; tag?: string | undefined }): string =>
+  p.kind === "fund" ? "received" : p.kind === "swap" ? "swapped" : p.kind === "stake" ? "stakes" : p.kind === "claim" ? "claims" : p.tag === "group" ? "group" : p.tag === "scheduled" ? "scheduled" : p.kind === "send" && p.chain !== "near" ? "bridged" : "sending";
+const TYPES = ["sending", "received", "swapped", "bridged", "stakes", "claims", "scheduled", "group"];
+
+/** Every payment this server knows about, its own and those other runs reported, for the chosen runs. */
+export function lines(users: UserRec[], history: History | undefined, pick: Pick): Line[] {
+  const here = where();
+  const own: Line[] = pick === "all" || pick === here.env ? (history?.rows ?? users.flatMap((u) => u.payments.map((p) => ({ ...p, who: u.id })))).map((p) => ({ ...p, env: here.env, host: here.host })) : [];
+  const other: Line[] = (history?.remote ?? []).filter((r) => pick === "all" || r.env === pick).map((r) => ({ id: r.id, kind: r.kind as Payment["kind"], amountUsd: r.amountUsd, chain: r.chain, recipient: "", status: r.status, createdAt: r.createdAt, settled: r.settled, who: r.who, env: r.env, host: r.host, ...(r.tag ? { tag: r.tag as "scheduled" | "group" } : {}) }));
+  return [...own, ...other];
+}
+
+/** The same lines as a spreadsheet file. */
+export function csv(users: UserRec[], history: History | undefined, pick: Pick): string {
+  const rows = lines(users, history, pick).filter((p) => p.kind !== "unstake").sort((a, b) => b.createdAt - a.createdAt);
+  const cell = (v: string | number) => { const s = String(v); return /^[=+\-@]/.test(s) ? "'" + s : s; };
+  return ["time,environment,host,type,kind,chain,usd,status,id", ...rows.map((p) => [new Date(p.createdAt).toISOString(), p.env, p.host, typeOf(p), p.kind, p.chain, p.amountUsd.toFixed(2), p.status, p.id].map(cell).join(","))].join("\n") + "\n";
+}
+
+export function metrics(allUsers: UserRec[], now: number, history?: History, pick: Pick = "all") {
+  const here = where();
+  const users = pick === "all" || pick === here.env ? allUsers : [];
   /** The last time the user typed or paid; a user who keeps no chat history only shows through payments. */
   const lastSeen = (u: UserRec) => Math.max(0, ...u.chat.map((m) => m.at ?? 0), ...u.payments.map((p) => p.createdAt));
   const within = (t: number, days: number) => t > 0 && now - t < days * DAY;
@@ -22,7 +50,8 @@ export function metrics(users: UserRec[], now: number, history?: History) {
   const funded = (u: UserRec) => Number(u.seen.usdc) > 0 || u.payments.some((p) => p.kind === "fund" && p.status === "DELIVERED");
 
   // The ledger keeps every payment ever made; a user's own list stops at the latest 100.
-  const all: (Payment & { who?: string })[] = history?.rows ?? users.flatMap((u) => u.payments.map((p) => ({ ...p, who: u.id })));
+  const all = lines(allUsers, history, pick);
+  const outsiders = new Set(all.filter((p) => p.env !== here.env || p.host !== here.host).map((p) => p.who)).size;
   const mine = (id: string) => all.filter((p) => p.who === id);
   const done = all.filter((p) => MOVES.has(p.kind) && DONE.has(p.status));
   const moves = all.filter((p) => ALL.has(p.kind) && DONE.has(p.status));
@@ -38,6 +67,11 @@ export function metrics(users: UserRec[], now: number, history?: History) {
   const volume = done.reduce((a, p) => a + p.amountUsd, 0);
   const settled = all.filter((p) => p.settled && p.kind !== "sweep");
   const failed = settled.filter((p) => BAD.has(p.status));
+  const types: Record<string, { count: number; usd: number }> = Object.fromEntries(TYPES.map((t) => [t, { count: 0, usd: 0 }]));
+  for (const p of all.filter((x) => (ALL.has(x.kind) || x.kind === "swap") && DONE.has(x.status))) { const t = types[typeOf(p)]!; t.count++; t.usd = round(t.usd + p.amountUsd); }
+  // TV, total volume: every dollar that ever completed through any feature (send, claim, stake, deposit, withdrawal, payout, swap), added up from the start.
+  const tvLines = all.filter((p) => (ALL.has(p.kind) || p.kind === "swap") && DONE.has(p.status));
+  const recent = all.filter((p) => ALL.has(p.kind) || p.kind === "swap").sort((a, b) => b.createdAt - a.createdAt).slice(0, 60).map((p) => ({ at: p.createdAt, host: p.host, env: p.env, type: typeOf(p), usd: round(p.amountUsd), status: p.status, ok: DONE.has(p.status) }));
   const byKind: Record<string, number> = {};
   for (const p of all) byKind[p.kind] = (byKind[p.kind] ?? 0) + 1;
   const approvals = users.flatMap((u) => u.approvals);
@@ -56,7 +90,7 @@ export function metrics(users: UserRec[], now: number, history?: History) {
   return {
     generatedAt: new Date(now).toISOString(),
     users: {
-      total: users.length, new24h: users.filter((u) => within(u.createdAt, 1)).length, new7d: users.filter((u) => within(u.createdAt, 7)).length, new30d: users.filter((u) => within(u.createdAt, 30)).length,
+      total: users.length + outsiders, new24h: users.filter((u) => within(u.createdAt, 1)).length, new7d: users.filter((u) => within(u.createdAt, 7)).length, new30d: users.filter((u) => within(u.createdAt, 30)).length,
       active24h: users.filter((u) => within(lastSeen(u), 1)).length, active7d: users.filter((u) => within(lastSeen(u), 7)).length, active30d: users.filter((u) => within(lastSeen(u), 30)).length,
       named: users.filter((u) => u.name).length, frozen: users.filter((u) => u.frozen).length, withPoints: users.filter((u) => (u.points ?? 0) > 0).length,
     },
@@ -64,8 +98,8 @@ export function metrics(users: UserRec[], now: number, history?: History) {
       { step: "Opened MooPay", users: users.length }, { step: "Chatted or paid", users: talked.length }, { step: "Funded the wallet", users: users.filter(funded).length },
       { step: "Made a first payment", users: paid.length }, { step: "Paid twice or more", users: repeat.length },
     ],
-    agents: { created: users.length, keys: keys.length, keysActive: keys.filter((k) => !k.revoked && (!k.expiresAt || k.expiresAt > now)).length },
-    tvl: { totalUsd: round(deposits + staking), depositsUsd: round(deposits), stakingUsd: round(staking), heldNowUsd: round(users.reduce((a, u) => a + Number(u.seen.usdc) / 100, 0)), stakers: new Set(all.filter((p) => p.kind === "stake" && p.status === "STAKED").map((p) => p.who)).size },
+    agents: { created: users.length + outsiders, keys: keys.length, keysActive: keys.filter((k) => !k.revoked && (!k.expiresAt || k.expiresAt > now)).length },
+    tvl: { totalUsd: round(deposits + staking), depositsUsd: round(deposits), stakingUsd: round(staking), stakedEverUsd: round(sum(all.filter((p) => p.kind === "stake" && p.status === "STAKED"))), heldNowUsd: round(users.reduce((a, u) => a + Number(u.seen.usdc) / 100, 0)), stakers: new Set(all.filter((p) => p.kind === "stake" && p.status === "STAKED").map((p) => p.who)).size },
     money: {
       movedUsd: round(sum(moves)), transactions: moves.length, payments: done.length, volumeUsd: round(volume), averageUsd: moves.length ? round(sum(moves) / moves.length) : 0, largestUsd: round(Math.max(0, ...moves.map((p) => p.amountUsd))),
       depositedUsd: round(deposits), byKindUsd: { deposits: kindUsd("fund"), sends: kindUsd("send"), claims: kindUsd("claim"), staked: kindUsd("stake"), withdrawn: kindUsd("withdraw"), sweptToPayout: kindUsd("sweep") }, byKind,
@@ -77,6 +111,8 @@ export function metrics(users: UserRec[], now: number, history?: History) {
       stakes: all.filter((p) => p.kind === "stake" && DONE.has(p.status)).length, claims: all.filter((p) => p.kind === "claim").length, points: users.reduce((a, u) => a + (u.points ?? 0), 0),
       private: { total: priv.length, delivered: priv.filter((p) => p.status === "DELIVERED").length, failed: priv.filter((p) => BAD.has(p.status)).length },
     },
+    tv: { totalUsd: round(sum(tvLines)), transactions: tvLines.length, since: tvLines.length ? new Date(Math.min(...tvLines.map((p) => p.createdAt))).toISOString() : null },
+    types, recent, pick, source: pick === "all" ? "all runs" : pick === "production" ? "the real site" : "test runs",
     series,
   };
 }

@@ -7,6 +7,7 @@ import { isClaimChain, validAddress } from "./chains/index.js";
 import { RNEAR, STAKE_GAS, STAKE_MIN_NEAR, rnearApy, rnearPrice, unstaking, WRAP } from "./rhea.js";
 import { preflight, type Preflight } from "./preflight.js";
 import { OutLayerError, type OutLayer } from "./outlayer.js";
+import { swapServiceMessage } from "../util/friendly.js";
 import type { MooPayService } from "./service.js";
 import { alertOwner } from "../util/alert.js";
 import { agentDeny, decide, earnPoints, nameProblem, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
@@ -62,6 +63,8 @@ const SPONSOR_LOW = 2_000_000_000_000_000_000_000_000n; // alert below 2 NEAR
 const LOW_GAS = 20_000_000_000_000_000_000_000n; // 0.02 NEAR
 const KEEP_NEAR = 5_000_000_000_000_000_000_000n;
 const STAKE_GAS_ROOM = 100_000_000_000_000_000_000_000n; // 0.1 NEAR must sit in the wallet while staking (200 Tgas is prepaid at 0.02 NEAR); the unused gas comes back
+const SWAP_WAIT = 20 * 60_000, SWAP_GIVE_UP = 2 * 3_600_000;
+interface SwapStatus { status: string; swapDetails?: { amountInUsd?: string } }
 const KEEP_GAS = 80_000_000_000_000_000_000_000n; // 0.08 NEAR is never swapped away: it pays the fees // 0.005 NEAR stays to pay for the last transfer
 
 /** The card shown for an approval. The full destination and amount are always listed, so nothing the user approves is hidden behind a short name. */
@@ -95,10 +98,29 @@ export class AgentOps {
     return { usdc, tok, nat, usdt, usdtA, nearA, wnear, totalUsd };
   }
 
+  /** What the wallet holds, and how much to add so a payment of `need` dollars (fees included) can go, with the same 2% cushion canPay asks for. */
+  private async gap(u: UserRec, need: number): Promise<{ have: number; need: number; add: number; short: boolean; gas: boolean }> {
+    const b = await this.balances(u), have = b.totalUsd, want = Math.ceil(need * 1.02 * 100) / 100;
+    // Enough money, but no NEAR to pay the network fee and no sponsor to lend it: the payment cannot go either.
+    const gas = have >= want && b.nat < MIN_GAS && !this.sponsor;
+    return { have, need: want, add: Math.max(0.01, Math.ceil((want - have) * 100) / 100), short: have < want, gas };
+  }
+  /** Why the agent wallet cannot pay this, in words the user can act on; the first part names the real shortage. */
+  private why(u: UserRec, g: { have: number; need: number; add: number; gas: boolean }): string {
+    return g.gas
+      ? `Your agent wallet has ${usd(g.have)}, which covers this, but it holds no NEAR to pay the network fee. Send about 0.05 NEAR to ${u.accountId} and try again.`
+      : `Your agent wallet has ${usd(g.have)}, and this needs about ${usd(g.need)} with fees. Add about ${usd(g.add)} more and try again (say "add ${usd(g.add)}" and I'll show you how).`;
+  }
+  private async lack(u: UserRec, need: number): Promise<string> { return this.why(u, await this.gap(u, need)); }
+  /** Fee and total lines for a card; nothing when the fee is not known yet. */
+  private feeFields(amt: number, fee?: number) { return fee === undefined ? {} : { fees: fee >= 0.005 ? usd(fee) : "none added", total: usd(amt + (fee >= 0.005 ? fee : 0)), feeUsd: fee }; }
+
   /** If a payment needs more USDC than the wallet holds, quietly swaps USDT, then spare NEAR, into USDC first. */
   private async ensureUsdc(u: UserRec, need: bigint): Promise<void> {
     let b = await this.balances(u);
     if (b.tok >= need) return;
+    // A conversion already on its way finishes by itself, and starting another one would only split the money.
+    if ((u.swaps ?? []).some((s) => this.now() - s.at < SWAP_WAIT)) throw new MoopayError("UPSTREAM_TIMEOUT", "I'm already converting your balance for a payment. It can take a few minutes, and I'll tell you in chat when it's done. Then ask me again.");
     let short = need - b.tok; short += short / 50n + 10_000n; // 2% + 1 cent for slippage
     if (b.usdtA && b.usdt > 0n) {
       const take = b.usdt < short ? b.usdt : short;
@@ -108,7 +130,7 @@ export class AgentOps {
     if (short > 0n && b.nearA?.priceUsd) {
       const want = BigInt(Math.ceil((Number(short) / 10 ** b.usdc.decimals / b.nearA.priceUsd) * 1e6)) * 10n ** 18n;
       const spare = (b.nat > KEEP_GAS ? b.nat - KEEP_GAS : 0n) + b.wnear;
-      if (spare < want) throw new MoopayError("NOTE_NOT_FUNDED", `Your balance is $${b.totalUsd.toFixed(2)} but this needs more. Add money and try again.`);
+      if (spare < want) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(need) / 10 ** b.usdc.decimals));
       const fromWrapped = b.wnear < want ? b.wnear : want;
       const toWrap = want - fromWrapped;
       if (toWrap > 0n) {
@@ -117,9 +139,9 @@ export class AgentOps {
         for (let i = 0; i < 10 && (await this.near.ftBalance(b.nearA.contract, u.accountId)) < want; i++) await new Promise((res) => setTimeout(res, this.pollMs)); // let the wrap settle on every RPC node
       }
       await this.swapToUsdc(u, b.nearA, want);
-    } else if (short > 0n) throw new MoopayError("NOTE_NOT_FUNDED", `Your balance is $${b.totalUsd.toFixed(2)} but this needs more. Add money and try again.`);
+    } else if (short > 0n) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(need) / 10 ** b.usdc.decimals));
     b = await this.balances(u);
-    if (b.tok < need) throw new MoopayError("UPSTREAM_TIMEOUT", "Your balance is being converted for this payment. Try again in a minute.");
+    if (b.tok < need) throw new MoopayError("UPSTREAM_TIMEOUT", "I'm still converting your balance for this payment. Try again in a minute.");
   }
   private async swapToUsdc(u: UserRec, from: { assetId: string; contract: string }, units: bigint): Promise<void> {
     return this.swapAsset(u, from, (await this.svc.usdcAsset()).assetId, units);
@@ -129,24 +151,56 @@ export class AgentOps {
     const usdc = { assetId: destAssetId };
     const req: QuoteRequest = { dry: false, swapType: "EXACT_INPUT", slippageTolerance: 100, originAsset: from.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: usdc.assetId, amount: (units === 0n ? 1n : units).toString(), recipient: u.accountId, recipientType: "DESTINATION_CHAIN", refundTo: u.accountId, refundType: "ORIGIN_CHAIN", deadline: new Date(this.now() + 10 * 60_000).toISOString() };
     const q = (await this.svc.oneClickClient.quote(req)).quote;
-    if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
+    if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
     const k = this.store.keyOf(u);
     const move = () => this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: from.contract, to: q.depositAddress!, amount: units });
-    const r = await move().catch(async () => { await new Promise((res) => setTimeout(res, this.pollMs)); return move(); });
-    await this.svc.oneClickClient.submitDeposit(q.depositAddress, r.txHash).catch(() => undefined);
+    // If the first try errors, look at the balance before trying again: it may have gone through and only the answer was lost, and a second try would pay the address twice.
+    const before = await this.near.ftBalance(from.contract, u.accountId).catch(() => undefined);
+    let txHash = "";
+    try { txHash = (await move()).txHash; }
+    catch (e) {
+      await new Promise((res) => setTimeout(res, this.pollMs));
+      const after = await this.near.ftBalance(from.contract, u.accountId).catch(() => undefined);
+      if (!(before !== undefined && after !== undefined && before - after >= (units * 9n) / 10n)) txHash = (await move()).txHash;
+    }
+    (u.swaps ??= []).push({ addr: q.depositAddress, at: this.now() }); this.store.save();
+    await this.svc.oneClickClient.submitDeposit(q.depositAddress, txHash).catch(() => undefined);
     for (let i = 0; i < this.polls; i++) {
-      const st = (await this.svc.oneClickClient.status(q.depositAddress).catch(() => undefined))?.status;
-      if (st === "SUCCESS") return;
-      if (st === "REFUNDED" || st === "FAILED") throw new MoopayError("QUOTE_FAILED", "Converting your balance did not go through. Your money was returned. Try again.");
+      const st = await this.svc.oneClickClient.status(q.depositAddress).catch(() => undefined);
+      if (st?.status === "SUCCESS" || st?.status === "REFUNDED" || st?.status === "FAILED") {
+        this.endSwap(u, q.depositAddress, st as SwapStatus);
+        if (st.status === "SUCCESS") return;
+        throw new MoopayError("QUOTE_FAILED", "I couldn't convert your balance for this payment, and your money is back in your wallet. Try again.");
+      }
       await new Promise((res) => setTimeout(res, this.pollMs));
     }
+  }
+  /** Takes a conversion off the watch list and, when it worked, notes it in the permanent ledger. */
+  private endSwap(u: UserRec, addr: string, st: SwapStatus): void {
+    u.swaps = (u.swaps ?? []).filter((s) => s.addr !== addr);
+    if (st.status === "SUCCESS") this.store.note(u, { id: "swap-" + addr.slice(0, 16), kind: "swap", amountUsd: Number(st.swapDetails?.amountInUsd ?? 0) || 0, chain: "near", recipient: u.accountId, status: "DELIVERED", createdAt: this.now(), settled: true });
+    this.store.save();
+  }
+  /**
+   * Follows conversions that outlasted the wait. The swap service returns the money to the agent wallet by itself when one fails
+   * (every quote names it as the refund address), so this only keeps track and says what happened.
+   */
+  async followSwaps(u: UserRec): Promise<string[]> {
+    const said: string[] = [];
+    for (const s of [...(u.swaps ?? [])]) {
+      const st = (await this.svc.oneClickClient.status(s.addr).catch(() => undefined)) as SwapStatus | undefined;
+      if (st?.status === "SUCCESS") { this.endSwap(u, s.addr, st); said.push("Your balance finished converting. You can ask me again now."); }
+      else if (st?.status === "REFUNDED" || st?.status === "FAILED") { this.endSwap(u, s.addr, st); said.push("A conversion didn't go through, and the swap service sent your money back to your agent wallet."); }
+      else if (this.now() - s.at > SWAP_GIVE_UP) { this.endSwap(u, s.addr, { status: "TIMEOUT" }); said.push("A conversion is taking much longer than usual. It's with the swap service, and if it can't finish your money comes back to your agent wallet on its own."); }
+    }
+    return said;
   }
   polls = 30; pollMs = 3000;
 
   private validate(chain: string, recipient: string): void {
-    if (chain === "near") { if (!isNearAccountId(recipient)) throw new MoopayError("BAD_RECIPIENT", "that is not a valid NEAR wallet address"); }
+    if (chain === "near") { if (!isNearAccountId(recipient)) throw new MoopayError("BAD_RECIPIENT", "That isn't a valid NEAR wallet address. It looks like alice.near."); }
     else if (chain === "btc" || chain === "sol" || chain === "eth") assertRecipient(chain as DestChain, recipient);
-    else throw new MoopayError("INVALID_INPUT", "chain must be btc, sol, eth or near");
+    else throw new MoopayError("INVALID_INPUT", "I can pay wallets on Bitcoin, Solana, Ethereum and NEAR. Which one is this for?");
   }
   private recipientKey = recipientKey;
   /** Refuses anything that moves money or loosens rules while the account is frozen. */
@@ -178,7 +232,7 @@ export class AgentOps {
     // How much: dollars, or a number of coins ("0.1 NEAR") which is priced in dollars here.
     let usdText = p.amountUsd, coinUnits: bigint | undefined;
     if (!usdText) {
-      if (!p.amount) throw new MoopayError("INVALID_INPUT", "give an amount in dollars (amountUsd) or in coins (amount)");
+      if (!p.amount) throw new MoopayError("INVALID_INPUT", "How much should I send? Say an amount, like $5.");
       if (!price) throw new MoopayError("QUOTE_FAILED", `I couldn't get a price for ${sym}, so say the amount in dollars instead.`);
       coinUnits = parseDecimal(p.amount, dest.decimals);
       usdText = (Math.ceil(Number(p.amount) * price * (nativeNear ? 1 : 1.01) * 100) / 100).toFixed(2);
@@ -200,8 +254,19 @@ export class AgentOps {
     // The agent wallet is optional: it pays only when asked to, or when it already holds enough. Otherwise the user signs in their own wallet.
     const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct, units)));
     const priv = p.private ?? !!u.rules.privateSends;
-    if (priv) { const why = this.privateWhy(u, chain, own, dest.assetId === usdc.assetId); if (why) return { result: { status: "not_private", reason: why, hint: "Tell the user why. Send it the normal way only if they say so (call send_money again with private false)." } }; }
-    if (own) return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt), fromChain: p.fromChain, fromSymbol: p.fromSymbol }, ctx!);
+    if (priv) { const why = this.privateWhy(u, chain, dest.assetId === usdc.assetId); if (why) return { result: { status: "not_private", reason: why, hint: "Tell the user why. Send it the normal way only if they say so (call send_money again with private false)." } }; }
+    // The fee a swap adds on top, when the route has one. Unknown (undefined) when it cannot be quoted yet.
+    const feeEstimate = async (): Promise<number | undefined> => direct ? 0 : p.fromChain ? undefined : this.preview(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText }).then((q) => Math.max(0, q.payUsd - amt)).catch(() => undefined);
+    if (priv && own) {
+      const fee = (await feeEstimate()) ?? 0, g = await this.gap(u, amt + fee);
+      return { result: { status: "not_private", reason: g.short || g.gas ? `Private send pays from the agent wallet. ${this.why(u, g)}` : "Private send pays from the agent wallet, so it can't use your own wallet.", hint: "Tell the user exactly this, and offer to show how to add money. Send it the normal way only if they say so (call send_money again with private false)." } };
+    }
+    if (own) {
+      const fee = await feeEstimate();
+      let notice: string | undefined;
+      if (!p.fromChain && p.useAgentWallet === undefined) { const g = await this.gap(u, amt + (fee ?? 0)); if (g.short || g.gas) notice = `${this.why(u, g).replace(/ and try again.*$/, ".")} You can confirm below to pay from your own wallet now.`; }
+      return this.ownWallet(u, { chain, sym, recipient: p.recipient, usdText, amt, what: coinUnits ? `${p.amount} ${sym}` : usd(amt), fromChain: p.fromChain, fromSymbol: p.fromSymbol, ...(fee !== undefined ? { fee } : {}), ...(notice ? { notice } : {}) }, ctx!);
+    }
     const quote = direct ? undefined : await this.preview(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText });
     const expected = quote?.text;
     const denied = this.blocked(u, who, amt, chain, sym, p.recipient);
@@ -229,7 +294,7 @@ export class AgentOps {
   /** Dollar value of one line, whatever it is written in. */
   private async itemUsd(it: GroupItem): Promise<number> {
     if (it.amountUsd) return Number(it.amountUsd);
-    if (!it.amount) throw new MoopayError("INVALID_INPUT", `${it.recipient}: give an amount in dollars (amountUsd) or in coins (amount)`);
+    if (!it.amount) throw new MoopayError("INVALID_INPUT", `How much should ${it.recipient} get? Say an amount, like $5.`);
     const chain = it.chain.toLowerCase(), sym = (it.assetSymbol ?? (chain === "near" ? "USDC" : NATIVE[chain] ?? "")).toUpperCase();
     const price = ((await this.destAsset(chain, sym)) as { price?: number }).price ?? (/^US(DC|DT)$/.test(sym) ? 1 : undefined);
     if (!price) throw new MoopayError("QUOTE_FAILED", `I couldn't price ${sym}, so give ${it.recipient}'s amount in dollars instead.`);
@@ -255,29 +320,33 @@ export class AgentOps {
     const summary = `Send ${usd(total)} to ${items.length} wallets: ${lines.join("; ")}`;
     if ((whole.action === "ask" || asks) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks!.action === "ask" ? asks!.reason : "a new recipient");
     const rows: { to: string; chain: string; amount: string; status: string; url?: string }[] = [];
+    let feeSum = 0;
+    const had = new Set(u.payments.map((p) => p.id));
     for (let i = 0; i < items.length; i++) {
       const it = items[i]!;
       const row = { to: it.recipient, chain: it.chain.toUpperCase(), amount: it.amountUsd ? usd(Number(it.amountUsd)) : `${it.amount} ${(it.assetSymbol ?? NATIVE[it.chain.toLowerCase()] ?? "").toUpperCase()}`.trim() };
       try {
         const r = await this.send(u, { chain: it.chain, recipient: it.recipient, ...(it.amountUsd ? { amountUsd: it.amountUsd } : { amount: it.amount }), ...(it.assetSymbol ? { assetSymbol: it.assetSymbol } : {}) }, true, who, ctx);
         const st = String(r.result["status"]);
+        feeSum += (r.card as { feeUsd?: number } | undefined)?.feeUsd ?? 0;
         rows.push({ ...row, status: st === "sent" ? "sent" : st === "needs_your_signature" ? "needs your signature" : st, ...((r.card as { url?: string } | undefined)?.url ? { url: (r.card as { url: string }).url } : {}) });
       } catch (e) { rows.push({ ...row, status: "failed: " + asMoopayError(e).message }); }
     }
+    for (const p of u.payments) if (!had.has(p.id)) p.tag = "group";
     const sent = rows.filter((r) => r.status === "sent").length;
-    return { result: { status: "group_done", total: usd(total), sent, results: rows.map((r) => ({ to: r.to, status: r.status })), note: rows.some((r) => r.url) ? "Some lines show a Confirm button for the user to sign in their own wallet." : "Every line ran." }, card: { kind: "batch", title: `Group payout, ${usd(total)}`, rows } };
+    return { result: { status: "group_done", total: usd(total), sent, results: rows.map((r) => ({ to: r.to, status: r.status })), note: rows.some((r) => r.url) ? "Some lines show a Confirm button for the user to sign in their own wallet." : "Every line ran." }, card: { kind: "batch", title: `Group payout, ${usd(total)}`, rows, ...this.feeFields(total, feeSum) } };
   }
 
   /** Whether the agent wallet can pay this by itself, including the network fee. */
   private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | "usdt" | undefined, units: bigint): Promise<boolean> {
     const b = await this.balances(u);
     if (direct === "near" || direct === "usdt") return true; // already checked against the balance above
-    if (direct === "usdc" && b.tok < units) return false;
+    // Not holding the exact coin is fine: whatever else the wallet has is converted first (ensureUsdc), so only the total counts.
     return b.totalUsd >= amt * 1.02 && (b.nat >= MIN_GAS || !!this.sponsor);
   }
 
   /** The user signs in a wallet of their choice; nothing is taken from the agent wallet. */
-  private ownWallet(u: UserRec, o: { chain: string; sym: string; recipient: string; usdText: string; amt: number; what: string; fromChain?: string | undefined; fromSymbol?: string | undefined; fund?: boolean }, ctx: Ctx): Promise<Out> {
+  private ownWallet(u: UserRec, o: { chain: string; sym: string; recipient: string; usdText: string; amt: number; what: string; fromChain?: string | undefined; fromSymbol?: string | undefined; fund?: boolean; fee?: number; notice?: string }, ctx: Ctx): Promise<Out> {
     return this.destAsset(o.chain, o.sym).then((dest) => {
       const payId = this.svc.newPayIntent({ destinationChain: o.chain, destinationAssetId: dest.assetId, recipient: o.recipient, payAmount: o.usdText, fromChain: o.fromChain?.toLowerCase(), fromSymbol: o.fromSymbol?.toUpperCase(), fund: o.fund });
       const pay: Payment = { id: id(), kind: o.fund ? "fund" : "send", amountUsd: o.amt, chain: o.chain, recipient: o.recipient, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), payId };
@@ -285,8 +354,8 @@ export class AgentOps {
       const url = `${ctx.origin}/p/${payId}`;
       const title = o.fund ? `Add ${o.what} to your agent wallet` : `Send ${o.what} to ${o.recipient.length > 20 ? o.recipient.slice(0, 8) + "…" + o.recipient.slice(-6) : o.recipient}`;
       return {
-        result: { status: "needs_your_signature", paymentId: pay.id, note: "A Confirm button is on the user's screen. They press it, pick the wallet they want to pay from and sign. Nothing has been sent or taken yet. Do not say it failed, do not mention the agent wallet, and do not paste the link." },
-        card: { kind: "confirm_send", title, url, amount: o.what, id: pay.id, ...(o.fund ? { button: "Add money" } : { to: o.recipient, chain: o.chain.toUpperCase() }) },
+        result: { status: "needs_your_signature", paymentId: pay.id, note: "A Confirm button is on the user's screen. They press it, pick the wallet they want to pay from and sign. Nothing has been sent or taken yet. Do not say it failed and do not paste the link." + (o.notice ? ` Tell the user this, in your own words: ${o.notice}` : " Do not mention the agent wallet.") },
+        card: { kind: "confirm_send", title, url, amount: o.what, id: pay.id, ...(o.fund ? { button: "Add money" } : { to: o.recipient, chain: o.chain.toUpperCase() }), ...(o.fee !== undefined ? this.feeFields(o.amt, o.fee) : { fees: "shown before you sign" }), ...(o.notice ? { notice: o.notice } : {}) },
       };
     });
   }
@@ -295,7 +364,7 @@ export class AgentOps {
   private async doSendNear(u: UserRec, amount: bigint, amt: number, to: string, ak?: AgentKey): Promise<Payment> {
     const k = this.store.keyOf(u);
     const r = await this.near.sendNear({ accountId: k.accountId, secretKey: k.secretKey, to, amount });
-    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
+    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, fee: 0, ...(ak ? { agentId: ak.id } : {}) };
     this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     this.spend(u, amt, this.recipientKey("near", to), ak);
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
@@ -306,7 +375,7 @@ export class AgentOps {
   private async doSendToken(u: UserRec, contract: string, amount: bigint, amt: number, to: string, ak?: AgentKey): Promise<Payment> {
     const k = this.store.keyOf(u);
     const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: contract, to, amount });
-    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, ...(ak ? { agentId: ak.id } : {}) };
+    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true, fee: 0, ...(ak ? { agentId: ak.id } : {}) };
     this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     this.spend(u, amt, this.recipientKey("near", to), ak);
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
@@ -327,7 +396,7 @@ export class AgentOps {
     let want = (symbol ?? NATIVE[chain] ?? "").toUpperCase();
     if (chain === "near" && want === "NEAR") want = "WNEAR";
     const t = (await this.svc.oneClickClient.tokens()).find((x) => x.blockchain === chain && x.symbol.toUpperCase() === want);
-    if (!t) throw new MoopayError("UNKNOWN_ASSET", `${want || "that asset"} is not available on ${chain.toUpperCase()}; try list_supported_assets`);
+    if (!t) throw new MoopayError("UNKNOWN_ASSET", `I can't send ${want || "that coin"} on ${chain.toUpperCase()} yet. Ask me what I can send there.`);
     return t;
   }
 
@@ -336,20 +405,20 @@ export class AgentOps {
     if (!direct) pay = (await this.exactOut(u, usdc, destUnits, chain, p, true)).amountIn; // what the swap really costs with fees
     await this.ensureUsdc(u, pay);
     const b = await this.balances(u);
-    if (b.nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet. Add a little more money (about $0.50) and try again.`);
+    if (b.nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet: the agent wallet needs about 0.05 NEAR. Send it to ${u.accountId} and try again.`);
     const k = this.store.keyOf(u);
     const base: Payment = { id: id(), kind: "send", amountUsd: amt, chain, recipient: p.recipient, status: "PROCESSING", createdAt: this.now(), ...(expected ? { expected } : {}), ...(ak ? { agentId: ak.id } : {}) };
     if (direct) {
       const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: p.recipient, amount: units });
-      Object.assign(base, { status: "DELIVERED", txHash: r.txHash, settled: true });
+      Object.assign(base, { status: "DELIVERED", txHash: r.txHash, settled: true, fee: 0 });
       this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     } else {
       const q = await this.exactOut(u, usdc, destUnits, chain, p, false);
-      if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
-      if ((await this.balances(u)).tok < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", "Your balance is a little short once fees are added. Add a little more money and try again.");
+      if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
+      if ((await this.balances(u)).tok < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(q.amountIn) / 10 ** usdc.decimals));
       const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: q.depositAddress, amount: q.amountIn });
       await this.svc.oneClickClient.submitDeposit(q.depositAddress, r.txHash).catch(() => undefined);
-      Object.assign(base, { depositAddress: q.depositAddress, txHash: r.txHash });
+      Object.assign(base, { depositAddress: q.depositAddress, txHash: r.txHash, fee: Math.max(0, Number(q.amountIn) / 10 ** usdc.decimals - amt) });
     }
     this.spend(u, amt, this.recipientKey(chain, p.recipient), ak);
     u.payments.unshift(base); u.payments.length = Math.min(u.payments.length, 100);
@@ -372,16 +441,15 @@ export class AgentOps {
     u.spent = u.spent.day === day ? { day, usd: u.spent.usd + amt } : { day, usd: amt };
     if (!u.known.includes(key)) u.known.push(key);
   }
-  private paymentCard(p: Payment) { return { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, expected: p.expected, tx: p.chain === "near" && p.txHash ? EXPLORER.near + p.txHash : undefined }; }
+  private paymentCard(p: Payment) { return { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, expected: p.expected, tx: p.chain === "near" && p.txHash ? EXPLORER.near + p.txHash : undefined, ...this.feeFields(p.amountUsd, p.fee) }; }
 
   /* ---- the private route (beta): the agent wallet pays into the user's OutLayer wallet, which converts if needed and pays the receiver from a private balance ---- */
   /** Why this payment cannot use the private route, in words for the user; undefined when it can. */
-  private privateWhy(u: UserRec, chain: string, ownWallet: boolean, nearUsdc: boolean): string | undefined {
+  private privateWhy(u: UserRec, chain: string, nearUsdc: boolean): string | undefined {
     if (!this.pr) return "The private route isn't switched on for this MooPay yet.";
     // Only USDC to a NEAR wallet has been run live. Payouts to Solana failed three times in testing, so the rest stays off unless MOOPAY_PRIVATE_ALL=1.
     if (!nearUsdc && process.env["MOOPAY_PRIVATE_ALL"] !== "1") return "The private route (beta) only sends USDC to a NEAR wallet for now. Other chains and coins are not available yet.";
     if (chain === "btc") return "The private route can't pay Bitcoin addresses yet.";
-    if (ownWallet) return "The private route pays from the agent wallet, which doesn't hold enough for this.";
     if (u.payments.some((x) => x.pv && !x.settled)) return "Another private payment is still on its way. Wait for it to land first.";
     return undefined;
   }
@@ -403,14 +471,25 @@ export class AgentOps {
     // What goes in: the amount as asked, or, when it has to be converted or bridged, what the normal route says that costs with fees.
     const fund = dest.assetId === usdc.assetId ? units : (await this.exactOut(u, usdc, destUnits, chain, { ...p, assetSymbol: sym }, true)).amountIn;
     await this.ensureUsdc(u, fund);
-    if ((await this.balances(u)).nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", "I can't pay the network fee for this yet. Add a little more money (about $0.50) and try again.");
+    if ((await this.balances(u)).nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet: the agent wallet needs about 0.05 NEAR. Send it to ${u.accountId} and try again.`);
     const ow = await this.outlayerWallet(u);
+    // Ask first, with nothing signed: a payout that cannot be made is found now, not after the money is in.
+    if (out.chain !== "near") {
+      try {
+        const q = await this.pr!.quoteWithdraw(ow.key, { chain: out.chain, to: p.recipient, amount: out.swapTo ? destUnits.toString() : fund.toString(), token: out.token });
+        if (!q.amount_out) throw new MoopayError("QUOTE_FAILED", `There's no private route to ${chain.toUpperCase()} for that right now. Nothing was sent. Try the normal send, or a different amount.`);
+      } catch (e) {
+        if (e instanceof MoopayError) throw e;
+        if (e instanceof OutLayerError && e.status === 400 && e.code !== "insufficient_balance") throw new MoopayError("QUOTE_FAILED", swapServiceMessage(e.message, e.status, out.swapTo ? undefined : { symbol: "USDC", decimals: usdc.decimals, price: 1 }));
+        /* anything else (busy, down): the money is only taken in once the deposit address below works */
+      }
+    }
     let dep;
     try { dep = await this.pr!.depositAddress(ow.key, { chain: "near", token: "USDC", amount: fund.toString() }); }
-    catch (e) { throw new MoopayError("UPSTREAM_TIMEOUT", `The private route isn't available right now${e instanceof OutLayerError ? ` (${e.code})` : ""}. Nothing was sent.`); }
+    catch (e) { throw new MoopayError("UPSTREAM_TIMEOUT", "The private route isn't available right now. Nothing was sent. Try again in a minute."); }
     const k = this.store.keyOf(u);
     const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: dep.deposit_address, amount: fund });
-    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain, recipient: p.recipient, status: "PRIVATE_FUNDING", createdAt: this.now(), txHash: r.txHash, pv: { step: "funding", amt: fund.toString(), idem: randomBytes(16).toString("hex"), out }, ...(ak ? { agentId: ak.id } : {}) };
+    const pay: Payment = { id: id(), kind: "send", amountUsd: amt, chain, recipient: p.recipient, status: "PRIVATE_FUNDING", createdAt: this.now(), txHash: r.txHash, fee: Math.max(0, Number(fund) / 10 ** usdc.decimals - amt), pv: { step: "funding", amt: fund.toString(), idem: randomBytes(16).toString("hex"), out }, ...(ak ? { agentId: ak.id } : {}) };
     this.spend(u, amt, this.recipientKey(chain, p.recipient), ak);
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100);
     this.store.save();
@@ -426,6 +505,8 @@ export class AgentOps {
       try { await pr.withdraw(ow.key, { chain: "near", to: u.accountId, amount: pv.amt, token: usdcId }, pv.idem + "-back"); p.status = "REFUNDED"; }
       catch { p.status = "FAILED"; p.why += ` Your money is in your private balance (wallet ${ow.account}); I could not move it back yet.`; }
     };
+    // "refunded" and a failure that never ran are safe to pay back; anything else may have moved money, so it is never retried.
+    const safe = (r: { status: string; result?: Record<string, unknown> | undefined }) => r.status === "refunded" || (r.status === "failed" && !!(r.result?.["never_executed"] || r.result?.["never_submitted"]));
     const stuck = (why: string) => { p.status = "FAILED"; p.settled = true; p.why = `${why} Your money is in your private balance (wallet ${ow.account}).`; };
     const pay = async (token: string, amount: string) => { const op = await pr.withdraw(ow.key, { chain: pv.out.chain, to: p.recipient, amount, token }, pv.idem + (pv.out.swapTo ? "-out" : "")); pv.req = op.request_id; pv.step = "paying"; p.status = "PRIVATE_SENDING"; };
     try {
@@ -438,12 +519,12 @@ export class AgentOps {
       } else if (pv.step === "swapping") {
         const r = await pr.request(ow.key, pv.req!);
         if (r.status === "success") await pay(pv.out.token, BigInt((await pr.balance(ow.key, pv.out.token)).balance ?? "0").toString());
-        else if (["failed", "refunded", "needs_review"].includes(r.status)) await giveBack("The private payment could not convert your money.");
+        else if (["failed", "refunded", "needs_review"].includes(r.status)) { if (safe(r)) await giveBack("The private payment could not convert your money."); else stuck(r.status === "needs_review" ? "OutLayer is checking this payment, so I won't try it again." : "The private payment could not convert your money."); }
       } else {
         const r = await pr.request(ow.key, pv.req!);
         const hash = ((r.result?.["swap_details"] as { destinationChainTxHashes?: string[] } | undefined)?.destinationChainTxHashes ?? [])[0];
         if (r.status === "success") { p.status = "DELIVERED"; p.settled = true; if (hash) p.txHash = hash; this.svc.publicStatsStore?.record(pv.idem, p.amountUsd, u.accountId); }
-        else if (["failed", "refunded", "needs_review"].includes(r.status)) { if (pv.out.swapTo) stuck("The private payout did not finish."); else await giveBack("The private payout did not finish."); }
+        else if (["failed", "refunded", "needs_review"].includes(r.status)) { if (!pv.out.swapTo && safe(r)) await giveBack("The private payout did not finish."); else stuck(r.status === "needs_review" ? "OutLayer is checking this payment, so I won't try it again." : "The private payout did not finish."); }
       }
     } catch (e) { if (!(e instanceof OutLayerError) || !e.retryable) { /* looked at again next round */ } }
     if (p.status !== before) this.store.save();
@@ -467,7 +548,7 @@ export class AgentOps {
     const units = parseDecimal(p.amountUsd, usdc.decimals);
     await this.ensureUsdc(u, units);
     const b = await this.balances(u);
-    if (b.nat < CLAIM_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this claim yet. Add a little more money (about $1) and try again.`);
+    if (b.nat < CLAIM_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this claim yet: the agent wallet needs about 0.1 NEAR. Send it to ${u.accountId} and try again.`);
     const desk = this.svc.claimDesk;
     const c = await desk.create({ amount: p.amountUsd, receiver: p.receiver, symbol: "USDC", chain });
     const plan = await desk.fundPlan(c.fundKey, u.accountId);
@@ -476,10 +557,10 @@ export class AgentOps {
     await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: plan.noteAccountId, amount: units });
     await desk.fundStatus(c.fundKey, ctx.origin).catch(() => undefined);
     const link = `${ctx.origin}/c/${c.claimKey}`;
-    const pay: Payment = { id: id(), kind: "claim", amountUsd: amt, chain, recipient: p.receiver, status: "WAITING_TO_BE_CLAIMED", createdAt: this.now(), fundKey: c.fundKey, claimLink: link, ...(who.ak ? { agentId: who.ak.id } : {}) };
+    const pay: Payment = { id: id(), kind: "claim", amountUsd: amt, chain, recipient: p.receiver, status: "WAITING_TO_BE_CLAIMED", createdAt: this.now(), ...(chain === "near" ? { fee: 0 } : {}), fundKey: c.fundKey, claimLink: link, ...(who.ak ? { agentId: who.ak.id } : {}) };
     this.spend(u, amt, this.recipientKey(chain, p.receiver), who.ak);
     u.payments.unshift(pay); this.store.save();
-    return { result: { status: "created", claimLink: link, paymentId: pay.id, rule: chain === "near" ? "Only the receiver's wallet can claim, within 24 hours; otherwise it comes back to the user's agent wallet." : `Only that ${chain.toUpperCase()} wallet can claim, by signing with it, within 24 hours; they receive USDC on ${chain.toUpperCase()} (a small swap fee comes out of the amount). Otherwise it comes back to the user's agent wallet.` }, card: { kind: "claim", id: pay.id, amountUsd: amt, receiver: p.receiver, chain, link } };
+    return { result: { status: "created", claimLink: link, paymentId: pay.id, rule: chain === "near" ? "Only the receiver's wallet can claim, within 24 hours; otherwise it comes back to the user's agent wallet." : `Only that ${chain.toUpperCase()} wallet can claim, by signing with it, within 24 hours; they receive USDC on ${chain.toUpperCase()} (a small swap fee comes out of the amount). Otherwise it comes back to the user's agent wallet.` }, card: { kind: "claim", id: pay.id, amountUsd: amt, receiver: p.receiver, chain, link, fees: chain === "near" ? "none added" : "a small swap fee comes out of the amount", total: usd(amt) } };
   }
 
   /* ---- wallet name ---- */
@@ -536,7 +617,7 @@ export class AgentOps {
       if (patch[k] !== undefined) { const v = patch[k]!.map((x) => x.toLowerCase().trim()).filter(Boolean); if (v.length) next[k] = k === "allowedAssets" ? v.map((x) => x.toUpperCase()) : v; else delete next[k]; }
     }
     if (patch.payoutAddress !== undefined) {
-      if (!isNearAccountId(patch.payoutAddress)) throw new MoopayError("BAD_RECIPIENT", "the payout wallet must be a NEAR address");
+      if (!isNearAccountId(patch.payoutAddress)) throw new MoopayError("BAD_RECIPIENT", "Your payout wallet must be a NEAR wallet, like alice.near.");
       if (!u.rules.payoutAddress) next.payoutAddress = patch.payoutAddress; // first one takes effect now
       else if (patch.payoutAddress === u.rules.payoutAddress) delete next.pendingPayout; // setting the current one again cancels a pending change
       else if (!approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", "changing your payout wallet");
@@ -578,7 +659,7 @@ export class AgentOps {
     const gid = id();
     (u.groups ??= []).unshift({ id: gid, at: this.now(), entries }); u.groups.length = Math.min(u.groups.length, 50); this.store.save();
     const link = `${ctx.origin}/g/${gid}`;
-    return { result: { status: "created", groupLink: link, wallets: entries.length, total: usd(total), rule: "Each wallet opens the link, enters its own address and claims only its own amount within 24 hours; anything unclaimed comes back to the agent wallet." }, card: { kind: "groupclaim", link, total, rows: items.map((i) => ({ to: i.receiver, amount: usd(Number(i.amountUsd)), chain: (i.chain ?? "near").toUpperCase() })) } };
+    return { result: { status: "created", groupLink: link, wallets: entries.length, total: usd(total), rule: "Each wallet opens the link, enters its own address and claims only its own amount within 24 hours; anything unclaimed comes back to the agent wallet." }, card: { kind: "groupclaim", link, total, fees: items.every((i) => (i.chain ?? "near").toLowerCase() === "near") ? "none added" : "a small swap fee comes out of the non-NEAR claims", totalPay: usd(total), rows: items.map((i) => ({ to: i.receiver, amount: usd(Number(i.amountUsd)), chain: (i.chain ?? "near").toUpperCase() })) } };
   }
 
   /** Repeats a whole group payout every day, week or month. Each run follows the rules like any other payment. */
@@ -739,7 +820,7 @@ export class AgentOps {
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return {
       result: { status: "needs_your_signature", paymentId: pay.id, note: "A Stake button is on the user's screen. They press it, give the NEAR wallet that should receive the rNEAR if it isn't filled in, pick the wallet they pay from and sign. Nothing has been sent or taken yet. Do not say it failed and do not paste the link." + (notice ? ` Also tell the user: ${notice}` : "") },
-      card: { kind: "confirm_send", title: `Stake ${shown} NEAR with Rhea`, url: `${ctx.origin}/p/${payId}`, amount: `${shown} NEAR (about ${usd(o.amt)}), you receive about ${expected} rNEAR`, button: "Stake", ...(notice ? { notice } : {}), ...(o.payout ? { to: o.payout, chain: "NEAR", toLabel: "rNEAR goes to" } : {}), id: pay.id },
+      card: { kind: "confirm_send", title: `Stake ${shown} NEAR with Rhea`, url: `${ctx.origin}/p/${payId}`, amount: `${shown} NEAR (about ${usd(o.amt)}), you receive about ${expected} rNEAR`, button: "Stake", fees: "network gas only, shown before you sign", ...(notice ? { notice } : {}), ...(o.payout ? { to: o.payout, chain: "NEAR", toLabel: "rNEAR goes to" } : {}), id: pay.id },
     };
   }
 
@@ -753,7 +834,7 @@ export class AgentOps {
       const b = await this.balances(u);
       const room = b.nat + b.wnear - STAKE_GAS_ROOM; // a small price move can leave the window a little short of the plan
       const nearAmt = [parseDecimal(p.stakeNear!, 24), room].reduce((x, y) => (x < y ? x : y));
-      if (nearAmt < STAKE_MIN_NEAR) throw new MoopayError("NOTE_NOT_FUNDED", "not enough arrived to stake");
+      if (nearAmt < STAKE_MIN_NEAR) throw new MoopayError("NOTE_NOT_FUNDED", "Not enough arrived to stake yet. Add a little more and try again.");
       const r = await this.runStake(u, nearAmt, p.recipient);
       Object.assign(p, { status: "STAKED", settled: true, txHash: r.tx, expected: `${r.rnear} rNEAR` });
       delete p.why;
@@ -927,7 +1008,16 @@ export class AgentOps {
     if (p.kind === "claim" && p.fundKey) {
       const s = await this.svc.claimFundState(p.fundKey, ctx.origin);
       const map: Record<string, string> = { CLAIMED: "CLAIMED", REFUNDED: "REFUNDED", CANCELLED: "REFUNDED" };
-      if (map[s.state]) { p.status = map[s.state]!; p.settled = true; }
+      // Opened is not delivered: a claim paid to another chain is only done when the swap service has put it there.
+      const d = s.state === "CLAIMED" && s.deliverTo ? ((await this.svc.oneClickClient.status(s.deliverTo).catch(() => undefined)) as { status: string; swapDetails?: { destinationChainTxHashes?: { hash: string }[] } } | undefined) : undefined;
+      if (d && d.status !== "SUCCESS") {
+        if (d.status === "REFUNDED" || d.status === "FAILED") { p.status = "REFUNDED"; p.settled = true; } // the swap service returns it to the agent wallet
+        else p.status = "ON_ITS_WAY";
+      } else if (map[s.state]) {
+        p.status = map[s.state]!; p.settled = true;
+        const hash = d?.swapDetails?.destinationChainTxHashes?.[0]?.hash;
+        if (hash) link = (EXPLORER[p.chain] ?? "") + hash;
+      }
     } else if (p.depositAddress) {
       const s = (await this.svc.oneClickClient.status(p.depositAddress)) as { status: string; swapDetails?: { destinationChainTxHashes?: { hash: string }[] } };
       const hash = s.swapDetails?.destinationChainTxHashes?.[0]?.hash;
@@ -941,10 +1031,10 @@ export class AgentOps {
 
   async status(u: UserRec, paymentId: string, ctx: Ctx): Promise<Out> {
     const p = u.payments.find((x) => x.id === paymentId);
-    if (!p) throw new MoopayError("NOTE_NOT_FOUND", "no payment with that id");
+    if (!p) throw new MoopayError("NOTE_NOT_FOUND", "I can't find that payment.");
     const r = await this.refresh(u, p, ctx);
     if (r.earned) { this.pointsEvent(u, r.earned); this.store.save(); }
-    return { result: { id: p.id, status: p.status, ...(r.link ? { transaction: r.link } : {}) }, card: { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link } };
+    return { result: { id: p.id, status: p.status, ...(r.link ? { transaction: r.link } : {}) }, card: { kind: "payment", id: p.id, amountUsd: p.amountUsd, chain: p.chain, recipient: p.recipient, status: p.status, tx: r.link, ...this.feeFields(p.amountUsd, p.fee) } };
   }
 
 
@@ -972,14 +1062,14 @@ export class AgentOps {
     }
     const pay: Payment = { id: id(), kind: "withdraw", amountUsd: asset === "NEAR" ? 0 : shown, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), txHash: r.txHash, settled: true };
     u.payments.unshift(pay); this.store.save();
-    return { result: { status: "sent", sent: asset === "NEAR" ? `${shown} NEAR` : usd(shown), to }, card: { kind: "payment", id: pay.id, amountUsd: shown, chain: "near", recipient: to, status: "DELIVERED", tx: EXPLORER.near + r.txHash, unit: asset === "NEAR" ? "NEAR" : undefined } };
+    return { result: { status: "sent", sent: asset === "NEAR" ? `${shown} NEAR` : usd(shown), to }, card: { kind: "payment", id: pay.id, amountUsd: shown, chain: "near", recipient: to, status: "DELIVERED", tx: EXPLORER.near + r.txHash, unit: asset === "NEAR" ? "NEAR" : undefined, ...(asset === "NEAR" ? {} : this.feeFields(shown, 0)) } };
   }
 
   /* ---- add money from any chain: 1Click turns it into USDC in the agent wallet ---- */
   private async originAsset(chain: string, symbol: string | undefined, amountUsd: string) {
     const want = (symbol ?? NATIVE[chain] ?? "").toUpperCase();
     const t = (await this.svc.oneClickClient.tokens()).find((x) => x.blockchain === chain && x.symbol.toUpperCase() === want);
-    if (!t) throw new MoopayError("UNKNOWN_ASSET", `${want || "that asset"} on ${chain} is not supported; try list_supported_assets`);
+    if (!t) throw new MoopayError("UNKNOWN_ASSET", `I can't send ${want || "that coin"} on ${chain.toUpperCase()} yet. Ask me what I can send there.`);
     if (!t.price || t.price <= 0) throw new MoopayError("QUOTE_FAILED", `no price for ${want} right now`);
     const micro = parseDecimal(amountUsd, 6);
     const priceMicro = BigInt(Math.round(t.price * 1e6));
@@ -999,7 +1089,7 @@ export class AgentOps {
     const chain = p.fromChain.toLowerCase();
     let usdText = p.amountUsd;
     if (!usdText) { // coins ("0.01 SOL") are priced in dollars here
-      if (!p.amount) throw new MoopayError("INVALID_INPUT", "give an amount in dollars (amountUsd) or in coins (amount)");
+      if (!p.amount) throw new MoopayError("INVALID_INPUT", "How much should I send? Say an amount, like $5.");
       const price = (await this.destAsset(chain, p.fromSymbol) as { price?: number }).price;
       if (!price) throw new MoopayError("QUOTE_FAILED", "I couldn't get a price for that coin, so say the amount in dollars instead.");
       parseDecimal(p.amount, 18);

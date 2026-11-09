@@ -52,6 +52,6 @@ export async function requestMpcSignature(
       gas: 300_000_000_000_000n,
     });
   } catch {
-    throw new MoopayError("SIGNING_FAILED", "Chain Signatures request failed");
+    throw new MoopayError("SIGNING_FAILED", "I couldn't sign that payment right now. Try again in a minute.");
   }
 }

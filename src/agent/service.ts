@@ -174,7 +174,7 @@ export class MooPayService {
     const input = parseInput(mintSchema, rawInput);
     if (input.receiver !== undefined) return this.createClaimLink(input as { receiver: string; payAmount: string; symbol?: "USDC" | "USDT" | "NEAR" }, ctx);
     const amount = BigInt(input.amount!);
-    if (amount <= 0n) throw new MoopayError("INVALID_INPUT", "amount must be > 0");
+    if (amount <= 0n) throw new MoopayError("INVALID_INPUT", "The amount has to be more than zero.");
 
     const token = await this.d.oneClick.findToken(input.assetId!);
     if (!token) throw new MoopayError("UNKNOWN_ASSET", "assetId is not listed by 1Click /v0/tokens");
@@ -253,7 +253,7 @@ export class MooPayService {
       dry: false, swapType: "EXACT_INPUT", slippageTolerance: 100, originAsset: p.token.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: dest.assetId, amount: p.amount.toString(),
       recipient: p.receiver, recipientType: "DESTINATION_CHAIN", refundTo: p.refundTo, refundType: "ORIGIN_CHAIN", deadline: new Date(Date.now() + 10 * 60_000).toISOString(),
     })).quote;
-    if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no deposit address");
+    if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
     const r = await this.d.near.transferFromNote({ accountId: p.accountId, secretKey: p.secretKey, tokenContract: p.token.contract, to: q.depositAddress, amount: p.amount });
     await this.d.oneClick.submitDeposit(q.depositAddress, r.txHash).catch(() => undefined);
     return { txHash: r.txHash, depositAddress: q.depositAddress };
@@ -317,7 +317,7 @@ export class MooPayService {
       throw new MoopayError("INVALID_INPUT", "pay links need the HTTP mode (npm run start:http behind an HTTPS tunnel); use DIRECT mode here");
     const assets = await this.payAssets();
     const probe = assets[0];
-    if (!probe) throw new MoopayError("UNKNOWN_ASSET", "no payable stablecoin is listed by 1Click right now");
+    if (!probe) throw new MoopayError("UNKNOWN_ASSET", "I can't find a coin to pay with right now. Try again in a minute.");
     parseDecimal(input.payAmount, probe.decimals); // validates shape and precision early
     const intent = this.pay.create({
       destinationChain: input.destinationChain,
@@ -405,7 +405,7 @@ export class MooPayService {
   /** What a Solana wallet holds, so the page can say what is missing before the wallet shows a failed simulation. */
   async solCheck(owner: string, mint?: string, to?: string): Promise<{ sol: string; token: string; destHasAccount: boolean }> {
     const b58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-    if (!b58.test(owner) || (mint && !b58.test(mint)) || (to && !b58.test(to))) throw new MoopayError("INVALID_INPUT", "that does not look like a Solana address");
+    if (!b58.test(owner) || (mint && !b58.test(mint)) || (to && !b58.test(to))) throw new MoopayError("INVALID_INPUT", "That doesn't look like a Solana address.");
     const call = (method: string, params: unknown[]) => this.solRpc(method, params);
     const accounts = async (who: string) => ((await call("getTokenAccountsByOwner", [who, { mint }, { encoding: "jsonParsed" }])) ?? { value: [] }).value as { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[];
     const [bal, mine, theirs] = await Promise.all([call("getBalance", [owner]), mint ? accounts(owner) : [], mint && to ? accounts(to) : []]);
@@ -415,7 +415,7 @@ export class MooPayService {
 
   /** Sends a transaction the user already signed (WalletConnect wallets sign but do not broadcast). */
   async solSend(txBase64: string): Promise<{ signature: string }> {
-    if (!/^[A-Za-z0-9+/=]{100,2000}$/.test(txBase64)) throw new MoopayError("INVALID_INPUT", "that does not look like a signed transaction");
+    if (!/^[A-Za-z0-9+/=]{100,2000}$/.test(txBase64)) throw new MoopayError("INVALID_INPUT", "That doesn't look like a signed transaction. Try signing again.");
     const rpc = process.env["SOL_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
     const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [txBase64, { encoding: "base64" }] }), signal: AbortSignal.timeout(10000) });
     const j = (await r.json()) as { result?: string; error?: { message?: string } };
@@ -429,7 +429,7 @@ export class MooPayService {
     const r = await fetch(rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestBlockhash", params: [{ commitment: "finalized" }] }), signal: AbortSignal.timeout(8000) });
     const j = (await r.json()) as { result?: { value?: { blockhash: string; lastValidBlockHeight: number } } };
     const v = j.result?.value;
-    if (!v?.blockhash) throw new MoopayError("UPSTREAM_TIMEOUT", "could not reach Solana right now; try again");
+    if (!v?.blockhash) throw new MoopayError("UPSTREAM_TIMEOUT", "I can't reach Solana right now. Try again in a minute.");
     return v;
   }
 
@@ -470,7 +470,7 @@ export class MooPayService {
   private async payInputs(id: string, originAssetId: string): Promise<{ i: PayIntent; out: bigint; asset: PayAsset }> {
     const i = this.pay.get(id);
     const asset = (await this.payAssetsAll()).find((a) => a.assetId === originAssetId);
-    if (!asset) throw new MoopayError("INVALID_INPUT", "that asset is not offered for payment");
+    if (!asset) throw new MoopayError("INVALID_INPUT", "That coin can't be used to pay right now. Pick another.");
     return { i, out: await this.receiverUnits(i), asset };
   }
 
@@ -509,7 +509,7 @@ export class MooPayService {
     const i = this.pay.get(id);
     if (!i.direct) throw new MoopayError("INVALID_INPUT", "this payment is not a direct transfer");
     const shape = i.destinationChain === "sol" ? /^[1-9A-HJ-NP-Za-km-z]{64,90}$/ : i.destinationChain === "near" ? /^[1-9A-HJ-NP-Za-km-z]{43,44}$/ : /^0x[0-9a-fA-F]{64}$/;
-    if (!shape.test(tx)) throw new MoopayError("INVALID_INPUT", "that does not look like a transaction id");
+    if (!shape.test(tx)) throw new MoopayError("INVALID_INPUT", "That doesn't look like a transaction id.");
     this.pay.setSig(id, tx);
     return { ok: true };
   }
@@ -526,7 +526,7 @@ export class MooPayService {
     const chain = i.destinationChain, base = { depositAddress: i.recipient, recipient: i.recipient, chain, direct: true };
     if (!i.sig) return { state: "PROCESSING", ...base };
     const asset = (await this.payAssetsAll()).find((a) => a.assetId === i.destinationAssetId);
-    if (!asset) throw new MoopayError("UNKNOWN_ASSET", "that asset is not offered for payment");
+    if (!asset) throw new MoopayError("UNKNOWN_ASSET", "That coin can't be used to pay right now. Pick another.");
     const want = await this.receiverUnits(i);
     let verdict: "pending" | "failed" | "ok";
     try { verdict = await this.directVerdict(i, asset, want); } catch { verdict = "pending"; } // an RPC hiccup is not a failed payment
@@ -679,7 +679,7 @@ export class MooPayService {
 
     const q = await this.d.oneClick.quote({ ...base, dry: false });
     const depositAddress = q.quote.depositAddress;
-    if (!depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no depositAddress");
+    if (!depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
     return {
       mode: "direct" as const,
       dryRun: false,
@@ -774,7 +774,7 @@ export class MooPayService {
     try {
       const q = await this.d.oneClick.quote({ ...base, dry: false });
       const depositAddress = q.quote.depositAddress;
-      if (!depositAddress) throw new MoopayError("QUOTE_FAILED", "1Click returned no depositAddress");
+      if (!depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
       await this.d.ledger.update(commitment, (n) => {
         n.claim = { ...n.claim!, depositAddress, ...(q.quote.deadline ? { quoteDeadline: q.quote.deadline } : {}) };
       });

@@ -44,7 +44,7 @@ const TGAS = 1_000_000_000_000n;
 // Prepaid gas is charged up front at the current gas price (it has been ~10x the minimum), so keep it near what a token transfer really uses.
 const FT_GAS = 12n * TGAS;
 const STORAGE_REGISTRATION = 1_250_000_000_000_000_000_000n; // 0.00125 NEAR, NEP-145 minimum
-const rpcDown = () => new MoopayError("UPSTREAM_TIMEOUT", "NEAR RPC is unavailable or timed out");
+const rpcDown = () => new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network is busy right now. Nothing was sent. Try again in a minute.");
 
 export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
   // The public NEAR RPC rate-limits (429); a second endpoint keeps balance checks and payments working.
@@ -101,7 +101,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         return { txHash: (out as unknown as { transaction: { hash: string } }).transaction.hash };
       } catch (e) {
         if (process.env["MOOPAY_DEBUG"]) console.error("[moopay] create account failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
-        throw new MoopayError("DEPOSIT_FAILED", "could not create that account");
+        throw new MoopayError("DEPOSIT_FAILED", "I couldn't create that account right now. Try again in a minute.");
       }
     },
 
@@ -109,7 +109,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       try {
         await verifyMessage({ signerAccountId: accountId, signerPublicKey: publicKey, payload: { ...payload, nonce: new Uint8Array(payload.nonce) }, signature: new Uint8Array(signature), provider });
       } catch {
-        throw new MoopayError("BAD_RECIPIENT", "the wallet signature did not check out");
+        throw new MoopayError("BAD_RECIPIENT", "That wallet signature wasn't accepted. Try signing again.");
       }
     },
 
@@ -118,8 +118,8 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const out = await new Account(accountId, provider, secretKey as never).transfer({ receiverId: to, amount });
         return { txHash: (out as unknown as { transaction: { hash: string } }).transaction.hash };
       } catch (e) {
-        if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "NEAR RPC timed out; the transfer may or may not have landed");
-        throw new MoopayError("DEPOSIT_FAILED", "NEAR transfer failed");
+        if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before sending again.");
+        throw new MoopayError("DEPOSIT_FAILED", "The NEAR transfer didn't go through. Nothing was taken. Try again.");
       }
     },
 
@@ -129,8 +129,8 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         return { txHash: out.transaction.hash as string };
       } catch (e) {
         if (process.env["MOOPAY_DEBUG"]) console.error(`[moopay] ${contractId}.${method} failed:`, e instanceof Error ? `${e.name}: ${e.message}` : e);
-        if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "NEAR RPC timed out; it may or may not have gone through");
-        throw new MoopayError("DEPOSIT_FAILED", `${method} on ${contractId} failed`);
+        if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before trying again.");
+        throw new MoopayError("DEPOSIT_FAILED", "That step on the NEAR network didn't go through. Nothing was taken. Try again.");
       }
     },
 
@@ -143,7 +143,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const out = await new Account(accountId, provider, secretKey as never).callFunctionRaw({ contractId: wrapContract, methodName: "near_deposit", args: {}, deposit: amount, gas: 30n * TGAS });
         return { txHash: out.transaction.hash as string };
       } catch {
-        throw new MoopayError("DEPOSIT_FAILED", "could not wrap NEAR for the swap");
+        throw new MoopayError("DEPOSIT_FAILED", "I couldn't prepare your NEAR for the swap. Nothing was taken. Try again.");
       }
     },
 
@@ -192,8 +192,8 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       } catch (e) {
         if (process.env["MOOPAY_DEBUG"]) console.error("[moopay] ft_transfer failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
         if (e instanceof Error && /time(d)? ?out/i.test(e.message))
-          throw new MoopayError("UPSTREAM_TIMEOUT", "NEAR RPC timed out; the transfer may or may not have landed");
-        throw new MoopayError("DEPOSIT_FAILED", "ft_transfer to the 1Click deposit address failed");
+          throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before sending again.");
+        throw new MoopayError("DEPOSIT_FAILED", "The payment to the swap service didn't go through. Nothing was taken. Try again.");
       }
     },
   };

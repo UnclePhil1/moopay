@@ -98,12 +98,12 @@ export class ClaimDesk {
 
   private byFund(key: string): Claim {
     const c = this.claims.find((x) => x.fundKey === key);
-    if (!c) throw new MoopayError("NOTE_NOT_FOUND", "this link is not valid or has expired");
+    if (!c) throw new MoopayError("NOTE_NOT_FOUND", "This link isn't valid or has expired.");
     return c;
   }
   private byClaim(key: string): Claim {
     const c = this.claims.find((x) => x.claimKey === key);
-    if (!c) throw new MoopayError("NOTE_NOT_FOUND", "this claim link is not valid");
+    if (!c) throw new MoopayError("NOTE_NOT_FOUND", "This claim link isn't valid.");
     return c;
   }
 
@@ -135,8 +135,8 @@ export class ClaimDesk {
   /** The sender picked a wallet: remember it as the refund address and describe what to sign. */
   async fundPlan(key: string, sender: string) {
     const c = this.byFund(key);
-    if (c.state !== "AWAITING_FUNDING") throw new MoopayError("NOTE_NOT_FOUND", "this payment was already funded");
-    if (this.now() - c.createdAt > FUND_WINDOW_MS) throw new MoopayError("NOTE_EXPIRED", "this link expired; ask for a new one");
+    if (c.state !== "AWAITING_FUNDING") throw new MoopayError("NOTE_NOT_FOUND", "This payment was already funded.");
+    if (this.now() - c.createdAt > FUND_WINDOW_MS) throw new MoopayError("NOTE_EXPIRED", "This link has expired. Ask for a new one.");
     if (!isNearAccountId(sender)) throw new MoopayError("INVALID_INPUT", "sender must be a NEAR account");
     c.sender = sender;
     this.save();
@@ -158,6 +158,7 @@ export class ClaimDesk {
       ...(c.expiresAt ? { expiresAt: new Date(c.expiresAt).toISOString() } : {}),
       receiver: c.receiver, amount: label(c), symbol: c.token.symbol,
       ...(c.claimTx ? { claimTx: c.claimTx } : {}), ...(c.refundTx ? { refundTx: c.refundTx } : {}),
+      ...(c.deliverTo ? { deliverTo: c.deliverTo } : {}),
     };
   }
 
@@ -241,9 +242,9 @@ export class ClaimDesk {
   async claim(key: string, proof: { accountId: string; publicKey?: string; signature: string }) {
     const c = this.byClaim(key);
     await this.refresh(c);
-    if (c.state === "CLAIMED") throw new MoopayError("NOTE_ALREADY_CLAIMED", "this was already claimed");
+    if (c.state === "CLAIMED") throw new MoopayError("NOTE_ALREADY_CLAIMED", "This has already been claimed.");
     if (c.state !== "FUNDED") throw new MoopayError("NOTE_NOT_FUNDED", c.state === "REFUNDED" ? "this expired and was returned to the sender" : "this is not ready to claim yet");
-    if (c.expiresAt && this.now() > c.expiresAt) throw new MoopayError("NOTE_EXPIRED", "this claim window has ended");
+    if (c.expiresAt && this.now() > c.expiresAt) throw new MoopayError("NOTE_EXPIRED", "This claim window has ended.");
     const other = c.chain && c.chain !== "near";
     if (other ? proof.accountId.toLowerCase() !== c.receiver.toLowerCase() : proof.accountId !== c.receiver) throw new MoopayError("BAD_RECIPIENT", `only ${c.receiver} can claim this`);
     if (!c.nonce) throw new MoopayError("INVALID_INPUT", "ask for a challenge first");

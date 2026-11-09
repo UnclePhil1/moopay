@@ -4,6 +4,7 @@ import { SealedFile, Vault } from "../storage/index.js";
 import { UserFileSchema } from "../storage/schema.js";
 import { loadSeed } from "../storage/seed.js";
 import { recipientKey } from "./policy.js";
+import { Reporter, REPORT_KINDS, type Row } from "./report.js";
 import type { Preflight } from "./preflight.js";
 
 /*
@@ -24,8 +25,8 @@ export interface AgentKey {
   spent: { day: string; usd: number }; totalSpent: number;
 }
 export interface Payment {
-  id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake" | "unstake"; amountUsd: number; chain: string; recipient: string;
-  status: string; createdAt: number; /** moo points this payment earned, set once */ pts?: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string;
+  id: string; kind: "send" | "claim" | "sweep" | "fund" | "withdraw" | "stake" | "unstake" | "swap"; /** how it came about, for the team numbers only */ tag?: "scheduled" | "group"; amountUsd: number; chain: string; recipient: string;
+  status: string; createdAt: number; /** moo points this payment earned, set once */ pts?: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string; /** fees added on top of `amountUsd`, in dollars, once known */ fee?: number;
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;
   /** a stake paid from the user's own wallet: how much NEAR to stake once the money lands (24 decimals) */
@@ -56,6 +57,8 @@ export interface UserRec {
   spent: { day: string; usd: number }; known: string[];
   payments: Payment[]; approvals: Approval[]; tasks: Task[]; events: AgentEvent[]; nextEventId: number;
   sponsoredAt?: number; agents: AgentKey[];
+  /** conversions handed to the swap service that have not ended yet; the swap service sends the money back to the agent wallet if one fails */
+  swaps?: { addr: string; at: number }[];
   /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
   outlayer?: { key: string; account: string };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
@@ -75,6 +78,7 @@ export const SESSION_MS = 60 * 60 * 1000;
 const MAX_SESSIONS = 10;
 /** Old chat is dropped after this long (CHAT_RETENTION_DAYS, default 30). Payments and activity are kept: they are the user's money records. */
 const chatTtl = (): number => (Number(process.env["CHAT_RETENTION_DAYS"]) || 30) * 86_400_000;
+const MAX_REMOTE = 500_000;
 const MASTER_RE = /^[A-Za-z0-9_-]{32,64}$/;
 const SESSION_RE = /^mps\.[A-Za-z0-9_-]{43}$/;
 const newToken = (): string => randomBytes(32).toString("base64url");
@@ -88,16 +92,20 @@ export class AgentStore {
   /** Every payment ever made (a user's list keeps only the latest 100) and the most each wallet has held, in cents. For the team's numbers; kept forever. */
   private ledger = new Map<string, Payment & { who: string }>();
   private peaks = new Map<string, number>();
-  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[], ledger: Record<string, unknown> = {}, peaks: Record<string, number> = {}) {
+  /** Payments other MooPay runs reported to this one (see report.ts), for the team's numbers page. */
+  private remote = new Map<string, Row>();
+  private readonly reporter = new Reporter();
+  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[], ledger: Record<string, unknown> = {}, peaks: Record<string, number> = {}, remote: Record<string, unknown> = {}) {
     for (const u of users) this.add(u);
     for (const [k, v] of Object.entries(ledger)) this.ledger.set(k, v as Payment & { who: string });
     for (const [k, v] of Object.entries(peaks)) this.peaks.set(k, v);
+    for (const [k, v] of Object.entries(remote)) this.remote.set(k, v as unknown as Row);
     this.remember();
   }
 
   static async open(path: string, vault: Vault = new Vault()): Promise<AgentStore> {
     const { file, value } = await SealedFile.open(path, UserFileSchema, vault, "state:agent");
-    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[], value?.ledger, value?.peaks);
+    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[], value?.ledger, value?.peaks, value?.remote);
   }
 
   flush(): Promise<void> { return this.file.flush(); }
@@ -202,10 +210,29 @@ export class AgentStore {
       const c = Number(u.seen?.usdc ?? 0); if (c > (this.peaks.get(u.id) ?? 0)) this.peaks.set(u.id, c);
     }
   }
-  history(): { rows: (Payment & { who: string })[]; peaks: Map<string, number> } { this.remember(); return { rows: [...this.ledger.values()], peaks: this.peaks }; }
+  /** Notes a finished event (a conversion) in the permanent ledger without putting it in the user's recent list. */
+  note(u: UserRec, row: Payment): void { this.ledger.set(row.id, { ...row, who: u.id }); }
+  history(): { rows: (Payment & { who: string })[]; peaks: Map<string, number>; remote: Row[] } { this.remember(); return { rows: [...this.ledger.values()], peaks: this.peaks, remote: [...this.remote.values()] }; }
+
+  /** Takes in rows reported by other MooPay runs (a laptop test, say). Bad rows are dropped; the same row again replaces the old one. Returns how many were kept. */
+  ingest(rows: unknown[]): number {
+    let kept = 0;
+    for (const r of rows.slice(0, 500) as Partial<Row>[]) {
+      const ok = r && typeof r === "object" && typeof r.key === "string" && r.key.length <= 200 && typeof r.id === "string" && r.id.length <= 80 && typeof r.who === "string" && /^[0-9a-f]{8,64}$/.test(r.who)
+        && (r.env === "production" || r.env === "development") && typeof r.host === "string" && /^[\w.:-]{1,80}$/.test(r.host) && typeof r.kind === "string" && REPORT_KINDS.includes(r.kind)
+        && typeof r.chain === "string" && r.chain.length <= 16 && typeof r.status === "string" && r.status.length <= 40 && typeof r.amountUsd === "number" && Number.isFinite(r.amountUsd) && r.amountUsd >= 0 && r.amountUsd < 1e9
+        && typeof r.createdAt === "number" && Number.isFinite(r.createdAt) && (r.tag === undefined || r.tag === "scheduled" || r.tag === "group");
+      if (!ok || (this.remote.size >= MAX_REMOTE && !this.remote.has(r.key!))) continue;
+      this.remote.set(r.key!, { key: r.key!, id: r.id!, who: r.who!, env: r.env!, host: r.host!, kind: r.kind!, ...(r.tag ? { tag: r.tag } : {}), chain: r.chain!, amountUsd: r.amountUsd!, status: r.status!, createdAt: r.createdAt!, settled: !!r.settled });
+      kept++;
+    }
+    if (kept) this.save();
+    return kept;
+  }
 
   save(): void {
     this.remember();
-    this.file.save({ ledger: Object.fromEntries(this.ledger), peaks: Object.fromEntries(this.peaks), users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
+    this.reporter.push(this.ledger.values());
+    this.file.save({ ledger: Object.fromEntries(this.ledger), peaks: Object.fromEntries(this.peaks), remote: Object.fromEntries(this.remote), users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
   }
 }

@@ -30,7 +30,7 @@ export async function makeAgent(d: AgentDeps) {
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
   // The team's numbers page lives in src/stat, which is kept out of git. When the folder is not there the page does not exist.
-  const statModule = import(new URL("../../stat/index.js", import.meta.url).href).then((m) => m as { handleStat(req: IncomingMessage, res: ServerResponse, path: string, users: () => UserRec[], now: number, history?: ReturnType<AgentStore["history"]>): boolean }).catch(() => undefined);
+  const statModule = import(new URL("../../stat/index.js", import.meta.url).href).then((m) => m as { handleStat(req: IncomingMessage, res: ServerResponse, path: string, users: () => UserRec[], now: number, history?: ReturnType<AgentStore["history"]>, ingest?: (rows: unknown[]) => number): boolean }).catch(() => undefined);
 
   const json = (res: ServerResponse, code: number, data: unknown) => { res.statusCode = code; res.setHeader("content-type", "application/json"); res.setHeader("cache-control", "no-store"); res.end(toJson(data)); };
   const bodyOf = async (req: IncomingMessage): Promise<Record<string, unknown>> => {
@@ -40,7 +40,7 @@ export async function makeAgent(d: AgentDeps) {
   };
   const tokenOf = (req: IncomingMessage): string => {
     const t = req.headers["x-moopay-device"];
-    if (typeof t !== "string") throw new MoopayError("INVALID_INPUT", "missing device token");
+    if (typeof t !== "string") throw new MoopayError("INVALID_INPUT", "I couldn't tell which browser this is. Reload the page.");
     return t;
   };
   const authOf = (req: IncomingMessage) => {
@@ -93,7 +93,7 @@ export async function makeAgent(d: AgentDeps) {
       json(res, key ? 200 : 404, key ? { link: `${origin}/c/${key}` } : { message: "That wallet is not part of this group link. Check the address." });
       return true;
     }
-    if (p === "/stat" || p === "/stat/data") { const m = await statModule; if (m && m.handleStat(req, res, p, () => store.all(), now(), store.history())) return true; }
+    if (p === "/stat" || p.startsWith("/stat/")) { const m = await statModule; if (m && m.handleStat(req, res, p, () => store.all(), now(), store.history(), (rows) => store.ingest(rows))) return true; }
     if (!p.startsWith("/agent/api/")) return false;
     lastOrigin = origin;
     const ip = clientIp(req), op0 = p.slice("/agent/api/".length);
