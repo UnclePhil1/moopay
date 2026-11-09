@@ -146,6 +146,11 @@ const template = (p, i) => {
   .grp { margin-bottom:26px; } .grp h4 { margin:0 0 8px 12px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
   .grp a { display:block; text-decoration:none; color:var(--soft); font-size:15px; line-height:1.4; padding:7px 12px; margin:1px 0; border-radius:8px; }
   .grp a:hover { background:rgba(244,239,230,.05); } .grp a.on { background:rgba(244,239,230,.1); font-weight:700; color:var(--text); }
+  .scrim, .sidehead, .sidetabs { display:none; }
+  .sidehead { align-items:center; justify-content:space-between; margin-bottom:14px; } .sidehead img { height:20px; }
+  .x { background:none; border:1px solid var(--line); color:var(--text); width:36px; height:36px; border-radius:10px; font-size:18px; cursor:pointer; }
+  .sidetabs { flex-direction:column; gap:2px; padding-bottom:16px; margin-bottom:18px; border-bottom:1px solid var(--line); }
+  .sidetabs a { text-decoration:none; color:var(--muted); font-weight:600; font-size:15px; padding:10px 12px; border-radius:8px; } .sidetabs a.on { color:var(--text); background:rgba(244,239,230,.1); }
   .doc { padding:40px 0 90px; min-width:0; }
   h1 { font-size:40px; line-height:1.12; margin:0 0 10px; font-weight:800; letter-spacing:-.02em; }
   .desc { font-size:19px; color:var(--soft); margin:0 0 30px; }
@@ -175,9 +180,15 @@ const template = (p, i) => {
   .raw { margin-top:30px; font-size:13.5px; color:var(--muted); } .raw a { color:var(--muted); }
   @media (max-width:1060px) { .shell { grid-template-columns:230px minmax(0,1fr); } .toc { display:none; } }
   @media (max-width:760px) {
-    .menu { display:block; } .bar { gap:12px; } .open { display:none; }
-    .shell { display:block; padding:0 16px; } .bar { padding:0 16px; }
-    .side { display:none; position:static; max-height:none; padding:18px 0 8px; border-right:0; border-bottom:1px solid var(--line); } .side.show { display:block; }
+    .menu { display:block; } .bar { gap:12px; padding:0 16px; } .open, .bar .tabs { display:none; }
+    .shell { display:block; padding:0 16px; }
+    .side { position:fixed; z-index:40; top:0; left:0; height:100vh; height:100dvh; align-self:auto; width:min(320px,86vw); max-height:none; background:var(--bg); border-right:1px solid var(--line); padding:18px 16px 32px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; scrollbar-width:thin; scrollbar-color:rgba(244,239,230,.3) transparent; transform:translateX(-100%); visibility:hidden; transition:transform .25s ease, visibility 0s .25s; }
+    .side.show { transform:none; visibility:visible; transition:transform .25s ease; }
+    .side::-webkit-scrollbar { width:6px; } .side::-webkit-scrollbar-track { background:transparent; }
+    .side::-webkit-scrollbar-thumb { background:rgba(244,239,230,.25); border-radius:999px; } .side::-webkit-scrollbar-thumb:hover { background:rgba(244,239,230,.45); }
+    .scrim { display:block; position:fixed; z-index:30; inset:0; background:rgba(0,0,0,.6); opacity:0; pointer-events:none; transition:opacity .25s; } .scrim.show { opacity:1; pointer-events:auto; }
+    .sidehead { display:flex; } .sidetabs { display:flex; }
+    @media (prefers-reduced-motion: reduce) { .side, .scrim { transition:none; } }
     h1 { font-size:32px; } .doc { padding-top:28px; } .pns { grid-template-columns:1fr; }
   }
 </style>
@@ -187,10 +198,11 @@ const template = (p, i) => {
   <a href="/"><img src="/app/assets/moopay-logo.png" alt="MooPay"></a>
   <nav class="tabs">${tabs}</nav>
   <a class="open" href="/agent">Open MooPay</a>
-  <button class="menu" id="menu" type="button">Menu</button>
+  <button class="menu" id="menu" type="button" aria-controls="side" aria-expanded="false">Menu</button>
 </div></header>
 <div class="shell">
-  <aside class="side" id="side">${side}</aside>
+  <div class="scrim" id="scrim"></div>
+  <aside class="side" id="side" aria-label="Menu"><div class="sidehead"><img src="/app/assets/moopay-logo.png" alt="MooPay"><button class="x" id="x" type="button" aria-label="Close menu">&times;</button></div><nav class="sidetabs">${tabs}<a href="/agent">Open MooPay</a></nav>${side}</aside>
   <main class="doc">
     <h1>${esc(p.meta.title)}</h1>
     <p class="desc">${esc(p.meta.description)}</p>
@@ -201,7 +213,14 @@ const template = (p, i) => {
   <nav class="toc">${toc.length > 1 ? `<h4>On this page</h4>${toc.map(([id, t]) => `<a href="#${id}">${esc(t)}</a>`).join("")}` : ""}</nav>
 </div>
 <script>
-  document.getElementById("menu").onclick = function () { document.getElementById("side").classList.toggle("show"); };
+  (function () {
+    var side = document.getElementById("side"), scrim = document.getElementById("scrim"), btn = document.getElementById("menu");
+    function set(on) { side.classList.toggle("show", on); scrim.classList.toggle("show", on); btn.setAttribute("aria-expanded", on ? "true" : "false"); document.body.style.overflow = on ? "hidden" : ""; }
+    btn.onclick = function () { set(!side.classList.contains("show")); };
+    scrim.onclick = document.getElementById("x").onclick = function () { set(false); };
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") set(false); });
+    side.addEventListener("click", function (e) { if (e.target.closest("a")) set(false); });
+  })();
   document.querySelectorAll(".cp").forEach(function (b) {
     b.onclick = function () {
       var t = b.parentNode.querySelector("code").textContent;

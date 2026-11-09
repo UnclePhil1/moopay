@@ -27,6 +27,10 @@ You can give a dollar amount or an amount of the receiver's coin. The receiver g
 
 Say where the money comes from, like `from my ETH` or `from Phantom`. The pay window opens and you sign. You can also pay by sending to a deposit address if you do not want to connect a wallet.
 
+## Make it private
+
+Say `privately`, or turn on private sends in your rules, to pay through a private balance. See [Private send](/docs/guides/using-moopay/private-send).
+
 ## When not to use it
 
 Do not use a normal send if you want the receiver to prove they own the wallet. Use a [private claim](/docs/guides/using-moopay/private-claims) instead.

@@ -19,6 +19,7 @@ Set these in `.env` or as secrets on your host. See `.env.example`.
 | `SEED_KEY` | Encrypts seeds at rest. |
 | `STATE_FILE` | Where the journal is kept. |
 | `MOOPAY_HOST`, `MOOPAY_PUBLIC_HOST` | Hosting and public links. |
+| `MOOPAY_PRIVATE_ROUTE` | Set to `1` to turn on private send (beta). Off unless set. |
 | `MOOPAY_TRUST_PROXY` | Set to `1` behind Fly.io. |
 | `CHAT_RETENTION_DAYS` | How long chat is kept. Default 30. |
 | `AI_USER_DAILY`, `AI_IP_DAILY`, `AI_TOTAL_DAILY` | AI message limits. |
