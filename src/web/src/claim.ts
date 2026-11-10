@@ -1,4 +1,4 @@
-import { $, api, connect, initWallets, key, say, selector, short } from "./wallet.js";
+import { $, api, connect, initWallets, key, say, sayError, selector, short } from "./wallet.js";
 
 interface View { state: string; amount: string; symbol: string; receiver: string; chain?: string; sender?: string; expiresAt?: string; claimTx?: string }
 interface Challenge { message: string; recipient: string; nonce: string; chain?: string }
@@ -71,7 +71,7 @@ async function claim() {
     });
     done(r.claimTx);
   } catch (e) {
-    say("msg", e instanceof Error ? e.message : "Something went wrong.", "err");
+    sayError("msg", e, "Something went wrong.");
     btn.disabled = false;
   }
 }
@@ -81,7 +81,7 @@ async function main() {
     view = await api<View>(`/capi/${key}`);
   } catch (e) {
     $("title").textContent = "Link not valid";
-    say("msg", e instanceof Error ? e.message : "This link is not valid.", "err");
+    sayError("msg", e, "This link is not valid.");
     return;
   }
   await initWallets();

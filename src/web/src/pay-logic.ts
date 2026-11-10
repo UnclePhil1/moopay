@@ -4,6 +4,7 @@ import { setupModal } from "@near-wallet-selector/modal-ui";
 import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
 import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
 import { setupNightly } from "@near-wallet-selector/nightly";
+import { showError } from "./friendly.js";
 import { PublicKey, Transaction } from "@solana/web3.js";
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { createAppKit, type AppKit } from "@reown/appkit";
@@ -135,6 +136,7 @@ function say(el: string, text: string, kind: "" | "err" | "ok" = "") {
 
 let selector: WalletSelector;
 let intent: Intent;
+const sayError = (el: string, e: unknown, fallback?: string) => showError($(el), e, { ...(fallback ? { fallback } : {}), onSwitchWallet: () => void (async () => { try { await (await selector.wallet()).signOut(); } catch { /* reload anyway */ } location.reload(); })() });
 
 function accountId(): string | undefined {
   return selector.store.getState().accounts.find((a) => a.active)?.accountId ?? selector.store.getState().accounts[0]?.accountId;
@@ -431,7 +433,7 @@ async function manualQuote() {
     $("addr").textContent = q.depositAddress;
     showManual(q, a);
     void track(q.depositAddress, true);
-  } catch (e) { say("msg", e instanceof Error ? e.message : "Something went wrong.", "err"); }
+  } catch (e) { sayError("msg", e); }
 }
 
 async function send() {
@@ -477,7 +479,7 @@ async function send() {
     const msg = e instanceof Error ? e.message : "Something went wrong.";
     // The wallet's signing window can only open from a click, and there was none right after connecting.
     if (/popup/i.test(msg)) { btn.textContent = "Sign transaction"; say("msg", "Wallet connected. Press Sign transaction to approve."); }
-    else say("msg", msg, "err");
+    else sayError("msg", e);
   }
 }
 
@@ -533,7 +535,7 @@ async function callMode(c: Call) {
       const msg = e instanceof Error ? e.message : "Something went wrong.";
       // A browser only lets a click open the wallet's signing window. Right after connecting there is no click, so ask for one.
       if (/popup/i.test(msg)) { btn.textContent = "Sign transaction"; say("callmsg", "Wallet connected. Press Sign transaction to approve."); }
-      else { btn.textContent = label; say("callmsg", msg, "err"); }
+      else { btn.textContent = label; sayError("callmsg", e); }
     }
   });
 }
@@ -543,7 +545,7 @@ async function main() {
     intent = await api<Intent>(base);
   } catch (e) {
     $("title").textContent = "Link expired";
-    say("top-msg", e instanceof Error ? e.message : "This link is not valid.", "err");
+    sayError("top-msg", e, "This link is not valid.");
     return;
   }
   if (intent.call) return void (await callMode(intent.call));

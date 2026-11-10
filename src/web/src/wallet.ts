@@ -3,6 +3,7 @@ import { setupModal } from "@near-wallet-selector/modal-ui";
 import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
 import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
 import { setupNightly } from "@near-wallet-selector/nightly";
+import { showError } from "./friendly.js";
 
 export const $ = <T extends HTMLElement>(i: string) => document.getElementById(i) as T;
 export const key = location.pathname.split("/")[2] ?? "";
@@ -27,6 +28,10 @@ export async function initWallets() {
   selector = await setupWalletSelector({ network: "mainnet", modules: [setupMeteorWallet(), setupNightly(), setupMyNearWallet()] });
   return selector;
 }
+
+export const sayError = (el: string, e: unknown, fallback?: string) => showError($(el), e, { ...(fallback ? { fallback } : {}), onSwitchWallet: () => void switchWallet() });
+/** Signs out of the connected wallet and reloads, so the wallet list opens again. */
+export async function switchWallet(): Promise<void> { try { await (await selector.wallet()).signOut(); } catch { /* reload anyway */ } location.reload(); }
 
 export const accountId = (): string | undefined =>
   selector.store.getState().accounts.find((a) => a.active)?.accountId ?? selector.store.getState().accounts[0]?.accountId;

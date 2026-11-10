@@ -31,6 +31,8 @@ const ZS = {
   withdraw_unstaked: z.object({ wallet: z.string().min(2).max(64).optional() }).strict(),
   list_agent_keys: z.object({}).strict(),
   revoke_agent_key: z.object({ agent: z.string().min(1).max(40) }).strict(),
+  link_x: z.object({}).strict(),
+  unlink_x: z.object({}).strict(),
 } as const;
 type Name = keyof typeof ZS;
 
@@ -59,6 +61,8 @@ export const TOOLS = [
   { name: "withdraw_unstaked", description: "Once unstaking is done, open the Withdraw window so the user signs and the unstaked NEAR arrives in their wallet. Says if it is not ready yet.", input_schema: obj({ wallet: str("NEAR wallet that unstaked, if not the usual one") }) },
   { name: "rnear_position", description: "The user's rNEAR: how much, what it is worth, the current yield, and anything unstaking or ready to withdraw (MooPay never holds their rNEAR; unstake_rnear opens a window to sign with their own wallet).", input_schema: obj({}) },
   { name: "list_agent_keys", description: "The user's agent keys with what each has left.", input_schema: obj({}) },
+  { name: "link_x", description: "Link the user's X (Twitter) account so they can ask MooPay for things by mentioning it on X. Returns a one-time code the user posts from that account. Only when they ask to link X.", input_schema: obj({}) },
+  { name: "unlink_x", description: "Unlink the user's X account. Mentions from it stop working.", input_schema: obj({}) },
   { name: "revoke_agent_key", description: "Switch an agent key off now, by name or id.", input_schema: obj({ agent: str("name or id") }, ["agent"]) },
 ];
 
@@ -66,7 +70,7 @@ export const TOOLS = [
 export const READ_ONLY = new Set(["get_account", "check_payment", "list_activity", "list_supported_assets", "rnear_position", "list_agent_keys"]);
 
 export const STEP_LABEL: Record<string, string> = {
-  get_account: "Checking your account", group_payout: "Preparing the group payout", group_claim: "Preparing the group link", send_money: "Finding the best route", create_claim: "Preparing the private claim", check_payment: "Checking the payment",
+  get_account: "Checking your account", group_payout: "Preparing the group payout", group_claim: "Preparing the group link", send_money: "Finding the best route", create_claim: "Preparing the private claim", link_x: "Making your link code", unlink_x: "Unlinking X", check_payment: "Checking the payment",
   list_activity: "Looking through your activity", update_rules: "Updating your rules", schedule_payment: "Scheduling it", cancel_schedule: "Cancelling it", list_supported_assets: "Looking up assets", withdraw: "Preparing your withdrawal", fund_wallet: "Getting a deposit address", pay_from_my_wallet: "Getting a deposit address", payment_link: "Making your payment link", create_agent_key: "Creating the agent key", stake_rnear: "Staking with Rhea", unstake_rnear: "Getting your unstake ready", cancel_unstake: "Cancelling the unstake", withdraw_unstaked: "Getting your withdrawal ready", rnear_position: "Checking your stake", list_agent_keys: "Looking at your agents", revoke_agent_key: "Switching it off",
 };
 
@@ -97,6 +101,8 @@ export async function runTool(name: string, input: unknown, u: UserRec, ops: Age
     case "withdraw_unstaked": return ops.withdrawUnstaked(u, a as never, ctx);
     case "create_agent_key": return ops.createAgent(u, a as never);
     case "list_agent_keys": return ops.listAgents(u);
+    case "link_x": return ops.linkX(u);
+    case "unlink_x": return ops.unlinkX(u);
     case "revoke_agent_key": return ops.revokeAgent(u, a["agent"]!);
     case "list_supported_assets": return { result: (await svc.listAssets(a as never)) as unknown as Record<string, unknown> };
   }

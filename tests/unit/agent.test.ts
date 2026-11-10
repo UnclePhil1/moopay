@@ -641,6 +641,7 @@ test("plain: markdown is stripped and bullets become a numbered list", async () 
   const raw = "I can do these things:\n\n- **Send money** to wallets, in dollars.\n- **Create private claims** that expire.\n* `Withdraw` any time\n\nUse __bold__ and *italic* and a * b. # not a heading\n## Next steps\n1. keep this\n2. and this";
   assert.equal(plain(raw), "I can do these things:\n\n1. Send money to wallets, in dollars.\n2. Create private claims that expire.\n3. Withdraw any time\n\nUse bold and italic and a * b. # not a heading\nNext steps\n1. keep this\n2. and this");
   assert.equal(plain("Sent $5 to bob.near."), "Sent $5 to bob.near.");
+  assert.equal(plain("Done — it went through; check back in 2–3 minutes 🎉!!"), "Done, it went through. Check back in 2-3 minutes!");
   assert.equal(plain("Costs 2*3 and 5 * 4 = 20"), "Costs 2*3 and 5 * 4 = 20");
 });
 
@@ -1368,4 +1369,36 @@ test("the agent wallet is one pool: with no USDC but enough NEAR, a payment conv
   b.near.tokenBalances.set(b.u.accountId, 0n); b.near.nearBalances.set(b.u.accountId, 200_000_000_000_000_000_000_000n);
   const r2 = await b.ops.send(b.u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, CTX);
   assert.equal(r2.result["status"], "needs_your_signature");
+});
+
+test("X agent: the link code tool, unlinking, and the 1% fee as a USDC transfer to the fee account", async () => {
+  process.env["X_BOT_HANDLE"] = "moopay"; process.env["MOOPAY_X_FEE_ACCOUNT"] = "fees.near";
+  try {
+    const a = await agent();
+    const r = a.ops.linkX(a.u);
+    assert.equal(r.result["status"], "code_ready");
+    assert.match(String(r.result["steps"]), /@moopay link moo-[A-Z2-9]{6}/);
+    assert.equal(a.ops.unlinkX(a.u).result["status"], "unlinked");
+    a.fund(20);
+    assert.equal(await a.ops.collectFee(a.u, 0.1), true);
+    assert.equal(a.near.transfers.at(-1)?.to, "fees.near");
+    assert.equal(a.near.transfers.at(-1)?.amount, 100_000n);
+    assert.equal(await a.ops.collectFee(a.u, 0.001), true, "less than a cent is not charged");
+    assert.equal(a.near.transfers.length, 1);
+    const b = await agent(); // nothing in the wallet: the fee fails without breaking anything
+    assert.equal(await b.ops.collectFee(b.u, 0.1), false);
+  } finally { delete process.env["X_BOT_HANDLE"]; delete process.env["MOOPAY_X_FEE_ACCOUNT"]; }
+});
+
+test("sending to another chain from NEAR is one swap, not a conversion to USDC first", async () => {
+  const a = await agent();
+  a.near.tokenBalances.set(a.u.accountId, 0n);
+  a.near.nearBalances.set(a.u.accountId, 4_000_000_000_000_000_000_000_000n);
+  (a.ops as unknown as { pollMs: number }).pollMs = 1;
+  const wrap = a.near.wrapNear.bind(a.near);
+  a.near.wrapNear = async (p) => { const r = await wrap(p); a.near.otherTokens.set(`wrap.near|${a.u.accountId}`, (a.near.otherTokens.get(`wrap.near|${a.u.accountId}`) ?? 0n) + p.amount); return r; };
+  const r = await a.ops.send(a.u, { amountUsd: "1", chain: "sol", recipient: SOL_ADDR }, true, {}, CTX);
+  assert.equal(r.result["status"], "sent", JSON.stringify(r.result));
+  assert.equal(a.near.transfers.filter((t) => t.tokenContract === "wrap.near").length, 1, "one payment to one swap address");
+  assert.equal(a.near.transfers.some((t) => t.tokenContract !== "wrap.near"), false, "nothing was converted to USDC first");
 });

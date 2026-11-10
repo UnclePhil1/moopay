@@ -7,7 +7,7 @@ import { READ_ONLY, runTool, STEP_LABEL, TOOLS } from "./tools.js";
 
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown };
 export interface Llm { messages: { create(p: Record<string, unknown>): Promise<{ content: Block[]; stop_reason: string | null }> } }
-export type Emit = (e: { type: "step"; id: string; label: string; state: "running" | "done" | "failed" } | { type: "card"; card: Record<string, unknown> } | { type: "text"; text: string } | { type: "cancelled" }) => void;
+export type Emit = (e: { type: "step"; id: string; label: string; state: "running" | "done" | "failed"; code?: string } | { type: "card"; card: Record<string, unknown> } | { type: "text"; text: string } | { type: "cancelled" }) => void;
 
 const MAX_ROUNDS = 8;
 
@@ -19,8 +19,10 @@ How to behave:
 - The user's rules are enforced by the system. Report what happened: sent, needs their OK (an Approve card is already shown), or denied. Never try to work around a rule, and never change rules unless the user asks.
 - Write plain text only. Never use markdown: no asterisks, no bold, no backticks, no # headings, no dashes or bullets at the start of a line. If a list is needed, number it (1. 2. 3.) with one item per line.
 - When a payment cannot go because the agent wallet is short, say how much it needs and how much to add, using the numbers in the tool result or error, and say what the user can do next (add money, or pay from their own wallet). Never say only "not enough funds".
+- Sound like a grounded person texting, informal to semi-formal. Plain words, short and long sentences mixed, direct. Use commas and full stops only: no em dashes, en dashes or semicolons, no emojis, no more than one exclamation mark. Never use these words or phrases: delve, intricate, tapestry, testament, beacon, foster, garner, underscore, pivotal, showcase, landscape, realm, journey, robust, leverage, paramount, elevate, unlock, supercharge, "it's important to remember", "in conclusion", "overall", "furthermore", "moreover", "ultimately", "at the end of the day". No "it's not just X, it's Y" or "not only X but also Y". Don't open paragraphs with transition words. No pleasantries like "I hope this helps" or "let me know if you need anything else". If you are unsure, say so plainly.
 - Be brief: one to three short sentences. No lists unless asked. Plain words, no jargon. Don't repeat details a card already shows.
 - If a tool returns an error, explain it simply and say what to do next.
+- To tell whether the user's X account is linked, call get_account and read xLinked (a handle means linked, null means not yet). Never say you can't check, and don't make a new code just to check.
 - For a brand-new account, call get_account and walk through the setup steps it returns, one at a time.
 - The user has ONE balance in dollars: NEAR, USDC, USDT and money added from other chains all count together. Never mention network fees, gas or NEAR-for-fees; MooPay deducts them behind the scenes and converts between tokens itself when paying.
 - Money in: the user can add money from ANY chain with fund_wallet: an Add money window opens, they pick their wallet and any coin and sign, and it arrives as USDC. Never ask for a refund address (refunds go to the wallet that signs) and never ask for a dollar amount when they gave coins: pass amount and fromSymbol, or send USDC on NEAR directly. If they have no NEAR, use fund_wallet.
@@ -60,17 +62,33 @@ export function plain(text: string): string {
     .replace(/(\*\*|__)(.+?)\1/g, "$2")
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, "$1$2")
     .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/(\d)\s?[\u2013\u2014]\s?(\d)/g, "$1-$2") // 1–2 stays a range
+    .replace(/\s*[\u2013\u2014]\s*/g, ", ") // no em or en dashes
+    .replace(/\s*;\s*(\w)/g, (_m, c: string) => ". " + c.toUpperCase()).replace(/\s*;/g, ".") // no semicolons
+    .replace(/\p{Extended_Pictographic}\uFE0F?/gu, "").replace(/ {2,}/g, " ").replace(/ +([!.,?])/g, "$1") // no emojis
+    .replace(/!{2,}/g, "!")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 export type Ctl = { cancelled: boolean; ran: boolean };
 
-export async function runTurn(p: { id?: string; ctl?: Ctl; llm: Llm; model: string; u: UserRec; text: string; ops: AgentOps; svc: MooPayService; ctx: Ctx; emit: Emit; context: string }): Promise<string> {
+/** Added to the system prompt for a message that comes from X: public, short, and nothing moves until the user says yes. */
+export const X_RULES = (fee: string): string => `
+This message came from X (Twitter) and your answer is posted as a PUBLIC reply, so:
+- Keep it under 240 characters, in plain words. Never mention keys, seeds, balances above what the user asked for, or anyone's private details.
+- Before any tool that moves money (send_money, group_payout, create_claim, group_claim, stake_rnear, withdraw, schedule_payment), reply with ONE line that says what will happen: action, amount, receiver, chain and coin${fee ? `, and the fee (${fee})` : ""}. Then ask them to reply "confirm". Call the tool only when the user's latest message confirms the summary you gave in your previous reply. If they say no or change it, do not call it.
+- ${fee ? `Every send, claim, stake or payout made through X adds a service fee of ${fee}; always state it in the summary, as "$10 + $0.10 fee".` : "There is no extra fee on payments made through X."}
+- The receiver can be a wallet address or a NEAR name. A bare X handle only works if it was already turned into a wallet for you; if you still see an @handle as the receiver, ask for the wallet address.
+- If a tool answers with a Confirm link, say they need to press it; the link is added to your reply for you.
+- Only act on a request to DO something with money: send, split, schedule, stake, claim, swap, check their balance, or confirm or cancel what you just summarised. For anything else (a question about MooPay, praise, a complaint, small talk, someone else's conversation), answer with exactly the single word IGNORE and nothing more; it is not posted.
+- If a payment or any step fails, say plainly, in one short sentence, what happened and whether any money moved (usually none), then ask "Want me to try again? Reply yes." Never retry on your own: only try again after the user clearly says yes. Anything else you can't do: say why in one short sentence.`;
+
+export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: Llm; model: string; u: UserRec; text: string; ops: AgentOps; svc: MooPayService; ctx: Ctx; emit: Emit; context: string }): Promise<string> {
   const messages: Record<string, unknown>[] = [...p.u.chat.slice(-30).map((m) => ({ role: m.role, content: m.content })), { role: "user", content: p.text }];
   let final = "";
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const r = await retry(() => p.llm.messages.create({ model: p.model, max_tokens: 1024, system: SYSTEM + "\n\nCurrent account:\n" + p.context, tools: TOOLS, messages }));
+    const r = await retry(() => p.llm.messages.create({ model: p.model, max_tokens: 1024, system: SYSTEM + (p.extra ?? "") + "\n\nCurrent account:\n" + p.context, tools: TOOLS, messages }));
     if (p.ctl?.cancelled && !p.ctl.ran) { p.emit({ type: "cancelled" }); return ""; }
     const calls = r.content.filter((b): b is Extract<Block, { type: "tool_use" }> => b.type === "tool_use");
     const said = r.content.filter((b): b is Extract<Block, { type: "text" }> => b.type === "text").map((b) => b.text).join("").trim();
@@ -88,7 +106,7 @@ export async function runTurn(p: { id?: string; ctl?: Ctl; llm: Llm; model: stri
         results.push({ type: "tool_result", tool_use_id: c.id, content: JSON.stringify(out.result) });
       } catch (e) {
         const err = asMoopayError(e);
-        p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "failed" });
+        p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "failed", code: err.code });
         results.push({ type: "tool_result", tool_use_id: c.id, is_error: true, content: JSON.stringify({ code: err.code, message: err.message }) });
       }
     }

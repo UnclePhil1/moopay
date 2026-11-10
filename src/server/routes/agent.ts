@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { asMoopayError, MoopayError } from "../../util/errors.js";
 import { toJson } from "../../util/json.js";
 import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type OutLayer, type Sponsor, type UserRec } from "../../agent/index.js";
-import { plain, runTurn, type Ctl, type Llm } from "../../ai/loop.js";
+import { plain, runTurn, X_RULES, type Ctl, type Llm } from "../../ai/loop.js";
+import { SILENT, startX, xFromEnv } from "../x.js";
 import { alertOwner } from "../../util/alert.js";
 import type { Vault } from "../../storage/index.js";
 import { clientIp, rateLimiter } from "../middleware/security.js";
@@ -231,5 +232,24 @@ export async function makeAgent(d: AgentDeps) {
   }
 
   const startWorker = (everyMs = 60_000) => setInterval(() => void tick(ops, store, lastOrigin, now()).catch(() => undefined), everyMs).unref();
-  return { handle, startWorker, ops, store, tick: () => tick(ops, store, lastOrigin, now()) };
+  /** Answers mentions on X, when the X_ settings are set and the AI is on. */
+  const startXAgent = () => {
+    const cfg = xFromEnv();
+    if (!cfg || !d.llm) return undefined;
+    const llm = d.llm, feeBps = process.env["MOOPAY_X_FEE_ACCOUNT"] ? Number(process.env["MOOPAY_X_FEE_BPS"] ?? 100) || 0 : 0;
+    const origin = process.env["MOOPAY_PUBLIC_HOST"]?.trim() ? `https://${process.env["MOOPAY_PUBLIC_HOST"]!.trim()}` : lastOrigin;
+    return startX({
+      store, feeBps, now,
+      charge: (u, usd) => ops.collectFee(u, usd),
+      ask: async (u, text) => {
+        const urls: string[] = [];
+        const emit = (e: { type: string; card?: Record<string, unknown>; label?: string; state?: string }) => { if (e.type === "step" && e.state !== "done") console.log(`[x] ${e.label}${e.state === "failed" ? " (failed)" : "…"}`); const url = e.type === "card" ? e.card?.["url"] : undefined; if (typeof url === "string") urls.push(url); };
+        const final = await runTurn({ llm, model, u, text, ops, svc: d.svc, ctx: { origin }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : ""), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
+        if (SILENT.test(final)) u.chat.splice(-2, 2); // nothing was said, so nothing goes in the chat history
+        store.save();
+        return { text: final, urls };
+      },
+    }, cfg, Number(process.env["X_POLL_SECONDS"]) || 30);
+  };
+  return { handle, startWorker, startX: startXAgent, ops, store, tick: () => tick(ops, store, lastOrigin, now()) };
 }

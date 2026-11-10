@@ -3,6 +3,11 @@ import { verifyMessage } from "near-api-js/nep413";
 import { MoopayError } from "../../util/errors.js";
 import type { Config } from "../../../config/index.js";
 
+/* near-api-js prints every failed RPC call, even the expected "this account doesn't exist yet" for a new, unfunded agent wallet.
+ * We already treat that as a zero balance, so that one message is dropped; every other error is still printed. */
+const printError = console.error.bind(console);
+console.error = (...a: unknown[]) => { if (a.length === 1 && (a[0] as { name?: string } | undefined)?.name === "AccountDoesNotExistError") return; printError(...a); };
+
 /*
  * NEAR operations on a per-note account. MooPay holds no key: the note account's key is derived
  * from the claim secret, so the transfer is signed by whoever presents that secret. Chain
@@ -50,8 +55,18 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
   // The public NEAR RPC rate-limits (429); a second endpoint keeps balance checks and payments working.
   const urls = [cfg.nearRpcUrl, ...(cfg.nearRpcUrl.includes("mainnet") || cfg.nearRpcUrl === "https://free.rpc.fastnear.com" ? ["https://free.rpc.fastnear.com", "https://near.drpc.org"] : [])].filter((u, i, a) => a.indexOf(u) === i);
   const provider = urls.length > 1 ? new FailoverRpcProvider(urls.map((url) => new JsonRpcProvider({ url }))) : new JsonRpcProvider({ url: urls[0]! });
-  return {
+  // The free RPC allows only a few calls a second. Balance reads are shared for a few seconds, and dropped the moment this wallet pays anything.
+  const seen = new Map<string, { at: number; v: Promise<bigint> }>();
+  const shared = (key: string, read: () => Promise<bigint>): Promise<bigint> => {
+    const hit = seen.get(key);
+    if (hit && Date.now() - hit.at < 4_000) return hit.v;
+    const v = read(); seen.set(key, { at: Date.now(), v });
+    v.catch(() => seen.delete(key));
+    return v;
+  };
+  const ops: NearOps = {
     async ftBalance(tokenContract, accountId) {
+      return shared(`ft|${tokenContract}|${accountId}`, async () => {
       try {
         const raw = await provider.callFunction({
           contractId: tokenContract,
@@ -62,6 +77,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       } catch {
         throw rpcDown();
       }
+      });
     },
 
     async storageRegistered(tokenContract, accountId) {
@@ -85,6 +101,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
     },
 
     async nearBalance(accountId) {
+      return shared(`near|${accountId}`, async () => {
       try {
         return (await provider.viewAccount({ accountId })).amount;
       } catch (e) {
@@ -92,6 +109,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         if (all.some((x) => x instanceof Error && /does not exist|UNKNOWN_ACCOUNT|AccountDoesNotExist/i.test(`${x.name} ${x.message}`))) return 0n;
         throw rpcDown();
       }
+      });
     },
 
     async createAccount({ parentId, parentKey, newId, forSecretKey, deposit }) {
@@ -197,4 +215,9 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       }
     },
   };
+  for (const name of ["createAccount", "sendNear", "call", "wrapNear", "transferFromNote"] as const) {
+    const write = ops[name] as (p: never) => Promise<unknown>;
+    (ops as unknown as Record<string, unknown>)[name] = async (p: never) => { seen.clear(); try { return await write.call(ops, p); } finally { seen.clear(); } };
+  }
+  return ops;
 }

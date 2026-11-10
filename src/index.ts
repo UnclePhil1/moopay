@@ -22,6 +22,7 @@ async function main(): Promise<void> {
   const service = await createService(cfg, vault);
   const agent = await makeAgent({ svc: service, stateFile: cfg.stateFile, vault, sponsor: sponsorFromEnv(), names: namesFromEnv(), private: privateRouteFromEnv(), ...(await pickProvider()) });
   agent.startWorker();
+  agent.startX();
   setInterval(() => void service.claimSweep().catch(() => undefined), 10 * 60 * 1000).unref();
 
   startServer({ service, token, agent: agent.handle }, {

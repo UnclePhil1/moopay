@@ -25,6 +25,8 @@ export const UserFileSchema = z.object({
   peaks: z.record(z.string(), z.number()).optional(),
   /** payments other MooPay runs reported to this one */
   remote: z.record(z.string(), looseRecord).optional(),
+  /** small settings that belong to no user (where the X agent left off) */
+  kv: z.record(z.string(), z.string()).optional(),
 });
 
 export const ClaimFileSchema = z.object({

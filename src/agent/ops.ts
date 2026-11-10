@@ -217,7 +217,7 @@ export class AgentOps {
       address: u.accountId, explorer: "https://nearblocks.io/address/" + u.accountId, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
       points: u.points ?? 0, spentToday: spentToday(u, this.now()), schedules: u.tasks.map((t) => ({ id: t.id, text: t.text })), pendingApprovals: u.approvals.filter((a) => a.status === "pending").length, setupSteps: todo,
     };
-    return { result: data, card: { kind: "account", ...data } };
+    return { result: { ...data, xLinked: u.x ? "@" + u.x.handle : null }, card: { kind: "account", ...data } };
   }
 
   /* ---- sending ---- */
@@ -400,10 +400,40 @@ export class AgentOps {
     return t;
   }
 
+  /**
+   * When the wallet is short of USDC but holds enough USDT or NEAR to pay the whole thing, that coin goes straight into the one
+   * cross-chain swap, so there is no separate conversion to wait for first. Returns that coin, or nothing to use the usual way.
+   */
+  private async singleHop(u: UserRec, payUsdc: bigint, destUnits: bigint, chain: string, p: SendParams): Promise<{ assetId: string; contract: string; decimals: number } | undefined> {
+    try {
+      const b = await this.balances(u);
+      if (b.tok >= payUsdc) return undefined;
+      const cushion = (n: bigint) => n + n / 50n + 1n; // 2% for price moves
+      if (b.usdtA && b.usdt > 0n) {
+        const need = cushion((await this.exactOut(u, b.usdtA, destUnits, chain, p, true)).amountIn);
+        if (b.usdt >= need) return b.usdtA;
+      }
+      if (b.nearA) {
+        const need = cushion((await this.exactOut(u, b.nearA, destUnits, chain, p, true)).amountIn);
+        const spare = (b.nat > KEEP_GAS ? b.nat - KEEP_GAS : 0n) + b.wnear;
+        if (spare < need) return undefined;
+        if (b.wnear < need) {
+          const k = this.store.keyOf(u);
+          await this.near.wrapNear({ accountId: k.accountId, secretKey: k.secretKey, wrapContract: b.nearA.contract, amount: need - b.wnear });
+          for (let i = 0; i < 10 && (await this.near.ftBalance(b.nearA.contract, u.accountId)) < need; i++) await new Promise((res) => setTimeout(res, this.pollMs));
+        }
+        return b.nearA;
+      }
+    } catch { /* fall back to the usual way */ }
+    return undefined;
+  }
+
   private async doSend(u: UserRec, usdc: { assetId: string; contract: string; decimals: number }, units: bigint, amt: number, chain: string, p: SendParams, expected?: string, ak?: AgentKey, direct = false, destUnits = units): Promise<Payment> {
     let pay = units;
     if (!direct) pay = (await this.exactOut(u, usdc, destUnits, chain, p, true)).amountIn; // what the swap really costs with fees
-    await this.ensureUsdc(u, pay);
+    // paying from NEAR or USDT in one swap is faster than converting to USDC first and then swapping again
+    const hop = direct ? undefined : await this.singleHop(u, pay, destUnits, chain, p);
+    if (!hop) await this.ensureUsdc(u, pay);
     const b = await this.balances(u);
     if (b.nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet: the agent wallet needs about 0.05 NEAR. Send it to ${u.accountId} and try again.`);
     const k = this.store.keyOf(u);
@@ -413,12 +443,13 @@ export class AgentOps {
       Object.assign(base, { status: "DELIVERED", txHash: r.txHash, settled: true, fee: 0 });
       this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     } else {
-      const q = await this.exactOut(u, usdc, destUnits, chain, p, false);
+      const o = hop ?? usdc;
+      const q = await this.exactOut(u, o, destUnits, chain, p, false);
       if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
-      if ((await this.balances(u)).tok < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(q.amountIn) / 10 ** usdc.decimals));
-      const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: q.depositAddress, amount: q.amountIn });
+      if ((await this.near.ftBalance(o.contract, u.accountId)) < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(pay) / 10 ** usdc.decimals));
+      const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: o.contract, to: q.depositAddress, amount: q.amountIn });
       await this.svc.oneClickClient.submitDeposit(q.depositAddress, r.txHash).catch(() => undefined);
-      Object.assign(base, { depositAddress: q.depositAddress, txHash: r.txHash, fee: Math.max(0, Number(q.amountIn) / 10 ** usdc.decimals - amt) });
+      Object.assign(base, { depositAddress: q.depositAddress, txHash: r.txHash, fee: Math.max(0, Number(pay) / 10 ** usdc.decimals - amt) });
     }
     this.spend(u, amt, this.recipientKey(chain, p.recipient), ak);
     u.payments.unshift(base); u.payments.length = Math.min(u.payments.length, 100);
@@ -717,6 +748,29 @@ export class AgentOps {
   private agentView(ak: AgentKey) {
     const r = remaining(ak, this.now());
     return { id: ak.id, name: ak.name, prefix: ak.prefix, dailyUsd: ak.dailyUsd ?? null, perPaymentUsd: ak.perPaymentUsd ?? null, totalUsd: ak.totalUsd ?? null, leftToday: r.today, leftTotal: r.total, ips: ak.ips ?? null, chains: ak.chains ?? null, assets: ak.assets ?? null, recipients: ak.recipients ?? null, expiresAt: ak.expiresAt ? new Date(ak.expiresAt).toISOString() : null, revoked: !!ak.revoked, expired: !!ak.expiresAt && this.now() > ak.expiresAt };
+  }
+  /* ---- the X agent ---- */
+  /** A one-time code to post from the user's X account; mentions from that account then act as this user, inside their rules. */
+  linkX(u: UserRec): Out {
+    this.active(u);
+    const handle = process.env["X_BOT_HANDLE"];
+    if (!handle) return { result: { status: "not_available", reason: "The X agent isn't switched on for this MooPay." } };
+    const code = this.store.linkCode(u, this.now());
+    return { result: { status: "code_ready", code, linked: u.x?.handle ?? null, steps: `Post this from your X account (it works for 15 minutes): @${handle} link ${code}`, note: "Tell the user to post exactly that from the X account they want to link. Anyone who holds that account can then ask MooPay to move money inside the user's rules, so only link an account they keep safe." } };
+  }
+  unlinkX(u: UserRec): Out { const was = u.x?.handle; delete u.x; this.store.save(); return { result: { status: "unlinked", was: was ?? null } }; }
+  /** The 1% service fee on a payment made through X: a USDC transfer from the agent wallet to the fee account. Returns false when it could not be taken. */
+  async collectFee(u: UserRec, feeUsd: number): Promise<boolean> {
+    const to = process.env["MOOPAY_X_FEE_ACCOUNT"];
+    if (!to || feeUsd < 0.01) return true;
+    try {
+      const usdc = await this.svc.usdcAsset(), units = parseDecimal(feeUsd.toFixed(2), usdc.decimals);
+      await this.ensureUsdc(u, units);
+      const k = this.store.keyOf(u);
+      const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to, amount: units });
+      u.payments.unshift({ id: id(), kind: "send", amountUsd: feeUsd, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), settled: true, txHash: r.txHash }); u.payments.length = Math.min(u.payments.length, 100);
+      this.store.save(); return true;
+    } catch { return false; }
   }
   listAgents(u: UserRec): Out { const items = u.agents.map((a) => this.agentView(a)); return { result: { items }, card: { kind: "agents", items } }; }
   revokeAgent(u: UserRec, agentId: string): Out {

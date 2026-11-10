@@ -16,6 +16,7 @@
     "site": "node scripts/serve-site.mjs",
     "testnet": "tsx scripts/testnet-e2e.ts",
     "live-check": "tsx scripts/live-check.ts",
+    "x:authorize": "node --env-file=.env scripts/x-authorize.mjs",
     "stdio": "node dist/src/ai/mcp/stdio.js",
     "smoke:http": "tsx scripts/smoke-http.ts"
   },

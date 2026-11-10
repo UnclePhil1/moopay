@@ -1,5 +1,5 @@
 import { actions } from "near-api-js";
-import { $, api, connect, initWallets, key, say, selector, short, wireCopy } from "./wallet.js";
+import { $, api, connect, initWallets, key, say, sayError, selector, short, wireCopy } from "./wallet.js";
 
 const TGAS = 10n ** 12n;
 const REGISTRATION = 1_250_000_000_000_000_000_000n; // 0.00125 NEAR
@@ -51,7 +51,7 @@ async function send() {
     await wallet.signAndSendTransactions({ transactions });
     await waitFunded();
   } catch (e) {
-    say("msg", e instanceof Error ? e.message : "Something went wrong.", "err");
+    sayError("msg", e, "Something went wrong.");
     btn.disabled = false;
   }
 }
@@ -61,7 +61,7 @@ async function main() {
     view = await api<View>(`/fapi/${key}`);
   } catch (e) {
     $("title").textContent = "Link expired";
-    say("msg", e instanceof Error ? e.message : "This link is not valid.", "err");
+    sayError("msg", e, "This link is not valid.");
     return;
   }
   await initWallets();

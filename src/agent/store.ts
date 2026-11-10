@@ -59,6 +59,8 @@ export interface UserRec {
   sponsoredAt?: number; agents: AgentKey[];
   /** conversions handed to the swap service that have not ended yet; the swap service sends the money back to the agent wallet if one fails */
   swaps?: { addr: string; at: number }[];
+  /** the X (Twitter) account this user linked: mentions from it act as this user, inside the same rules */
+  x?: { id: string; handle: string };
   /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
   outlayer?: { key: string; account: string };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
@@ -95,7 +97,8 @@ export class AgentStore {
   /** Payments other MooPay runs reported to this one (see report.ts), for the team's numbers page. */
   private remote = new Map<string, Row>();
   private readonly reporter = new Reporter();
-  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[], ledger: Record<string, unknown> = {}, peaks: Record<string, number> = {}, remote: Record<string, unknown> = {}) {
+  private constructor(private readonly file: SealedFile, private readonly seed: Buffer, users: UserRec[], ledger: Record<string, unknown> = {}, peaks: Record<string, number> = {}, remote: Record<string, unknown> = {}, kv: Record<string, string> = {}) {
+    this.kv = kv;
     for (const u of users) this.add(u);
     for (const [k, v] of Object.entries(ledger)) this.ledger.set(k, v as Payment & { who: string });
     for (const [k, v] of Object.entries(peaks)) this.peaks.set(k, v);
@@ -105,7 +108,7 @@ export class AgentStore {
 
   static async open(path: string, vault: Vault = new Vault()): Promise<AgentStore> {
     const { file, value } = await SealedFile.open(path, UserFileSchema, vault, "state:agent");
-    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[], value?.ledger, value?.peaks, value?.remote);
+    return new AgentStore(file, await loadSeed(`${path}.seed`, vault), (value?.users ?? []) as unknown as UserRec[], value?.ledger, value?.peaks, value?.remote, value?.kv);
   }
 
   flush(): Promise<void> { return this.file.flush(); }
@@ -210,6 +213,26 @@ export class AgentStore {
       const c = Number(u.seen?.usdc ?? 0); if (c > (this.peaks.get(u.id) ?? 0)) this.peaks.set(u.id, c);
     }
   }
+  /* ---- the X agent: linking an X account, and a few small settings that belong to no user ---- */
+  private xCodes = new Map<string, { id: string; exp: number }>();
+  /** A one-time code the user posts from their X account to link it. Lasts 15 minutes. */
+  linkCode(u: UserRec, now: number): string {
+    for (const [c, v] of this.xCodes) if (v.exp < now || v.id === u.id) this.xCodes.delete(c);
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", b = randomBytes(8);
+    const code = "moo-" + Array.from(b.subarray(0, 6), (x) => alphabet[x % alphabet.length]).join("");
+    this.xCodes.set(code, { id: u.id, exp: now + 15 * 60_000 }); return code;
+  }
+  /** Links the X account that posted a valid code. One X account belongs to one MooPay account. */
+  completeLink(code: string, xId: string, handle: string, now: number): UserRec | undefined {
+    const key = "moo-" + code.trim().slice(4).toUpperCase(), c = this.xCodes.get(key);
+    const u = c && c.exp > now ? this.users.get(c.id) : undefined;
+    if (!u || (this.byX(xId) && this.byX(xId) !== u)) return undefined;
+    this.xCodes.delete(key);
+    u.x = { id: xId, handle: handle.replace(/^@/, "").toLowerCase() }; this.save(); return u;
+  }
+  byX(id: string): UserRec | undefined { return this.all().find((u) => u.x?.id === id); }
+  byHandle(handle: string): UserRec | undefined { const h = handle.replace(/^@/, "").toLowerCase(); return this.all().find((u) => u.x?.handle === h); }
+  kv: Record<string, string> = {};
   /** Notes a finished event (a conversion) in the permanent ledger without putting it in the user's recent list. */
   note(u: UserRec, row: Payment): void { this.ledger.set(row.id, { ...row, who: u.id }); }
   history(): { rows: (Payment & { who: string })[]; peaks: Map<string, number>; remote: Row[] } { this.remember(); return { rows: [...this.ledger.values()], peaks: this.peaks, remote: [...this.remote.values()] }; }
@@ -233,6 +256,6 @@ export class AgentStore {
   save(): void {
     this.remember();
     this.reporter.push(this.ledger.values());
-    this.file.save({ ledger: Object.fromEntries(this.ledger), peaks: Object.fromEntries(this.peaks), remote: Object.fromEntries(this.remote), users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
+    this.file.save({ ledger: Object.fromEntries(this.ledger), peaks: Object.fromEntries(this.peaks), remote: Object.fromEntries(this.remote), kv: this.kv, users: [...this.users.values()].map((u) => (u.noHistory ? { ...u, chat: [] } : u)) });
   }
 }
