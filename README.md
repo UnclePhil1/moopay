@@ -9,7 +9,9 @@ An AI money agent. Say who to pay and how much, in plain text. MooPay sends it t
 | Documentation | `/docs` on the running site (source in [`docs/`](docs/)) |
 | Security policy | [SECURITY.md](SECURITY.md) |
 
-Hackathon tracks: Agent Economy, Real-World Money, AI Security & Defense, Privacy & Private AI.
+Hackathon tracks: Agent Economy, Open Innovation, AI Security & Defense, Privacy & Private AI.
+
+Built at NEAR HACKATHON (1 to 14 November 2026). The whole git history starts on 2026-11-01, so all of the code in this repository, including the NEAR Intents, NEAR AI, Rhea and OutLayer integrations, was written during the hackathon window.
 
 Status: experimental and unaudited. Read [Trust boundaries](#trust-boundaries) before putting money in.
 
@@ -142,16 +144,14 @@ This is experimental and unaudited. What you are trusting:
 
 ## Media
 
-Screenshots and the demo video go here. Replace the placeholders with files you add under `docs/media/`.
+![Landing page](./docs/media/landing.png)
+*The landing page at `/`.*
 
 ![Agent chat](./docs/media/dashboard.png)
-*The chat: a plain sentence becomes a confirm card with receiver, amount and fee.*
-
-![Cross-chain send](./docs/media/send-flow.png)
-*A send from the agent wallet to a Solana address, followed to delivery.*
+*A new account at `/agent`: a real agent wallet with its own NEAR address, a $500 float, and the chat box. No sign-up, no wallet to connect.*
 
 ![X agent](./docs/media/x-agent.png)
-*The same request from X, with the bot's quote and the confirm post.*
+*The X agent: the bot quotes the stake with its fee, the user replies "confirm", the bot reports the result. Frame from the demo video; the numbers are illustrative.*
 
 [Watch the full demo video](X_DEMO_POST_URL)
 
@@ -239,6 +239,14 @@ guides/                  reference notes on NEAR Intents, 1Click and prior priva
 ```
 
 Deploy: `fly deploy` builds the Dockerfile and runs `node dist/src/index.js`. `.github/workflows/fly.yml` deploys on every push to `main`.
+
+## AI disclosure
+
+AI tools were used to write most of this project, including the UI and the interaction with some NEAR protocols. The chat agent also calls a language model (NEAR AI Cloud or Anthropic) at runtime.
+
+## License
+
+[MIT](LICENSE).
 
 ## Dependencies
 
