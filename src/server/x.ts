@@ -34,18 +34,19 @@ export class XClient {
   }
   /** Mentions newer than `since`, oldest first. Without `since`, only says where the newest one is. */
   async mentions(userId: string, since?: string): Promise<{ newest?: string; tweets: Mention[] }> {
-    const r = await this.call<{ data?: { id: string; text: string; author_id: string }[]; includes?: { users?: { id: string; username: string }[] }; meta?: { newest_id?: string } }>("GET", `https://api.x.com/2/users/${userId}/mentions`, { max_results: "20", expansions: "author_id", "tweet.fields": "author_id", "user.fields": "username", ...(since ? { since_id: since } : {}) });
+    const r = await this.call<{ data?: { id: string; text: string; author_id: string; entities?: { mentions?: { id?: string }[] } }[]; includes?: { users?: { id: string; username: string }[] }; meta?: { newest_id?: string } }>("GET", `https://api.x.com/2/users/${userId}/mentions`, { max_results: "20", expansions: "author_id", "tweet.fields": "author_id,entities", "user.fields": "username", ...(since ? { since_id: since } : {}) });
     const names = new Map((r.includes?.users ?? []).map((u) => [u.id, u.username]));
     const tweets = since ? (r.data ?? []).map((t) => ({ ...t, username: names.get(t.author_id) ?? "" })).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1)) : [];
     return { ...(r.meta?.newest_id ? { newest: r.meta.newest_id } : {}), tweets };
   }
   /** The account the access token belongs to. */
   async me(): Promise<{ id: string; username: string }> { return (await this.call<{ data: { id: string; username: string } }>("GET", "https://api.x.com/2/users/me")).data; }
-  async reply(text: string, to: string): Promise<void> { await this.call("POST", "https://api.x.com/2/tweets", {}, { text, reply: { in_reply_to_tweet_id: to } }); }
+  /** X puts the replied-to person at the front itself. `exclude` keeps everyone else tagged in that post from being pulled into the reply. */
+  async reply(text: string, to: string, exclude: string[] = []): Promise<void> { await this.call("POST", "https://api.x.com/2/tweets", {}, { text, reply: { in_reply_to_tweet_id: to, ...(exclude.length ? { exclude_reply_user_ids: exclude.slice(0, 50) } : {}) } }); }
 }
 
 /* ---- handling one mention ---- */
-export interface Mention { id: string; text: string; author_id: string; username?: string }
+export interface Mention { id: string; text: string; author_id: string; username?: string; entities?: { mentions?: { id?: string }[] } }
 export interface XDeps {
   store: AgentStore;
   botHandle: string;
@@ -55,7 +56,7 @@ export interface XDeps {
   /** the assistant's answer to this user, plus any Confirm links it produced */
   ask(u: UserRec, text: string): Promise<{ text: string; urls: string[] }>;
   charge(u: UserRec, feeUsd: number): Promise<boolean>;
-  reply(text: string, to: string): Promise<void>;
+  reply(text: string, to: string, exclude?: string[]): Promise<void>;
 }
 const FEE_KINDS = new Set(["send", "claim", "stake"]);
 const NOT_PAID = new Set(["AWAITING_YOUR_SIGNATURE", "FAILED", "EXPIRED", "REFUNDED"]);
@@ -83,7 +84,7 @@ export const SILENT = /^\W*ignore\W*$/i;
 
 export async function handleMention(d: XDeps, t: Mention): Promise<void> {
   const clean = t.text.replace(new RegExp(`@${d.botHandle}\\b`, "gi"), "").replace(/\s+/g, " ").trim();
-  const say = (s: string, urls: string[] = []) => d.reply(fit(hideAddresses(`@${t.username ?? ""} ${s}`.trim()), urls), t.id).then(() => console.log(`[x] posted reply to ${t.id}`)).catch((e: unknown) => console.log(`[x] could not reply to ${t.id}: ${e instanceof Error ? e.message : e}`));
+  const say = (s: string, urls: string[] = []) => d.reply(fit(hideAddresses(s), urls), t.id, (t.entities?.mentions ?? []).map((m) => m.id ?? "").filter((i) => i && i !== t.author_id)).then(() => console.log(`[x] posted reply to ${t.id}`)).catch((e: unknown) => console.log(`[x] could not reply to ${t.id}: ${e instanceof Error ? e.message : e}`));
 
   console.log(`[x] mention ${t.id} from @${t.username ?? "?"}: ${clean.slice(0, 100)}`);
   const link = /^link\s+(moo-[A-Za-z0-9]{6})\b/i.exec(clean);
@@ -140,7 +141,7 @@ export function xFromEnv(env: NodeJS.ProcessEnv = process.env): { keys: XKeys; u
 
 /** Checks for new mentions every `everySeconds` and answers each in turn. The first run only notes where things stand, so old mentions are never replayed. */
 export function startX(d: Omit<XDeps, "reply" | "botHandle">, cfg: NonNullable<ReturnType<typeof xFromEnv>>, everySeconds = 30, client = new XClient(cfg.keys)): NodeJS.Timeout {
-  const deps: XDeps = { ...d, botHandle: cfg.handle, reply: (text, to) => client.reply(text, to) };
+  const deps: XDeps = { ...d, botHandle: cfg.handle, reply: (text, to, exclude) => client.reply(text, to, exclude) };
   let busy = false, lastErr = "", verified = false;
   console.log(`[x] X agent on as @${cfg.handle}, checking every ${everySeconds}s`);
   const tick = async () => {

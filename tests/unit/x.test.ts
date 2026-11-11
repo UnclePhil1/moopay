@@ -58,7 +58,7 @@ test("X: a one-time code links an X account; a stranger gets one hint a day; a l
   await handleMention(s.d, { id: "6", text: "@moopay send $5 to bob.near", author_id: "x2", username: "alice" });
   assert.deepEqual(s.asked, ["send $5 to bob.near"], "the bot's own handle is stripped");
   assert.equal(s.replies.at(-1)!.to, "6");
-  assert.match(s.replies.at(-1)!.text, /^@alice OK, done\./);
+  assert.match(s.replies.at(-1)!.text, /^OK, done\./);
 });
 
 test("X: a linked handle in a message becomes that person's wallet, and the 1% fee is taken once per paid payment", async () => {
@@ -132,4 +132,12 @@ test("X: a reply never carries a full crypto address", () => {
   assert.equal(hideAddresses("Send $0.50 to CkexRjpqtT2y3prduUr7Ah8jbwtWazF8phsitDGnyzya on Solana, fee $0.005."), "Send $0.50 to Ckex…yzya on Solana, fee $0.005.");
   assert.equal(hideAddresses("to 0x" + "ab".repeat(20)), "to 0xab…abab");
   assert.equal(hideAddresses("hello bob.near, $5"), "hello bob.near, $5");
+});
+
+test("X: a reply does not pull in other accounts tagged in the same post", async () => {
+  const sent: { to: string; exclude?: string[] }[] = [];
+  const s = await setup({ reply: async (_t, to, exclude) => { sent.push({ to, ...(exclude ? { exclude } : {}) }); } });
+  s.u.x = { id: "x2", handle: "alice" };
+  await handleMention(s.d, { id: "9", text: "@moopay @near_intents send $1 to bob.near", author_id: "x2", username: "alice", entities: { mentions: [{ id: "bot" }, { id: "x2" }, { id: "intents" }] } });
+  assert.deepEqual(sent[0]!.exclude, ["bot", "intents"], "the author stays, everyone else is left out");
 });
