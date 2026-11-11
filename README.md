@@ -246,7 +246,7 @@ AI tools were used to write most of this project, including the UI and the inter
 
 ## License
 
-[MIT](LICENSE).
+[GNU AGPL-3.0](LICENSE). If you run a modified copy as a network service, you must offer its source to your users under the same license.
 
 ## Dependencies
 

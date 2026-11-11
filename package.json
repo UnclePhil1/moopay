@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "NEAR Intents 1Click + Vanilla HTML/TypeScript Payment Engine",
   "private": true,
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist/src/index.js",
   "engines": {
