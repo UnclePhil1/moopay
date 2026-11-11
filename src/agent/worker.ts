@@ -1,4 +1,4 @@
-import { fmt, type AgentOps } from "./ops.js";
+import type { AgentOps } from "./ops.js";
 import type { AgentStore, UserRec } from "./store.js";
 
 /* The part that works while nobody is chatting: notices deposits, sweeps the extra out, follows payments, runs schedules. */
@@ -9,7 +9,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : "something went wr
 export async function tick(ops: AgentOps, store: AgentStore, origin: string, now: number): Promise<void> {
   for (const u of store.all()) {
     store.settlePayout(u, now);
-    try { await one(ops, store, u, origin, now); } catch { /* try again next round */ }
+    try { await one(ops, store, u, origin, now); await ops.takeFees(u); } catch { /* try again next round */ }
   }
 }
 

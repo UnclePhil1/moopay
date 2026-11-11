@@ -476,14 +476,14 @@ export class MooPayService {
 
   /** `amount` is what the receiver gets. Adding money to the agent wallet instead quotes what the payer sends (`origin` in its own units), so a bit more or less still counts. */
   private directFor(i: PayIntent, originAssetId: string, amount: bigint, refundTo: string, dryRun: boolean, origin?: PayAsset): DirectInput {
-    const flex = i.fund && origin ? { flex: true, amount: this.originUnits(i, amount, origin) } : undefined;
+    const flex = i.fund && origin ? { flex: true, amount: this.originUnits(amount, origin) } : undefined;
     return {
       originAssetId, amount: amount.toString(), refundTo, exactOutput: true, ...flex, destinationChain: i.destinationChain as DirectInput["destinationChain"],
       destinationAssetId: i.destinationAssetId, recipient: i.recipient, slippageBps: i.slippageBps, dryRun,
     };
   }
 
-  private originUnits(i: PayIntent, usdcUnits: bigint, o: PayAsset): string {
+  private originUnits(usdcUnits: bigint, o: PayAsset): string {
     if (/^US(DC|DT)/i.test(o.symbol) || !o.priceUsd) return ((usdcUnits * 10n ** BigInt(o.decimals) + 999_999n) / 1_000_000n).toString();
     return ((usdcUnits * 10n ** BigInt(o.decimals) + BigInt(Math.round(o.priceUsd * 1e6)) - 1n) / BigInt(Math.round(o.priceUsd * 1e6))).toString();
   }

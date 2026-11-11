@@ -55,11 +55,10 @@ export interface XDeps {
   now(): number;
   /** the assistant's answer to this user, plus any Confirm links it produced */
   ask(u: UserRec, text: string): Promise<{ text: string; urls: string[] }>;
-  charge(u: UserRec, feeUsd: number): Promise<boolean>;
+  /** marks the payments made in this turn with the fee rate they owe; the worker takes the fee once they land */
+  stamp(u: UserRec, had: Set<string>, bps: number): void;
   reply(text: string, to: string, exclude?: string[]): Promise<void>;
 }
-const FEE_KINDS = new Set(["send", "claim", "stake"]);
-const NOT_PAID = new Set(["AWAITING_YOUR_SIGNATURE", "FAILED", "EXPIRED", "REFUNDED"]);
 
 /** X refuses posts that contain a crypto address while an account is new, so an address is shown as its first 4 and last 3 characters, like 2dj3...8d3. */
 export function hideAddresses(text: string): string { return text.replace(/\b(?:0x)?[A-Za-z0-9]{26,}\b/g, (a) => `${a.slice(0, 4)}...${a.slice(-3)}`); }
@@ -123,14 +122,9 @@ async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: s
     await say(said); return; }
 
   if (SILENT.test(out.text)) return void console.log("[x] assistant judged it not a request, no reply");
-  let note = "";
-  if (d.feeBps > 0) {
-    const paid = u.payments.filter((p) => !had.has(p.id) && FEE_KINDS.has(p.kind) && !NOT_PAID.has(p.status));
-    const fee = Math.round(paid.reduce((a, p) => a + p.amountUsd, 0) * d.feeBps) / 10_000;
-    if (fee >= 0.01 && !(await d.charge(u, fee))) note = " (I couldn't take the service fee, so I'll try again next time.)";
-  }
+  if (d.feeBps > 0) d.stamp(u, had, d.feeBps);
   console.log(`[x] replying: ${out.text.slice(0, 160)}`);
-  await say(out.text + note, out.urls);
+  await say(out.text, out.urls);
 }
 
 /* ---- the loop ---- */

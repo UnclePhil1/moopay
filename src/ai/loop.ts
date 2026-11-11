@@ -74,6 +74,9 @@ export function plain(text: string): string {
 export type Ctl = { cancelled: boolean; ran: boolean };
 
 /** Added to the system prompt for a message that comes from X: public, short, and nothing moves until the user says yes. */
+/** The fee note for the MooPay chat; empty when no fee is charged. */
+export const CHAT_RULES = (bps: number): string => (bps ? `\nEvery send, claim or stake made in this chat adds a ${bps / 100}% MooPay service fee, taken from the agent wallet after the payment lands. Say so in the summary, as "$10 + $0.10 fee".` : "");
+
 export const X_RULES = (fee: string): string => `
 This message came from X (Twitter) and your answer is posted as a PUBLIC reply, so:
 - Keep it under 240 characters, in plain words. Never mention keys, seeds, balances above what the user asked for, or anyone's private details.

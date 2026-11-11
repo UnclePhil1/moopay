@@ -28,9 +28,9 @@ async function setup(over: Partial<XDeps> = {}) {
   const u = store.open("a".repeat(43));
   const replies: { text: string; to: string }[] = [], asked: string[] = [], charged: number[] = [];
   const d: XDeps = {
-    store, botHandle: "moopay", feeBps: 100, now: () => 1_800_000_000_000,
+    store, botHandle: "moopay", feeBps: 200, now: () => 1_800_000_000_000,
     ask: async (_u, text) => { asked.push(text); return { text: "OK, done.", urls: [] }; },
-    charge: async (_u, usd) => { charged.push(usd); return true; },
+    stamp: (u, had, bps) => { for (const p of u.payments) if (!had.has(p.id)) { charged.push(bps); } },
     reply: async (text, to) => { replies.push({ text, to }); },
     ...over,
   };
@@ -73,17 +73,13 @@ test("X: a linked handle in a message becomes that person's wallet, and the 1% f
   };
   await handleMention(s.d, { id: "7", text: "@moopay send $10 to @bobby", author_id: "x2", username: "alice" });
   assert.equal(s.asked[0], `send $10 to ${friend.accountId}`);
-  assert.deepEqual(s.charged, [0.1], "1% of the one payment that went through; the unsigned one is not charged");
+  assert.deepEqual(s.charged, [200, 200], "the payments of this turn are marked with the 2% X rate");
   assert.ok(s.replies.at(-1)!.text.endsWith("https://moopay.cash/p/z"));
-  // fee off: nothing charged; fee that fails: the user is told
+  // fee off: nothing marked
   const off = await setup({ feeBps: 0 }); off.u.x = { id: "x2", handle: "alice" };
   off.d.ask = async (u) => { u.payments.unshift({ id: "p", kind: "send", amountUsd: 10, chain: "near", recipient: "r", status: "DELIVERED", createdAt: 1, settled: true }); return { text: "Sent.", urls: [] }; };
   await handleMention(off.d, { id: "8", text: "@moopay send $10 to bob.near", author_id: "x2" });
   assert.deepEqual(off.charged, []);
-  const bad = await setup({ charge: async () => false }); bad.u.x = { id: "x2", handle: "alice" };
-  bad.d.ask = off.d.ask;
-  await handleMention(bad.d, { id: "9", text: "@moopay send $10 to bob.near", author_id: "x2" });
-  assert.match(bad.replies.at(-1)!.text, /couldn't take the service fee/);
 });
 
 test("X: the client signs requests and reads mentions oldest first", async () => {

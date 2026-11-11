@@ -8,7 +8,7 @@ import { alertOwner, resetAlerts } from "../../src/util/alert.js";
 import { handlePages } from "../../src/server/routes/pages.js";
 import { makeAgent } from "../../src/server/routes/agent.js";
 import { runTurn, type Llm } from "../../src/ai/loop.js";
-import { AgentOps, type Sponsor } from "../../src/agent/ops.js";
+import { AgentOps, CHAT_FEE_BPS, X_FEE_BPS, type Sponsor } from "../../src/agent/ops.js";
 import { decide, rulesNeedApproval } from "../../src/agent/policy.js";
 import { AgentStore } from "../../src/agent/store.js";
 import { tick } from "../../src/agent/worker.js";
@@ -1371,7 +1371,7 @@ test("the agent wallet is one pool: with no USDC but enough NEAR, a payment conv
   assert.equal(r2.result["status"], "needs_your_signature");
 });
 
-test("X agent: the link code tool, unlinking, and the 1% fee as a USDC transfer to the fee account", async () => {
+test("X agent: the link code tool, unlinking, and the fee as a USDC transfer to the fee account", async () => {
   process.env["X_BOT_HANDLE"] = "moopay"; process.env["MOOPAY_X_FEE_ACCOUNT"] = "fees.near";
   try {
     const a = await agent();
@@ -1388,6 +1388,26 @@ test("X agent: the link code tool, unlinking, and the 1% fee as a USDC transfer 
     const b = await agent(); // nothing in the wallet: the fee fails without breaking anything
     assert.equal(await b.ops.collectFee(b.u, 0.1), false);
   } finally { delete process.env["X_BOT_HANDLE"]; delete process.env["MOOPAY_X_FEE_ACCOUNT"]; }
+});
+
+test("service fee: 1% in chat, 2% on X, taken once after the payment lands, never for own-wallet payments", async () => {
+  process.env["MOOPAY_FEE_ACCOUNT"] = "fees.near";
+  try {
+    const a = await agent();
+    a.fund(20);
+    assert.equal(CHAT_FEE_BPS(), 100);
+    assert.equal(X_FEE_BPS(), 200);
+    const mk = (id: string, extra: object = {}) => ({ id, kind: "send" as const, amountUsd: 10, chain: "near", recipient: "r", status: "DELIVERED", createdAt: 1, settled: true, ...extra });
+    a.u.payments.unshift(mk("chat"), mk("x"), mk("own", { payId: "w" }), mk("wait", { status: "PENDING_DEPOSIT" }));
+    a.ops.stampFees(a.u, new Set(), 100);
+    a.u.payments.find((p) => p.id === "x")!.feeBps = 200;
+    await a.ops.takeFees(a.u);
+    assert.deepEqual(a.near.transfers.map((t) => t.amount), [100_000n, 200_000n], "$0.10 for chat, $0.20 for X; none for own-wallet or unfinished");
+    await a.ops.takeFees(a.u);
+    assert.equal(a.near.transfers.length, 2, "taken once");
+    delete process.env["MOOPAY_FEE_ACCOUNT"];
+    assert.equal(CHAT_FEE_BPS(), 0);
+  } finally { delete process.env["MOOPAY_FEE_ACCOUNT"]; }
 });
 
 test("sending to another chain from NEAR is one swap, not a conversion to USDC first", async () => {

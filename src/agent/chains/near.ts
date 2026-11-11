@@ -196,7 +196,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
           });
         }
       } catch {
-        // TODO(verify): tokens without NEP-145 reject this; ft_transfer below then decides.
+        // tokens without NEP-145 reject this call; the ft_transfer below decides
       }
       try {
         const outcome = await account.callFunctionRaw({

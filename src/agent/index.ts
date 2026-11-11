@@ -14,7 +14,7 @@ import { OutLayer } from "./outlayer.js";
  * wallets, chains and stored state through this file, and never through near-api-js or a chain driver directly.
  */
 export { MooPayService, mintShape, routeShape, type RouteContext } from "./service.js";
-export { AgentOps, approvalCard, type Ctx, type NameParent, type Out, type Sponsor } from "./ops.js";
+export { AgentOps, approvalCard, CHAT_FEE_BPS, X_FEE_BPS, type Ctx, type NameParent, type Out, type Sponsor } from "./ops.js";
 export { AgentStore, SESSION_ENDED, SESSION_MS, type UserRec } from "./store.js";
 export { spentToday } from "./policy.js";
 export { followPayments, tick } from "./worker.js";

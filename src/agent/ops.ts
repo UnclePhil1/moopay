@@ -55,6 +55,14 @@ export interface NameParent { accountId: string; secretKey: string }
 const NAME_DEPOSIT = 5_000_000_000_000_000_000_000n; // 0.005 NEAR
 const NAME_STORAGE_USDC = 1_250_000_000_000_000_000_000n; // NEP-145 registration so USDC can be sent to the new name
 const SPONSOR_AMOUNT = 50_000_000_000_000_000_000_000n; // 0.05 NEAR, enough for a few dozen transfers
+const FEE_KINDS = new Set(["send", "claim", "stake"]);
+const FEE_DONE = new Set(["DELIVERED", "CLAIMED", "STAKED"]);
+/** Where the service fee goes. MOOPAY_X_FEE_ACCOUNT is the older name. No fee when neither is set. */
+export const feeAccount = (): string | undefined => process.env["MOOPAY_FEE_ACCOUNT"]?.trim() || process.env["MOOPAY_X_FEE_ACCOUNT"]?.trim() || undefined;
+const bpsEnv = (name: string, dflt: number): number => { const n = Number(process.env[name] ?? dflt); return Number.isFinite(n) && n >= 0 ? n : dflt; };
+/** Fee on payments made in the MooPay chat (default 1%) and through X (default 2%), in basis points. */
+export const CHAT_FEE_BPS = (): number => (feeAccount() ? bpsEnv("MOOPAY_CHAT_FEE_BPS", 100) : 0);
+export const X_FEE_BPS = (): number => (feeAccount() ? bpsEnv("MOOPAY_X_FEE_BPS", 200) : 0);
 const AGENT_KEY_DEFAULT_HOURS = 24 * 7;
 /** A private payment waits this long for its money to show in the private balance before it is given up on. */
 const PRIVATE_FUND_WAIT = 45 * 60_000;
@@ -252,7 +260,7 @@ export class AgentOps {
       if ((await this.balances(u)).nat >= nearUnits + MIN_GAS) direct = "near";
     }
     // The agent wallet is optional: it pays only when asked to, or when it already holds enough. Otherwise the user signs in their own wallet.
-    const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct, units)));
+    const own = !who.ak && !!ctx && p.useAgentWallet !== true && (p.useAgentWallet === false || !!p.fromChain || !(await this.canPay(u, amt, direct)));
     const priv = p.private ?? !!u.rules.privateSends;
     if (priv) { const why = this.privateWhy(u, chain, dest.assetId === usdc.assetId); if (why) return { result: { status: "not_private", reason: why, hint: "Tell the user why. Send it the normal way only if they say so (call send_money again with private false)." } }; }
     // The fee a swap adds on top, when the route has one. Unknown (undefined) when it cannot be quoted yet.
@@ -338,7 +346,7 @@ export class AgentOps {
   }
 
   /** Whether the agent wallet can pay this by itself, including the network fee. */
-  private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | "usdt" | undefined, units: bigint): Promise<boolean> {
+  private async canPay(u: UserRec, amt: number, direct: "usdc" | "near" | "usdt" | undefined): Promise<boolean> {
     const b = await this.balances(u);
     if (direct === "near" || direct === "usdt") return true; // already checked against the balance above
     // Not holding the exact coin is fine: whatever else the wallet has is converted first (ensureUsdc), so only the total counts.
@@ -759,16 +767,33 @@ export class AgentOps {
     return { result: { status: "code_ready", code, linked: u.x?.handle ?? null, steps: `Post this from your X account (it works for 15 minutes): @${handle} link ${code}`, note: "Tell the user to post exactly that from the X account they want to link. Anyone who holds that account can then ask MooPay to move money inside the user's rules, so only link an account they keep safe." } };
   }
   unlinkX(u: UserRec): Out { const was = u.x?.handle; delete u.x; this.store.save(); return { result: { status: "unlinked", was: was ?? null } }; }
-  /** The 1% service fee on a payment made through X: a USDC transfer from the agent wallet to the fee account. Returns false when it could not be taken. */
+  /** Marks payments made since `had` with the service fee rate they owe. The worker takes the fee once the payment has landed. */
+  stampFees(u: UserRec, had: Set<string>, bps: number): void {
+    if (!feeAccount() || bps <= 0) return;
+    for (const p of u.payments) if (!had.has(p.id) && FEE_KINDS.has(p.kind) && !p.feed && p.feeBps === undefined) p.feeBps = bps;
+    this.store.save();
+  }
+  /** Takes the fee on every landed payment that owes one: a USDC transfer from the agent wallet to the fee account. Skips payments signed in the user's own wallet. */
+  async takeFees(u: UserRec): Promise<void> {
+    for (const p of u.payments) {
+      const bps = p.feeBps ?? (p.tag === "scheduled" ? CHAT_FEE_BPS() : 0);
+      if (!bps || p.feed || p.payId || !FEE_DONE.has(p.status)) continue;
+      const fee = Math.round(p.amountUsd * bps) / 10_000;
+      if (fee < 0.01) { p.feed = true; continue; }
+      if (await this.collectFee(u, fee)) p.feed = true; else break;
+    }
+    this.store.save();
+  }
+  /** A USDC transfer from the agent wallet to the fee account. Returns false when it could not be taken. */
   async collectFee(u: UserRec, feeUsd: number): Promise<boolean> {
-    const to = process.env["MOOPAY_X_FEE_ACCOUNT"];
+    const to = feeAccount();
     if (!to || feeUsd < 0.01) return true;
     try {
       const usdc = await this.svc.usdcAsset(), units = parseDecimal(feeUsd.toFixed(2), usdc.decimals);
       await this.ensureUsdc(u, units);
       const k = this.store.keyOf(u);
       const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to, amount: units });
-      u.payments.unshift({ id: id(), kind: "send", amountUsd: feeUsd, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), settled: true, txHash: r.txHash }); u.payments.length = Math.min(u.payments.length, 100);
+      u.payments.unshift({ id: id(), kind: "send", amountUsd: feeUsd, chain: "near", recipient: to, status: "DELIVERED", createdAt: this.now(), settled: true, feed: true, txHash: r.txHash }); u.payments.length = Math.min(u.payments.length, 100);
       this.store.save(); return true;
     } catch { return false; }
   }
@@ -849,7 +874,6 @@ export class AgentOps {
     const d = decide(u, amt, this.recipientKey("near", payout), this.now());
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const shown = fmt(nearAmt, 24, 4);
-    const expected = fmt((nearAmt * 10n ** 24n) / (await rnearPrice((c, m) => this.near.view(c, m) as Promise<unknown>)), 24, 4);
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Stake ${shown} NEAR (about ${usd(amt)}) into rNEAR on Rhea; rNEAR goes to ${payout}`;
     if (d.action === "ask" && !approved) return this.ask(u, "stake", { amount: fmt(nearAmt, 24, 24), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
     const r = await this.runStake(u, nearAmt, payout);
@@ -919,7 +943,7 @@ export class AgentOps {
   }
 
   /* ---- unstake: the rNEAR sits in the user's own wallet, so they sign; the agent opens the window and follows it ---- */
-  private callWindow(u: UserRec, ctx: Ctx, p: Payment, o: { wallet: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][]; button: string }) {
+  private callWindow(ctx: Ctx, p: Payment, o: { wallet: string; method: string; args: Record<string, unknown>; title: string; lines: [string, string][]; button: string }) {
     p.payId = this.svc.newCallIntent({ account: o.wallet, contract: RNEAR, method: o.method, args: o.args, title: o.title, lines: o.lines });
     this.store.save();
     return { kind: "confirm_send", title: o.title, url: `${ctx.origin}/p/${p.payId}`, amount: o.lines[1]?.[1] ?? "", button: o.button, id: p.id };
@@ -938,7 +962,7 @@ export class AgentOps {
     const worth = (units * price) / 10n ** 24n; // the contract takes the NEAR value
     const all = units === held;
     const pay: Payment = { id: id(), kind: "unstake", amountUsd: 0, chain: "near", recipient: wallet, status: "AWAITING_YOUR_SIGNATURE", createdAt: this.now(), expected: `${fmt(worth, 24, 4)} NEAR` };
-    const card = this.callWindow(u, ctx, pay, { wallet, method: all ? "unstake_all" : "unstake", args: all ? {} : { amount: worth.toString() }, title: `Unstake ${fmt(units, 24, 4)} rNEAR`, button: "Unstake", lines: [["Unstaking", `${fmt(units, 24, 4)} rNEAR`], ["You get back", `about ${pay.expected}`], ["Ready to withdraw", "in a day or two"], ["Wallet", wallet]] });
+    const card = this.callWindow(ctx, pay, { wallet, method: all ? "unstake_all" : "unstake", args: all ? {} : { amount: worth.toString() }, title: `Unstake ${fmt(units, 24, 4)} rNEAR`, button: "Unstake", lines: [["Unstaking", `${fmt(units, 24, 4)} rNEAR`], ["You get back", `about ${pay.expected}`], ["Ready to withdraw", "in a day or two"], ["Wallet", wallet]] });
     u.payments.unshift(pay); u.payments.length = Math.min(u.payments.length, 100); this.earn(u); this.store.save();
     return { result: { status: "needs_your_signature", paymentId: pay.id, note: "An Unstake button is on the user's screen. They press it and sign with their own NEAR wallet, the one that holds the rNEAR. Nothing has happened yet. I will tell them when the NEAR is ready to withdraw (a day or two). Do not paste the link." }, card };
   }
@@ -966,12 +990,12 @@ export class AgentOps {
     const pay = u.payments.find((x) => x.kind === "unstake" && !x.settled && x.recipient === wallet) ?? { id: id(), kind: "unstake" as const, amountUsd: 0, chain: "near", recipient: wallet, status: "READY_TO_WITHDRAW", createdAt: this.now() };
     pay.status = "READY_TO_WITHDRAW"; pay.expected = `${fmt(d.pending, 24, 4)} NEAR`;
     if (!u.payments.includes(pay)) u.payments.unshift(pay);
-    const card = this.callWindow(u, ctx, pay, { wallet, method: "withdraw_all", args: {}, title: `Withdraw ${pay.expected}`, button: "Withdraw", lines: [["Withdrawing", pay.expected], ["Wallet", wallet]] });
+    const card = this.callWindow(ctx, pay, { wallet, method: "withdraw_all", args: {}, title: `Withdraw ${pay.expected}`, button: "Withdraw", lines: [["Withdrawing", pay.expected], ["Wallet", wallet]] });
     return { result: { status: "needs_your_signature", paymentId: pay.id, note: "A Withdraw button is on the user's screen; they sign with their own NEAR wallet. Do not paste the link." }, card };
   }
 
   /** Follows an unstake: signed, waiting out the delay, ready to withdraw, withdrawn. */
-  private async refreshUnstake(p: Payment, ctx: Ctx, u: UserRec): Promise<{ changed: boolean; card?: unknown }> {
+  private async refreshUnstake(p: Payment, ctx: Ctx): Promise<{ changed: boolean; card?: unknown }> {
     const before = p.status;
     let card: unknown;
     try {
@@ -982,7 +1006,7 @@ export class AgentOps {
       }
       if (p.status === "UNSTAKING" && d.canWithdraw) {
         p.expected = `${fmt(d.pending, 24, 4)} NEAR`; p.status = "READY_TO_WITHDRAW";
-        card = this.callWindow(u, ctx, p, { wallet: p.recipient, method: "withdraw_all", args: {}, title: `Withdraw ${p.expected}`, button: "Withdraw", lines: [["Withdrawing", p.expected], ["Wallet", p.recipient]] });
+        card = this.callWindow(ctx, p, { wallet: p.recipient, method: "withdraw_all", args: {}, title: `Withdraw ${p.expected}`, button: "Withdraw", lines: [["Withdrawing", p.expected], ["Wallet", p.recipient]] });
       } else if ((p.status === "UNSTAKING" || p.status === "READY_TO_WITHDRAW") && d.pending === 0n) { p.status = "WITHDRAWN"; p.settled = true; }
     } catch { /* the chain was busy; look again next round */ }
     if (p.status !== before) this.store.save();
@@ -1029,7 +1053,7 @@ export class AgentOps {
 
   private async refreshOne(u: UserRec, p: Payment, ctx: Ctx): Promise<{ changed: boolean; link?: string; card?: unknown }> {
     if (p.settled) return { changed: false };
-    if (p.kind === "unstake") return this.refreshUnstake(p, ctx, u);
+    if (p.kind === "unstake") return this.refreshUnstake(p, ctx);
     if (p.pv) return this.refreshPrivate(u, p);
     const before = p.status;
     let link: string | undefined;

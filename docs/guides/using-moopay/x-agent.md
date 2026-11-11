@@ -54,7 +54,7 @@ Start with a small amount to see how it works.
 ## Rules, limits and fees
 
 - Your rules from the app apply on X exactly the same: allowed chains, daily limits and the rest. Larger payments still ask for your approval.
-- A payment made on X carries a small service fee, shown in the summary before you confirm. The same payment in the app has no extra fee.
+- A payment made on X carries a 2% service fee, shown in the summary before you confirm. The same payment in the MooPay chat carries 1%.
 - You can send up to 6 messages a minute. After that, MooPay asks you to slow down.
 
 ## Addresses on X

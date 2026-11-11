@@ -2,8 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { asMoopayError, MoopayError } from "../../util/errors.js";
 import { toJson } from "../../util/json.js";
-import { AgentOps, AgentStore, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type OutLayer, type Sponsor, type UserRec } from "../../agent/index.js";
-import { plain, runTurn, X_RULES, type Ctl, type Llm } from "../../ai/loop.js";
+import { AgentOps, AgentStore, CHAT_FEE_BPS, X_FEE_BPS, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type OutLayer, type Sponsor, type UserRec } from "../../agent/index.js";
+import { CHAT_RULES, plain, runTurn, X_RULES, type Ctl, type Llm } from "../../ai/loop.js";
 import { SILENT, startX, xFromEnv } from "../x.js";
 import { alertOwner } from "../../util/alert.js";
 import type { Vault } from "../../storage/index.js";
@@ -180,7 +180,9 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "approve" && req.method === "POST") {
         const b = await bodyOf(req);
         if (typeof b["id"] !== "string" || typeof b["approve"] !== "boolean") throw new MoopayError("INVALID_INPUT", "id and approve are required");
+        const had = new Set(u.payments.map((p) => p.id));
         const out = await ops.resolve(u, b["id"], b["approve"], ctx);
+        ops.stampFees(u, had, CHAT_FEE_BPS());
         json(res, 200, { result: out.result, card: out.card });
         return true;
       }
@@ -216,8 +218,10 @@ export async function makeAgent(d: AgentDeps) {
         emit({ type: "turn", id });
         if (!d.llm) emit({ type: "text", text: "My AI isn't switched on yet. The owner needs to set NEAR_AI_API_KEY (or ANTHROPIC_API_KEY) on the server and restart it." });
         else {
-          try { await runTurn({ id, ctl, llm: d.llm, model, u, text, ops, svc: d.svc, ctx, emit: emit as never, context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") }); }
+          const had = new Set(u.payments.map((p) => p.id));
+          try { await runTurn({ id, ctl, extra: CHAT_RULES(CHAT_FEE_BPS()), llm: d.llm, model, u, text, ops, svc: d.svc, ctx, emit: emit as never, context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") }); }
           catch (e) { emit({ type: "text", text: failText(e) }); }
+          ops.stampFees(u, had, CHAT_FEE_BPS());
         }
         if (turns.get(u.id) === ctl) turns.delete(u.id);
         store.save(); res.end();
@@ -236,11 +240,11 @@ export async function makeAgent(d: AgentDeps) {
   const startXAgent = () => {
     const cfg = xFromEnv();
     if (!cfg || !d.llm) return undefined;
-    const llm = d.llm, feeBps = process.env["MOOPAY_X_FEE_ACCOUNT"] ? Number(process.env["MOOPAY_X_FEE_BPS"] ?? 100) || 0 : 0;
+    const llm = d.llm, feeBps = X_FEE_BPS();
     const origin = process.env["MOOPAY_PUBLIC_HOST"]?.trim() ? `https://${process.env["MOOPAY_PUBLIC_HOST"]!.trim()}` : lastOrigin;
     return startX({
       store, feeBps, now,
-      charge: (u, usd) => ops.collectFee(u, usd),
+      stamp: (u, had, bps) => ops.stampFees(u, had, bps),
       ask: async (u, text) => {
         const urls: string[] = [];
         const emit = (e: { type: string; card?: Record<string, unknown>; label?: string; state?: string }) => { if (e.type === "step" && e.state !== "done") console.log(`[x] ${e.label}${e.state === "failed" ? " (failed)" : "…"}`); const url = e.type === "card" ? e.card?.["url"] : undefined; if (typeof url === "string") urls.push(url); };

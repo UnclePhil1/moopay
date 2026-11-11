@@ -29,6 +29,8 @@ export interface Payment {
   status: string; createdAt: number; /** moo points this payment earned, set once */ pts?: number; depositAddress?: string; txHash?: string; fundKey?: string; claimLink?: string; expected?: string; settled?: boolean; agentId?: string; /** fees added on top of `amountUsd`, in dollars, once known */ fee?: number;
   /** set when the user signs in their own wallet on a pay page instead of the agent wallet */
   payId?: string;
+  /** the service fee rate (basis points) this payment owes, and whether it was taken; `feed` also marks the fee transfer itself */
+  feeBps?: number; feed?: boolean;
   /** a stake paid from the user's own wallet: how much NEAR to stake once the money lands (24 decimals) */
   stakeNear?: string;
   /** why a stake is waiting or failed, in words the user can act on */
