@@ -61,8 +61,8 @@ export interface XDeps {
 const FEE_KINDS = new Set(["send", "claim", "stake"]);
 const NOT_PAID = new Set(["AWAITING_YOUR_SIGNATURE", "FAILED", "EXPIRED", "REFUNDED"]);
 
-/** X refuses posts that contain a crypto address while an account is new, so an address is shown as its first and last few characters. */
-export function hideAddresses(text: string): string { return text.replace(/\b(?:0x)?[A-Za-z0-9]{26,}\b/g, (a) => `${a.slice(0, 4)}…${a.slice(-4)}`); }
+/** X refuses posts that contain a crypto address while an account is new, so an address is shown as its first 4 and last 3 characters, like 2dj3...8d3. */
+export function hideAddresses(text: string): string { return text.replace(/\b(?:0x)?[A-Za-z0-9]{26,}\b/g, (a) => `${a.slice(0, 4)}...${a.slice(-3)}`); }
 
 /** A post is 280 characters, and every link counts as 23. */
 export function fit(text: string, urls: string[]): string {

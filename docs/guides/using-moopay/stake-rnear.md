@@ -7,14 +7,16 @@ rNEAR is a liquid staking token from [Rhea Finance](https://rhea.finance). You s
 
 ## Stake
 
-Say: `Stake $20 into rNEAR`. You can also pay from another chain, like `Stake 0.5 SOL`.
+Say: `Stake $20 into rNEAR`, in the chat or by mentioning MooPay on X. The agent stakes straight from your agent wallet and sends the rNEAR to your payout wallet. There is no window to open and no link to follow.
 
 :::steps
-1. A Stake window opens. Enter the NEAR wallet that should get your rNEAR.
-2. Pick the wallet you want to pay with, and sign.
-3. MooPay turns it into NEAR and stakes it.
+1. Set your payout wallet once, the NEAR wallet that should get your rNEAR. Say `my payout wallet is alice.near`.
+2. Say how much to stake. Your rules and limits apply, like for any payment.
+3. MooPay turns what it needs into NEAR, stakes it with Rhea and sends the rNEAR to your payout wallet.
 4. The agent tells you when staking is done.
 :::
+
+If your agent wallet doesn't hold enough, MooPay says how much to add. If your money is on another chain, like `Stake 0.5 SOL`, a Stake window opens, and you pick the wallet to pay with and sign there.
 
 :::note
 Staking needs a little NEAR in your agent wallet for the network fee. Keep about $1 worth there. If the fee is low, the stake waits, and MooPay may lend a small advance and take it back after.

@@ -838,10 +838,12 @@ export class AgentOps {
     if (nearAmt < STAKE_MIN_NEAR) throw new MoopayError("INVALID_INPUT", "give an amount of at least 0.1 NEAR (amount) or its dollar value (amountUsd)");
     const amt = Math.round((Number(nearAmt) / 1e24) * nearUsd * 100) / 100;
     const payout = u.rules.payoutAddress;
-    // The agent wallet is optional: money held there is staked from it, anything else is paid in the user's own wallet in the pay window.
+    // Staking pays from the agent wallet and sends the rNEAR straight to the payout wallet: no window, no link. Only when the user names
+    // money on another chain does the pay window open, because that money has to be signed for in their own wallet.
     const roomUsd = (Number(STAKE_GAS_ROOM) / 1e24) * nearUsd;
-    if (ctx && !who.ak && (p.fromChain || !payout || b.totalUsd < amt * 1.02 + roomUsd)) return this.stakeFromWallet(u, { nearAmt, amt, nearUsd, ...(p.payout ? { payout: p.payout } : payout ? { payout } : {}), ...(p.fromChain ? { fromChain: p.fromChain } : {}), ...(p.fromSymbol ? { fromSymbol: p.fromSymbol } : {}) }, ctx);
+    if (ctx && !who.ak && p.fromChain) return this.stakeFromWallet(u, { nearAmt, amt, nearUsd, ...(p.payout ? { payout: p.payout } : payout ? { payout } : {}), fromChain: p.fromChain, ...(p.fromSymbol ? { fromSymbol: p.fromSymbol } : {}) }, ctx);
     if (!payout) throw new MoopayError("INVALID_INPUT", "Set your payout wallet first (tell me your own NEAR wallet). Your rNEAR is sent there, so you hold it yourself.");
+    if (b.totalUsd < amt * 1.02 + roomUsd) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, amt + roomUsd / 1.02));
     const denied = this.blocked(u, who, amt, "near", "RNEAR", payout);
     if (denied) return { result: { status: "denied", reason: denied } };
     const d = decide(u, amt, this.recipientKey("near", payout), this.now());

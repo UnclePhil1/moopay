@@ -31,6 +31,13 @@ const rawOf = (e: unknown): string => {
 export function friendlyError(e: unknown, fallback = "Something went wrong. Please try again."): FriendlyError {
   const raw = rawOf(e).trim();
   if (!raw) return { title: "", text: fallback, raw: "" };
+  // "Sender x.near does not have enough balance 0.50 for operation costing 1.48": say how much is missing, in NEAR
+  const bal = /does not have enough balance ([\d.]+) for operation costing ([\d.]+)/i.exec(raw);
+  if (bal) {
+    const near = (n: string) => (Number(n) > 1e15 ? Number(n) / 1e24 : Number(n));
+    const have = near(bal[1]!), need = near(bal[2]!), add = Math.max(0.01, Math.ceil((need - have) * 100) / 100);
+    return { title: "Not enough NEAR", text: `This wallet has about ${have.toFixed(2)} NEAR, and this needs about ${need.toFixed(2)} NEAR, which includes a small amount the account must keep. Add about ${add.toFixed(2)} NEAR to this wallet, or use a smaller amount.`, raw };
+  }
   const rule = RULES.find((r) => r.match.test(raw));
   if (rule) return { title: rule.title, text: rule.text, ...(rule.action ? { action: rule.action } : {}), raw };
   // Our own server already speaks plainly: show it as it is.

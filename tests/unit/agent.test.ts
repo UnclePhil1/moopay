@@ -622,13 +622,13 @@ test("unstake can be cancelled until it is signed, and never after", async () =>
   assert.match(String(a.ops.cancelUnstake(a.u).result["note"]), /already signed/);
 });
 
-test("stake: the agent wallet is used when it can pay, and a missing payout wallet sends the user to the window", async () => {
+test("stake: the agent wallet stakes and sends to the payout wallet with no window; only money on another chain opens one", async () => {
   const a = await agent(); rhea(a);
   a.near.nearBalances.set(a.u.accountId, 3n * NEAR_1);
-  const win = await a.ops.stakeRnear(a.u, { amount: "1" }, false, {}, CTX);
-  assert.equal(win.result["status"], "needs_your_signature", "no payout wallet yet: the window asks for it");
+  await assert.rejects(a.ops.stakeRnear(a.u, { amount: "1" }, false, {}, CTX), /payout wallet/, "no payout wallet yet: it says so, no window and no link");
   await a.ops.rules(a.u, { payoutAddress: "me.near" });
   assert.equal((await a.ops.stakeRnear(a.u, { amount: "1" }, false, {}, CTX)).result["status"], "staked", "enough in the agent wallet: no window");
+  await assert.rejects(a.ops.stakeRnear(a.u, { amount: "50" }, false, {}, CTX), /agent wallet has/, "not enough: a plain message, no window");
   const other = await a.ops.stakeRnear(a.u, { amount: "1", payout: "other.near", fromChain: "eth", fromSymbol: "USDT" }, false, {}, CTX);
   const view = await a.svc.payIntentView((other.card as { url: string }).url.split("/").pop()!);
   assert.deepEqual([view.stake, view.fromChain, view.fromSymbol], [{ payout: "other.near" }, "eth", "USDT"]);

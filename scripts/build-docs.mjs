@@ -122,6 +122,20 @@ const template = (p, i) => {
 <meta name="color-scheme" content="dark">
 <title>${esc(p.meta.title)} - MooPay Docs</title>
 <meta name="description" content="${esc(p.meta.description)}">
+<link rel="canonical" href="${ORIGIN}${url(p)}">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="MooPay Docs">
+<meta property="og:title" content="${esc(p.meta.title)} - MooPay Docs">
+<meta property="og:description" content="${esc(p.meta.description)}">
+<meta property="og:url" content="${ORIGIN}${url(p)}">
+<meta property="og:image" content="${ORIGIN}/app/assets/moopay-logo.png">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:site" content="@moopaydotcash">
+<meta name="twitter:title" content="${esc(p.meta.title)} - MooPay Docs">
+<meta name="twitter:description" content="${esc(p.meta.description)}">
+<meta name="theme-color" content="#0a0a0a">
+<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "TechArticle", headline: p.meta.title, description: p.meta.description, url: ORIGIN + url(p), inLanguage: "en", isPartOf: { "@type": "WebSite", name: "MooPay Docs", url: ORIGIN + "/docs" }, publisher: { "@type": "Organization", name: "MooPay", logo: { "@type": "ImageObject", url: ORIGIN + "/app/assets/moopay-logo.png" } } }).replace(/</g, "\\u003c")}</script>
 <link rel="alternate" type="text/markdown" href="${url(p)}.md">
 <link rel="icon" href="/app/assets/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -244,5 +258,10 @@ pages.forEach((p, i) => {
 });
 const llms = ["# MooPay Docs", "", ...nav.tabs.flatMap((t) => [`## ${t.name}`, ...pages.filter((p) => p.tab === t).map((p) => `- [${p.meta.title}](${ORIGIN}${url(p)}.md): ${p.meta.description}`), ""])];
 writeFileSync(join(OUT, "llms.txt"), llms.join("\n"));
+// robots.txt and sitemap.xml sit one level up, so the server can hand them out at the site root
+const today = new Date().toISOString().slice(0, 10);
+const sitemap = ["/", ...pages.map((p) => url(p))].map((u) => `  <url><loc>${ORIGIN}${u}</loc><lastmod>${today}</lastmod></url>`);
+writeFileSync(join(OUT, "..", "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemap.join("\n")}\n</urlset>\n`);
+writeFileSync(join(OUT, "..", "robots.txt"), `User-agent: *\nAllow: /\nDisallow: /pay\nDisallow: /claim\nDisallow: /fund\nDisallow: /g/\nDisallow: /agent/api/\n\nSitemap: ${ORIGIN}/sitemap.xml\n`);
 writeFileSync(join(OUT, "index.json"), JSON.stringify({ first: firstOf(nav.tabs[0]), paths: pages.map((p) => p.path) }));
 console.log(`docs: ${pages.length} pages`);

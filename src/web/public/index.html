@@ -4,7 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>MooPay Agent</title>
+<title>MooPay Agent | Chat to send and manage money</title>
+<meta name="description" content="Chat with your MooPay agent to send, split, schedule and stake money across chains.">
+<link rel="canonical" href="https://moopay.cash/agent">
+<meta name="robots" content="noindex, follow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="MooPay">
+<meta property="og:title" content="MooPay Agent">
+<meta property="og:description" content="Chat with your MooPay agent to send, split, schedule and stake money across chains.">
+<meta property="og:url" content="https://moopay.cash/agent">
+<meta property="og:image" content="https://moopay.cash/app/assets/moopay-logo.png">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="/app/assets/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,6 +30,7 @@
   header { display:flex; align-items:center; gap:12px; padding:14px 22px; border-bottom:1px solid var(--line); }
   header img { height:22px; }
   .spacer { flex:1; }
+  .back { display:inline-flex; align-items:center; gap:4px; color:var(--muted); text-decoration:none; font-size:13.5px; padding:6px 10px 6px 6px; margin-left:-6px; border-radius:10px; } .back:hover { color:#f4efe6; background:rgba(244,239,230,.07); }
   .how { color:var(--muted); font-size:13.5px; text-decoration:none; } .how:hover { color:#f4efe6; }
   .pill[hidden] { display:none; }
   .pill { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid var(--line); border-radius:999px; font-size:12.5px; color:var(--muted); }
@@ -47,6 +59,8 @@
   .av img { width:19px; }
   .body { min-width:0; flex:1; } .body > * + * { margin-top:10px; }
   .txt { white-space:pre-wrap; word-break:break-word; }
+  .xcode { display:inline-flex; align-items:center; gap:4px; padding:1px 3px 1px 8px; border-radius:8px; background:rgba(255,255,255,.09); color:#cfcac0; font-size:.93em; white-space:nowrap; }
+  .xcode button { border:0; background:none; color:inherit; font:inherit; font-size:11px; font-weight:600; opacity:.55; cursor:pointer; padding:2px 6px; border-radius:6px; } .xcode:hover button, .xcode button:focus { opacity:1; background:rgba(255,255,255,.1); }
   .steps { border:1px solid var(--line); border-radius:16px; padding:6px 14px; background:var(--panel); }
   .step { display:flex; align-items:center; gap:10px; padding:7px 0; color:var(--muted); font-size:14px; } .step.done { color:var(--text); }
   .step .i { width:16px; height:16px; flex:none; display:grid; place-items:center; }
@@ -111,6 +125,7 @@
 <body>
 <div class="app">
   <header>
+    <a class="back" href="/?home" aria-label="Back to the MooPay home page" title="Back to home"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg><span>Home</span></a>
     <img src="/app/assets/moopay-logo.png" alt="MooPay">
     <span class="spacer"></span>
     <a class="how" href="/docs" target="_blank" rel="noopener">How it works</a>
@@ -242,7 +257,15 @@ async function removeTurn(m) {
   if (!chat.children.length) start();
 }
 function agent(id) { clearEmpty(); const body = h("div", { class: "body" }); chat.append(h("div", { class: "msg", ...(id ? { "data-turn": id } : {}) }, h("div", { class: "av" }, h("img", { src: "/app/assets/moopay-mark.png", alt: "" })), body)); down(); return body; }
-async function say(b, text) { const t = h("div", { class: "txt" }); b.append(t); for (let i = 0; i < text.length; i += 3) { t.textContent = text.slice(0, i + 3); down(); await sleep(8); } t.textContent = text; }
+/* A line to post on X, like "@moopaydotcash link moo-ABC123", gets a light grey label and a small Copy button. */
+const X_LINE = /@\w{1,15} link moo-[A-Z2-9]{6}/;
+function setText(el, text) {
+  const m = X_LINE.exec(text);
+  if (!m) { el.textContent = text; return; }
+  el.textContent = "";
+  el.append(text.slice(0, m.index), h("span", { class: "xcode" }, m[0], h("button", { title: "Copy", onclick: (e) => copy(m[0], e.target) }, "Copy")), text.slice(m.index + m[0].length));
+}
+async function say(b, text) { const t = h("div", { class: "txt" }); b.append(t); for (let i = 0; i < text.length; i += 3) { t.textContent = text.slice(0, i + 3); down(); await sleep(8); } setText(t, text); }
 const row = (k, v) => h("div", { class: "row" }, h("span", {}, k), h("b", {}, v));
 const CHAIN = { btc: "Bitcoin", sol: "Solana", eth: "Ethereum", near: "NEAR" };
 
@@ -587,7 +610,7 @@ async function boot() {
     if (s.names?.needed && !isTemp() && !sessionStorage.getItem("moopay.nameSkipped") && (await pickName(s.names.suffix))) s = await (await api("state")).json();
     floatNotice(s.account?.rules?.floatUsd); lastEvent = s.lastEventId || 0; aiInfo = s.ai; $("frozen").hidden = !s.frozen; saveChat = s.saveChat !== false; $("nohist").hidden = saveChat;
     if (!s.live) { $("dot").style.background = "var(--warn)"; $("state").textContent = "AI not connected"; }
-    if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); b.append(h("div", { class: "txt" }, m.content)); } } }
+    if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); { const tx = h("div", { class: "txt" }); setText(tx, m.content); b.append(tx); } } } }
     else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }
     for (const a of s.approvals || []) agent().append(card(a));
     nudge(s.account?.balanceUsd);

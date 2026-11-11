@@ -129,8 +129,8 @@ test("X: when the assistant itself fails, the user is told and asked, and a yes 
 });
 
 test("X: a reply never carries a full crypto address", () => {
-  assert.equal(hideAddresses("Send $0.50 to CkexRjpqtT2y3prduUr7Ah8jbwtWazF8phsitDGnyzya on Solana, fee $0.005."), "Send $0.50 to Ckex…yzya on Solana, fee $0.005.");
-  assert.equal(hideAddresses("to 0x" + "ab".repeat(20)), "to 0xab…abab");
+  assert.equal(hideAddresses("Send $0.50 to CkexRjpqtT2y3prduUr7Ah8jbwtWazF8phsitDGnyzya on Solana, fee $0.005."), "Send $0.50 to Ckex...zya on Solana, fee $0.005.");
+  assert.equal(hideAddresses("to 0x" + "ab".repeat(20)), "to 0xab...bab");
   assert.equal(hideAddresses("hello bob.near, $5"), "hello bob.near, $5");
 });
 

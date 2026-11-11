@@ -26,3 +26,11 @@ test("an unknown technical error never shows its trace, and our own plain messag
   assert.equal(plain.raw, "");
   assert.equal(friendlyError(undefined, "This link is not valid.").text, "This link is not valid.");
 });
+
+test("a wallet that is short of NEAR is told how much to add", () => {
+  const f = friendlyError(new Error("Sender weirdcity2347.near does not have enough balance 0.5036110104625000002 for operation costing 1.4850610233581067639"));
+  assert.equal(f.title, "Not enough NEAR");
+  assert.match(f.text, /about 0\.50 NEAR.*about 1\.49 NEAR.*Add about 0\.99 NEAR/);
+  assert.doesNotMatch(f.text, /weirdcity|0\.5036110/);
+  assert.match(f.raw, /weirdcity2347/);
+});

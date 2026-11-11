@@ -63,6 +63,14 @@ export function handlePages(req: IncomingMessage, res: ServerResponse, path: str
   if (req.method !== "GET") return false;
   const page = PAGES[path];
   if (page) { sendPage(res, page); return true; }
+  if (path === "/robots.txt" || path === "/sitemap.xml") {
+    try {
+      const body = builtFile(path.slice(1));
+      res.setHeader("content-type", path.endsWith(".xml") ? "application/xml; charset=utf-8" : "text/plain; charset=utf-8");
+      res.setHeader("cache-control", "public, max-age=3600");
+      res.end(body); return true;
+    } catch { return false; }
+  }
   if (path === "/guide" || path === "/guide/") { res.writeHead(301, { location: "/docs" }); res.end(); return true; }
   if (/^\/(docs|llms\.txt)(\/[a-z0-9-]+){0,3}(\.md)?\/?$/.test(path)) return sendDoc(path, res);
   const img = /^\/app\/assets\/([a-z-]+\.png)$/.exec(path);
