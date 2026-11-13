@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 const out = "src/web/public/dist";
 mkdirSync(out, { recursive: true });
 await build({
-  entryPoints: { pay: "src/web/src/pay-logic.ts", fund: "src/web/src/fund.ts", claim: "src/web/src/claim.ts" },
+  entryPoints: { pay: "src/web/src/pay-logic.ts", fund: "src/web/src/fund.ts", claim: "src/web/src/claim.ts", recover: "src/web/src/recover.ts", passkey: "src/web/src/passkey.ts", approve: "src/web/src/approve.ts" },
   bundle: true, minify: true, format: "iife", platform: "browser", target: "es2022",
   outdir: out,
   define: { global: "globalThis", "process.env.NODE_ENV": '"production"' },

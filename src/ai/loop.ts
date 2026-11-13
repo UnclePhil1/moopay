@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { asMoopayError } from "../util/errors.js";
+import { asMoopayError, MoopayError } from "../util/errors.js";
 import type { AgentOps, Ctx, MooPayService, UserRec } from "../agent/index.js";
 import { READ_ONLY, runTool, STEP_LABEL, TOOLS } from "./tools.js";
+import { auditIntent, MONEY_TOOLS, refusal, screenText, ungrounded, WATCH_NOTE, type AuditLlm } from "../security/guard.js";
+import { security } from "../security/audit.js";
 
 /* The agent loop: the model plans, calls tools, reads results, and answers. Stops after a few rounds. */
 
@@ -87,11 +89,36 @@ This message came from X (Twitter) and your answer is posted as a PUBLIC reply, 
 - Only act on a request to DO something with money: send, split, schedule, stake, claim, swap, check their balance, or confirm or cancel what you just summarised. For anything else (a question about MooPay, praise, a complaint, small talk, someone else's conversation), answer with exactly the single word IGNORE and nothing more; it is not posted.
 - If a payment or any step fails, say plainly, in one short sentence, what happened and whether any money moved (usually none), then ask "Want me to try again? Reply yes." Never retry on your own: only try again after the user clearly says yes. Anything else you can't do: say why in one short sentence.`;
 
-export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: Llm; model: string; u: UserRec; text: string; ops: AgentOps; svc: MooPayService; ctx: Ctx; emit: Emit; context: string }): Promise<string> {
+/**
+ * Before any tool that sends money or changes where money goes runs: the destination must be one the user wrote or has paid,
+ * and (when an auditor is given) a second model must agree the call matches what the user asked. Throws a plain refusal otherwise.
+ */
+async function vet(p: { u: UserRec; text: string; ctx: Ctx; ops: AgentOps; auditor?: { llm: AuditLlm; model: string } | undefined }, name: string, input: unknown): Promise<void> {
+  const who = { user: p.u.id.slice(0, 8), tool: name, via: p.ctx.channel ?? "web" };
+  if (p.ops.paused(p.ctx.channel)) { security.add("paused_refusal", who); throw new MoopayError("INVALID_INPUT", p.ctx.channel === "x" ? "Payments from X are paused for a short while. Please use the app or try again later." : "Payments are paused for a short while. Nothing was sent. Please try again later."); }
+  const said = [...p.u.chat.filter((m) => m.role === "user").slice(-12).map((m) => m.content), p.text];
+  const bad = ungrounded(p.u, name, input, said);
+  if (bad) { security.add("address_not_typed", { ...who, dest: bad.slice(0, 12) + "..." }); throw refusal("address"); }
+  if (p.auditor) {
+    const v = await auditIntent(p.auditor.llm, p.auditor.model, p.u, p.text, name, input).catch(() => ({ ok: false, why: "the check could not run" }));
+    if (!v.ok) { security.add("auditor_blocked", { ...who, why: v.why ?? "" }); throw refusal("intent"); }
+  }
+}
+
+export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: Llm; model: string; u: UserRec; text: string; ops: AgentOps; svc: MooPayService; ctx: Ctx; emit: Emit; context: string; /** a second model that must agree before money moves; left out in tests */ auditor?: { llm: AuditLlm; model: string } | undefined }): Promise<string> {
+  const screen = screenText(p.text);
+  if (screen.level !== "ok") security.add(screen.level === "block" ? "injection_blocked" : "injection_watch", { user: p.u.id.slice(0, 8), via: p.ctx.channel ?? "web", why: screen.why ?? "" });
+  if (screen.level === "block") {
+    const said = refusal("words").message;
+    p.emit({ type: "text", text: said });
+    const id = p.id ?? randomUUID(), at = Date.now();
+    p.u.chat.push({ id, at, role: "user", content: p.text }, { id, at, role: "assistant", content: said });
+    return said;
+  }
   const messages: Record<string, unknown>[] = [...p.u.chat.slice(-30).map((m) => ({ role: m.role, content: m.content })), { role: "user", content: p.text }];
   let final = "";
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const r = await retry(() => p.llm.messages.create({ model: p.model, max_tokens: 1024, system: SYSTEM + (p.extra ?? "") + "\n\nCurrent account:\n" + p.context, tools: TOOLS, messages }));
+    const r = await retry(() => p.llm.messages.create({ model: p.model, max_tokens: 1024, system: SYSTEM + (p.extra ?? "") + (screen.level === "watch" ? WATCH_NOTE : "") + "\n\nCurrent account:\n" + p.context, tools: TOOLS, messages }));
     if (p.ctl?.cancelled && !p.ctl.ran) { p.emit({ type: "cancelled" }); return ""; }
     const calls = r.content.filter((b): b is Extract<Block, { type: "tool_use" }> => b.type === "tool_use");
     const said = r.content.filter((b): b is Extract<Block, { type: "text" }> => b.type === "text").map((b) => b.text).join("").trim();
@@ -103,6 +130,7 @@ export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: 
       if (p.ctl && !READ_ONLY.has(c.name)) p.ctl.ran = true;
       p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "running" });
       try {
+        if (MONEY_TOOLS.has(c.name)) await vet(p, c.name, c.input);
         const out = await runTool(c.name, c.input, p.u, p.ops, p.svc, p.ctx);
         p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "done" });
         if (out.card) p.emit({ type: "card", card: out.card });

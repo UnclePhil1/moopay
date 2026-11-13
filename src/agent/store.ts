@@ -1,3 +1,4 @@
+import type { Bio, Passkey } from "../security/passkeys.js";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { deriveNoteAccount } from "./crypto.js";
 import { SealedFile, Vault } from "../storage/index.js";
@@ -38,7 +39,7 @@ export interface Payment {
   /** a private-route payment in progress (beta): `amt` in USDC units, `idem` makes a retried payout safe */
   pv?: { step: "funding" | "swapping" | "paying"; amt: string; idem: string; req?: string; /** where it goes: the OutLayer chain id and the token that leaves the private balance; swapTo and minOut when the receiver's coin is not USDC */ out: { chain: string; token: string; swapTo?: string; minOut?: string } };
 }
-export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; pf?: Preflight }
+export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; /** looked unusual (a drain, a burst): needs a passkey whatever the user's toggles say */ strong?: boolean; pf?: Preflight }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
 export interface GroupItem { chain: string; recipient: string; amountUsd?: string; amount?: string; assetSymbol?: string }
 export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; items?: GroupItem[]; every: "day" | "week" | "month"; nextAt: number; text: string }
@@ -50,6 +51,8 @@ export interface UserRec {
   masterHash: string; sessions: Session[];
   /** panic switch: nothing leaves the wallet and no rule changes until it is lifted with the recovery code */
   frozen?: boolean;
+  /** passkeys (fingerprint, face or device PIN) that can sign off on payments, and which doors need them */
+  passkeys?: Passkey[]; bio?: Bio;
   /** where the rNEAR from a stake in progress goes, when it is not the payout wallet in the rules */
   rnearTo?: string;
   /** NEAR (yocto) lent to this wallet for its first fee, to be paid back after a stake */

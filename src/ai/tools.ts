@@ -79,7 +79,17 @@ export async function runTool(name: string, input: unknown, u: UserRec, ops: Age
   const parsed = ZS[name as Name].safeParse(input ?? {});
   if (!parsed.success) throw new MoopayError("INVALID_INPUT", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
   const a = parsed.data as never as Record<string, never>;
-  switch (name as Name) {
+  const out = await run(name as Name, a, u, ops, svc, ctx);
+  // From X, an approval has no button to press: a user with a passkey gets a link that opens the signing sheet and asks for their fingerprint, face or PIN.
+  if (ctx.channel === "x" && out.card?.["kind"] === "approval" && u.passkeys?.length) {
+    out.card["url"] = `${ctx.origin}/ok/${String(out.card["id"])}`;
+    out.result["note"] = "A link was added to your reply. Tell the user to tap it and confirm with their fingerprint, face or PIN.";
+  }
+  return out;
+}
+
+async function run(name: Name, a: Record<string, never>, u: UserRec, ops: AgentOps, svc: MooPayService, ctx: Ctx): Promise<Out> {
+  switch (name) {
     case "get_account": return ops.account(u);
     case "send_money": return ops.send(u, a as never, false, {}, ctx);
     case "create_claim": return ops.claim(u, a as never, ctx);

@@ -6,3 +6,5 @@ src/web/public/dist
 moopay-state.json*
 *.seed
 test
+contracts/guard/target
+*.mp4

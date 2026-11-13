@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<title>Recover your wallet</title>
+<link rel="icon" href="/a/favicon.png">
+<style>
+  :root { --bg:#0a0a0a; --card:#141414; --line:rgba(244,239,230,.1); --text:#f4efe6; --muted:#aaa49a; --bad:#ff8a8a; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,sans-serif; display:grid; place-items:start center; padding:32px 16px; }
+  main { width:min(520px,100%); background:var(--card); border:1px solid var(--line); border-radius:16px; padding:24px; }
+  h1 { font-size:22px; margin:0 0 8px; }
+  p, li { color:var(--muted); font-size:15px; }
+  label { display:block; margin:16px 0 6px; font-size:14px; }
+  input { width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:#0f0f0f; color:var(--text); font:inherit; }
+  button { margin-top:16px; padding:11px 18px; border-radius:10px; border:0; background:var(--text); color:#0a0a0a; font:inherit; font-weight:600; cursor:pointer; }
+  code { display:block; word-break:break-all; padding:10px 12px; border-radius:10px; background:#0f0f0f; border:1px solid var(--line); color:var(--text); font-size:13px; }
+  #out { margin-top:14px; font-size:14px; } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Recover your agent wallet</h1>
+  <p>This page works without the MooPay server. It opens your backup file here in your browser. Nothing is uploaded.</p>
+  <label for="file">Backup file (moopay-backup.json)</label>
+  <input id="file" type="file" accept=".json,application/json">
+  <label for="code">Recovery code</label>
+  <input id="code" type="password" autocomplete="off" spellcheck="false">
+  <button id="open" type="button">Open backup</button>
+  <div id="out" role="status"></div>
+  <div id="result" hidden>
+    <label>Wallet address</label><code id="acct"></code>
+    <label>Private key (keep it secret)</label><code id="key"></code>
+    <ol>
+      <li>Open a NEAR wallet such as MyNearWallet and choose to import an account with a private key.</li>
+      <li>Paste the key above. You now control the wallet directly.</li>
+      <li>Send the money to a wallet you trust.</li>
+    </ol>
+  </div>
+</main>
+<script src="/a/recover.js"></script>
+</body>
+</html>

@@ -6,11 +6,27 @@ export type Decision = { action: "auto" } | { action: "ask"; reason: string } | 
 export const today = (now: number): string => new Date(now).toISOString().slice(0, 10);
 export const spentToday = (u: UserRec, now: number): number => (u.spent.day === today(now) ? u.spent.usd : 0);
 
-export function decide(u: UserRec, amountUsd: number, recipientKey: string, now: number): Decision {
+/** Where a request came from. A public post on X is the easiest door to abuse, so it gets tighter limits. */
+export type Channel = "x" | undefined;
+
+/** The most one payment from the agent wallet may be, in dollars. Anything larger is signed by the user in their own wallet. */
+export const txCeilingUsd = (): number => Number(process.env["MOOPAY_TX_CEILING_USD"]) || 3000;
+/** The most a payment started from X may be without the user's OK in the app. */
+export const xAutoUsd = (): number => Number(process.env["MOOPAY_X_AUTO_USD"]) || 10;
+
+export function decide(u: UserRec, amountUsd: number, recipientKey: string, now: number, via?: Channel): Decision {
   const r = u.rules;
   if (!(amountUsd > 0)) return { action: "deny", reason: "the amount must be above zero" };
+  if (amountUsd > txCeilingUsd())
+    return { action: "deny", reason: `one payment from the agent wallet can be at most $${txCeilingUsd().toLocaleString("en-US")}. For more, pay from your own wallet` };
   if (spentToday(u, now) + amountUsd > r.dailyCapUsd)
     return { action: "deny", reason: `this would pass your daily limit of $${r.dailyCapUsd} (already $${spentToday(u, now).toFixed(2)} today)` };
+  if (via === "x") {
+    // Anyone who takes over the X account can write a post, so anything new or large waits for the user in the app.
+    const mine = !!r.payoutAddress && recipientKey === `near:${r.payoutAddress.toLowerCase()}`;
+    if (!u.known.includes(recipientKey) && !mine) return { action: "ask", reason: "first payment to this recipient started from X. Approve it in the app" };
+    if (amountUsd > xAutoUsd()) return { action: "ask", reason: `above $${xAutoUsd()} for a payment started from X. Approve it in the app` };
+  }
   if (!u.known.includes(recipientKey) && amountUsd > r.newRecipientLimitUsd)
     return { action: "ask", reason: `first payment to this recipient above $${r.newRecipientLimitUsd}` };
   if (amountUsd > r.approveAboveUsd) return { action: "ask", reason: `above your $${r.approveAboveUsd} auto-approve limit` };

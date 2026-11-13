@@ -131,6 +131,22 @@ Other controls:
 - **Web hardening.** Nonce CSP and `X-Frame-Options: DENY` on agent pages, HSTS over https, per-IP rate limits and daily AI message caps (`src/server/middleware/security.ts`). The CSP on the wallet pages is report-only until checked against real wallet flows.
 - **X specifics.** Payments need a separate confirm post; pasting the request again does not count. Addresses are shortened in replies. Service fee: 2% on X and 1% in the MooPay chat, on sends, claims and stakes paid from the agent wallet. It is taken by the worker after the payment lands (`takeFees` in `src/agent/ops.ts`), and only when `MOOPAY_FEE_ACCOUNT` is set.
 
+### Prompt-injection and X hardening
+
+- **Firewall in front of the model** (`src/security/guard.ts`). Messages are screened for instruction overrides, fake role tags and hidden characters. A blocked message never reaches the model.
+- **Typed addresses only.** Before any tool that sends money or changes a payout wallet runs, every destination must be one the user typed, has paid before, or owns. A model tricked by a pasted page cannot invent a new destination.
+- **A second model checks the first.** A separate call with no tools must agree the action matches what the user asked. Anything unclear counts as a no. `MOOPAY_AUDITOR=off` turns it off.
+- **Hard ceiling.** One payment from the agent wallet is at most $3,000 (`MOOPAY_TX_CEILING_USD`). Above that the user pays from their own wallet.
+- **X gets tighter limits.** A payment started from X to a new recipient always needs approval in the app, and so does anything above $10 (`MOOPAY_X_AUTO_USD`).
+- **Passkeys.** `/passkey` adds a fingerprint, face or device PIN (WebAuthn, discoverable credential, user verification required, no password or sign-up). Payments that need an OK then ask for it, on the web app (`/biometrics-web`) and on X (`/biometrics-x`); turning either off needs the passkey itself. Challenges are one-use and tied to one payment. Origin and site id are checked, and a counter that does not go up is refused, which catches a cloned key. Code: `src/security/passkeys.ts`.
+- **One tap from X.** When a payment started on X needs an OK and the user has a passkey, the reply carries a link (`/ok/<id>`). It opens a signing sheet that asks for the passkey on load. Without a passkey the user approves in the app.
+- **Drain check.** `src/security/risk.ts` forces a passkey, even with the toggles off, when a payment is 85% or more of the wallet or more than 3 go out in a minute.
+- **Lock from X.** The linked account can post `@moopaybot lock` to freeze the wallet at once. Unlocking needs the recovery code and the passkey.
+- **Kill switch.** `POST /admin/emergency-halt` (`{"scope":"x"}` or `{"scope":"all"}`), `POST /admin/resume` and `GET /admin/security-log`, all with `Authorization: Bearer $MOOPAY_ADMIN_TOKEN`. X payments also pause by themselves if more than `MOOPAY_X_BURST` (30) money requests arrive in ten minutes.
+- **Tamper-evident log.** Blocked messages, refused addresses, halts and backups go to a hash-chained log next to the state file. An edited line breaks the chain, and `/admin/security-log` reports it.
+- **Offline backup.** `/backup` in the chat downloads the wallet key sealed with the recovery code (Argon2id and XChaCha20-Poly1305). `/recover` opens it in the browser with no MooPay server, so money stays reachable if MooPay is gone. The server sees the recovery code on every request, so this protects against losing the server, not against a malicious one.
+- **On-chain guard (not wired in yet).** `contracts/guard` is a NEAR contract that enforces the same limits, allowlist and hold on chain. It is tested but not deployed or audited.
+
 ### Trust boundaries
 
 This is experimental and unaudited. What you are trusting:
@@ -139,6 +155,9 @@ This is experimental and unaudited. What you are trusting:
 - **Claims are not zero-knowledge.** The claim account's key is held by the server.
 - **The AI provider sees chat unless enclave mode is on.** Use a NEAR AI key for sealed-enclave inference. If both keys are set, NEAR AI is used.
 - **Private send hides less than it sounds.** The chain does not link the payer's wallet to the receiver, but receiver and amount are public, OutLayer and the solvers can see the payment, and timing can still correlate deposit and payout. OutLayer's own docs say its governance currently runs on single keys. Only USDC to a NEAR wallet has run against the real service; other routes are code-complete but off, after payouts to Solana failed three times in live tests.
+- **X and the wallet share one process.** The X bot holds X credentials and the server holds the wallet seed in the same process. Splitting them into two services is not done. The limits above cap what a hijacked X account can do.
+- **Passkeys are self-hosted** (SimpleWebAuthn), not a managed provider, and have not been tried on a real phone or in X's in-app browser yet. Some in-app browsers do not support passkeys; the link then needs to be opened in the phone's own browser.
+- **Keys are server-held.** There is no MPC or TEE key storage, and the agent wallet uses a full-access key, not a function-call key. The policy layer, the float cap and the guard contract are the mitigations.
 - **Single machine.** State lives on one volume. Back up `SEED_KEY` separately; without it the wallets cannot be recovered. `scripts/backup.mjs` makes encrypted backups.
 - **Not covered by tests:** real wallet signatures, mainnet payments and staking with real funds, and the report-only CSP. Try small real payments before trusting a change.
 

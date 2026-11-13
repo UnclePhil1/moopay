@@ -3,13 +3,16 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { builtFile, publicFile } from "../../../config/paths.js";
 import { pageHeaders, walletPageHeaders, withNonce } from "../middleware/security.js";
 
-const PAGES: Record<string, string> = { "/": "landing.html", "/agent": "index.html", "/agent/": "index.html", "/app": "index.html", "/app/": "index.html" };
+const PAGES: Record<string, string> = { "/": "landing.html", "/agent": "index.html", "/agent/": "index.html", "/app": "index.html", "/app/": "index.html", "/recover": "recover.html" };
 const IMAGES = new Set(["moopay-logo.png", "moopay-mark.png", "favicon.png"]);
 /** Bundles esbuild writes into public/dist, and how to label them. */
 export const BUNDLES: Record<string, string> = {
   "pay.js": "text/javascript; charset=utf-8",
   "fund.js": "text/javascript; charset=utf-8",
   "claim.js": "text/javascript; charset=utf-8",
+  "recover.js": "text/javascript; charset=utf-8",
+  "passkey.js": "text/javascript; charset=utf-8",
+  "approve.js": "text/javascript; charset=utf-8",
   "modal-ui.css": "text/css; charset=utf-8",
   "moopay-logo.png": "image/png",
   "favicon.png": "image/png",
@@ -81,5 +84,6 @@ export function handlePages(req: IncomingMessage, res: ServerResponse, path: str
     return true;
   }
   if (/^\/g\/[\w-]{6,40}$/.test(path)) { sendPage(res, "group.html"); return true; }
+  if (/^\/ok\/[\w-]{6,40}$/.test(path)) { sendPage(res, "approve.html"); return true; }
   return false;
 }

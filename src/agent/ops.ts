@@ -10,6 +10,9 @@ import { OutLayerError, type OutLayer } from "./outlayer.js";
 import { swapServiceMessage } from "../util/friendly.js";
 import type { MooPayService } from "./service.js";
 import { alertOwner } from "../util/alert.js";
+import { haltScope } from "../security/halt.js";
+import { riskOf } from "../security/risk.js";
+import { security } from "../security/audit.js";
 import { agentDeny, decide, earnPoints, nameProblem, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
 import type { AgentKey, Approval, AgentStore, GroupItem, Payment, Rules, Task, UserRec } from "./store.js";
 import { hashKey } from "./store.js";
@@ -17,7 +20,7 @@ import { hashKey } from "./store.js";
 /* What the agent can do. Every money move goes through decide() first; the language model cannot skip it. */
 
 export interface Out { result: Record<string, unknown>; card?: Record<string, unknown> }
-export interface Ctx { origin: string }
+export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x" }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
 export interface Who { ak?: AgentKey | undefined }
 export interface SendParams {
@@ -211,8 +214,12 @@ export class AgentOps {
     else throw new MoopayError("INVALID_INPUT", "I can pay wallets on Bitcoin, Solana, Ethereum and NEAR. Which one is this for?");
   }
   private recipientKey = recipientKey;
+  /** True while an operator has paused payments: everywhere ("all"), or only those started from X. */
+  paused(via?: "x"): boolean { const s = haltScope(this.store.kv); return s === "all" || (via === "x" && s === "x"); }
   /** Refuses anything that moves money or loosens rules while the account is frozen. */
-  private active(u: UserRec): void { if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze (it needs your recovery code) to use it again."); }
+  private active(u: UserRec): void {
+    if (haltScope(this.store.kv) === "all") throw new MoopayError("INVALID_INPUT", "Payments are paused for a short while while we check something. Nothing was sent. Please try again later.");
+    if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze (it needs your recovery code) to use it again."); }
 
   /* ---- account ---- */
   async account(u: UserRec): Promise<Out> {
@@ -279,14 +286,17 @@ export class AgentOps {
     const expected = quote?.text;
     const denied = this.blocked(u, who, amt, chain, sym, p.recipient);
     if (denied) return { result: { status: "denied", reason: denied } };
-    let d = decide(u, amt, key, this.now());
+    let d = decide(u, amt, key, this.now(), ctx?.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const what = coinUnits ? `${p.amount} ${sym}` : usd(amt);
     const pf = approved ? undefined : await preflight(this.near, u, { chain, recipient: p.recipient, what, sym, receive: expected, private: priv, pay: usd(quote ? Math.max(quote.payUsd, amt) : amt), fees: quote && quote.payUsd - amt >= 0.005 ? usd(quote.payUsd - amt) : "none added" });
     if (pf?.missing) return { result: { status: "denied", reason: `${p.recipient} does not exist on NEAR, so money sent there could be lost. Ask the user to check the address.` } };
     if (pf?.warnings.length && d.action === "auto") d = { action: "ask", reason: pf.warnings[0]! };
+    // A payment that looks like a drain or a burst cannot go on a "no biometrics" setting: it waits for the user (and a passkey, if they have one).
+    const rk = riskOf(u, amt, (await this.balances(u)).totalUsd, !u.known.includes(key), this.now());
+    if (rk.stepUp) { security.add("risk_step_up", { user: u.id.slice(0, 8), why: rk.why[0] ?? "" }, this.now()); if (d.action === "auto") d = { action: "ask", reason: `This looks unusual: ${rk.why[0]}. Please confirm it's you` }; }
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
-    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf);
+    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp);
     let pay: Payment;
     try {
       pay = priv ? await this.doPrivate(u, usdc, p, chain, sym, dest, destUnits, units, amt, who.ak) : direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
@@ -321,9 +331,9 @@ export class AgentOps {
       if (denied) return { result: { status: "denied", reason: denied } };
     }
     const total = usds.reduce((a, b) => a + b, 0);
-    const whole = decide(u, total, "batch", this.now());
+    const whole = decide(u, total, "batch", this.now(), ctx?.channel);
     if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
-    const asks = items.map((it, i) => decide(u, usds[i]!, this.recipientKey(it.chain.toLowerCase(), it.recipient), this.now())).find((d) => d.action === "ask");
+    const asks = items.map((it, i) => decide(u, usds[i]!, this.recipientKey(it.chain.toLowerCase(), it.recipient), this.now(), ctx?.channel)).find((d) => d.action === "ask");
     const lines = items.map((it, i) => `${usd(usds[i]!)} to ${it.recipient} (${it.chain.toUpperCase()}${it.assetSymbol ? " " + it.assetSymbol.toUpperCase() : ""})`);
     const summary = `Send ${usd(total)} to ${items.length} wallets: ${lines.join("; ")}`;
     if ((whole.action === "ask" || asks) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks!.action === "ask" ? asks!.reason : "a new recipient");
@@ -579,7 +589,7 @@ export class AgentOps {
     const amt = Number(p.amountUsd);
     const denied = this.blocked(u, who, amt, chain, "USDC", p.receiver);
     if (denied) return { result: { status: "denied", reason: denied } };
-    const d = decide(u, amt, this.recipientKey(chain, p.receiver), this.now());
+    const d = decide(u, amt, this.recipientKey(chain, p.receiver), this.now(), ctx.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason } };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Create a private claim of ${usd(amt)} that only ${p.receiver}${chain === "near" ? "" : ` (${chain.toUpperCase()})`} can open`;
     if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
@@ -685,7 +695,7 @@ export class AgentOps {
     if (items.length < 2 || items.length > MAX_GROUP) throw new MoopayError("INVALID_INPUT", `a group link takes 2 to ${MAX_GROUP} wallets`);
     if (new Set(items.map((i) => i.receiver.toLowerCase())).size !== items.length) throw new MoopayError("INVALID_INPUT", "each wallet can appear only once in a group link");
     const total = items.reduce((a, i) => a + Number(i.amountUsd), 0);
-    const whole = decide(u, total, "groupclaim", this.now());
+    const whole = decide(u, total, "groupclaim", this.now(), ctx.channel);
     if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason } };
     if (whole.action === "ask" && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.reason);
     const entries: { receiver: string; chain: string; claimKey: string }[] = [];
@@ -714,8 +724,8 @@ export class AgentOps {
   }
   cancel(u: UserRec, taskId: string): Out { u.tasks = u.tasks.filter((t) => t.id !== taskId); this.store.save(); return { result: { status: "cancelled" } }; }
 
-  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight): Out {
-    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(pf ? { pf } : {}) };
+  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight, strong = false): Out {
+    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(strong ? { strong } : {}), ...(pf ? { pf } : {}) };
     u.approvals.push(a); this.store.save();
     return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: approvalCard(a) };
   }
@@ -725,8 +735,12 @@ export class AgentOps {
     const a = u.approvals.find((x) => x.id === approvalId);
     if (!a || a.status !== "pending") throw new MoopayError("NOTE_NOT_FOUND", "that approval is not pending");
     if (this.now() - a.createdAt > APPROVAL_TTL) { a.status = "expired"; this.store.save(); throw new MoopayError("NOTE_EXPIRED", "that approval expired; ask again"); }
-    a.status = yes ? "approved" : "declined"; this.store.save();
-    if (!yes) return { result: { status: "declined" }, card: { kind: "note", text: "Cancelled. Nothing was sent." } };
+    if (!yes) { a.status = "declined"; this.store.save(); return { result: { status: "declined" }, card: { kind: "note", text: "Cancelled. Nothing was sent." } }; }
+    a.status = "approved"; this.store.save();
+    return this.execute(u, a, ctx);
+  }
+
+  private async execute(u: UserRec, a: Approval, ctx: Ctx): Promise<Out> {
     const ak = u.agents.find((x) => x.id === a.params["agentId"]);
     if (a.kind === "send") return this.send(u, a.params as unknown as SendParams, true, { ak });
     if (a.kind === "groupclaim") return this.groupClaim(u, a.params["items"] as never, ctx, true, { ak });
@@ -871,7 +885,7 @@ export class AgentOps {
     if (b.totalUsd < amt * 1.02 + roomUsd) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, amt + roomUsd / 1.02));
     const denied = this.blocked(u, who, amt, "near", "RNEAR", payout);
     if (denied) return { result: { status: "denied", reason: denied } };
-    const d = decide(u, amt, this.recipientKey("near", payout), this.now());
+    const d = decide(u, amt, this.recipientKey("near", payout), this.now(), ctx?.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const shown = fmt(nearAmt, 24, 4);
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Stake ${shown} NEAR (about ${usd(amt)}) into rNEAR on Rhea; rNEAR goes to ${payout}`;

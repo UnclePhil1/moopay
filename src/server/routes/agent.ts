@@ -6,6 +6,13 @@ import { AgentOps, AgentStore, CHAT_FEE_BPS, X_FEE_BPS, approvalCard, followPaym
 import { CHAT_RULES, plain, runTurn, X_RULES, type Ctl, type Llm } from "../../ai/loop.js";
 import { SILENT, startX, xFromEnv } from "../x.js";
 import { alertOwner } from "../../util/alert.js";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { security, useSecurityLog } from "../../security/audit.js";
+import { haltScope, setHalt, XBurst, type HaltScope } from "../../security/halt.js";
+import { auditorOn } from "../../security/guard.js";
+import { sealBackup } from "../../agent/recovery.js";
+import { hasPasskey, needsPasskey, Passkeys } from "../../security/passkeys.js";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { Vault } from "../../storage/index.js";
 import { clientIp, rateLimiter } from "../middleware/security.js";
 
@@ -22,14 +29,25 @@ export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | 
 export async function makeAgent(d: AgentDeps) {
   const now = d.now ?? Date.now;
   const store = await AgentStore.open(`${d.stateFile}.agent.json`, d.vault);
+  useSecurityLog(`${d.stateFile}.security.log`);
   const turns = new Map<string, Ctl>();
   const apiLimit = rateLimiter(240, 60_000, now), strictLimit = rateLimiter(12, 60_000, now), chatLimit = rateLimiter(40, 60_000, now);
   const day = 24 * 3_600_000, cap = d.aiDaily ?? { user: Number(process.env["AI_USER_DAILY"] ?? 100), ip: Number(process.env["AI_IP_DAILY"] ?? 300), total: Number(process.env["AI_TOTAL_DAILY"] ?? 5000) };
   const userDay = rateLimiter(cap.user, day, now), ipDay = rateLimiter(cap.ip, day, now), totalDay = rateLimiter(cap.total, day, now);
-  const STRICT = new Set(["name", "session", "reset", "delete", "signout", "export", "freeze"]);
+  const STRICT = new Set(["name", "session", "reset", "delete", "signout", "export", "freeze", "backup"]);
   const ops = new AgentOps(d.svc, store, now, d.sponsor, d.names, d.private);
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
+  const passkeys = new Passkeys(now);
+  /** A second model that must agree before money moves. Off with MOOPAY_AUDITOR=off. */
+  const auditor = d.llm && auditorOn() ? { llm: d.llm as never, model: process.env["MOOPAY_AUDITOR_MODEL"]?.trim() || model } : undefined;
+  /** The operator's switchboard: pause payments, lift the pause, read the security log. Needs MOOPAY_ADMIN_TOKEN; with none set the routes do not exist. */
+  const adminOk = (req: IncomingMessage): boolean => {
+    const want = process.env["MOOPAY_ADMIN_TOKEN"]?.trim(), got = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "")?.[1];
+    if (!want || want.length < 24 || !got) return false;
+    const h = (x: string) => createHash("sha256").update(x).digest();
+    return timingSafeEqual(h(got), h(want));
+  };
   // The team's numbers page lives in src/stat, which is kept out of git. When the folder is not there the page does not exist.
   const statModule = import(new URL("../../stat/index.js", import.meta.url).href).then((m) => m as { handleStat(req: IncomingMessage, res: ServerResponse, path: string, users: () => UserRec[], now: number, history?: ReturnType<AgentStore["history"]>, ingest?: (rows: unknown[]) => number): boolean }).catch(() => undefined);
 
@@ -94,6 +112,42 @@ export async function makeAgent(d: AgentDeps) {
       json(res, key ? 200 : 404, key ? { link: `${origin}/c/${key}` } : { message: "That wallet is not part of this group link. Check the address." });
       return true;
     }
+    if (p.startsWith("/admin/")) {
+      const ip = clientIp(req);
+      if (!process.env["MOOPAY_ADMIN_TOKEN"] || !strictLimit(ip + "|admin")) { json(res, 404, { error: "not found" }); return true; }
+      if (!adminOk(req)) { security.add("admin_denied", { path: p, ip: ip.slice(0, 40) }, now()); json(res, 401, { error: "no" }); return true; }
+      if (p === "/admin/security-log" && req.method === "GET") { json(res, 200, { chainOk: security.verify(), halt: haltScope(store.kv) || null, events: security.tail(200) }); return true; }
+      if (p === "/admin/emergency-halt" && req.method === "POST") {
+        const scope = (await bodyOf(req))["scope"] === "all" ? "all" : "x";
+        setHalt(store.kv, scope as HaltScope); store.save(); security.add("halt", { scope }, now());
+        void alertOwner("halt", `payments paused (${scope}) by an operator.`, now()).catch(() => undefined);
+        json(res, 200, { halt: scope }); return true;
+      }
+      if (p === "/admin/resume" && req.method === "POST") { setHalt(store.kv, ""); store.save(); security.add("resume", {}, now()); json(res, 200, { halt: null }); return true; }
+      json(res, 404, { error: "not found" }); return true;
+    }
+    const ok = /^\/ok-api\/([\w-]{6,40})(\/(options|approve))?$/.exec(p);
+    if (ok) {
+      const ip = clientIp(req);
+      if (!strictLimit(ip + "|ok")) { json(res, 429, { message: "Slow down a little and try again in a moment." }); return true; }
+      const hit = store.all().map((x) => ({ u: x, a: x.approvals.find((y) => y.id === ok[1]) })).find((h) => h.a);
+      try {
+        if (!hit?.a || hit.a.status !== "pending") throw new MoopayError("NOTE_NOT_FOUND", "This approval is no longer waiting. Nothing was sent.");
+        const { u, a } = hit as { u: UserRec; a: NonNullable<typeof hit.a> };
+        if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "This account has no passkey. Approve it in the MooPay app instead.");
+        if (!ok[3] && req.method === "GET") { json(res, 200, { summary: a.summary, reason: a.reason, details: (approvalCard(a)["details"] as unknown[]) ?? [] }); return true; }
+        if (ok[3] === "options" && req.method === "POST") { json(res, 200, await passkeys.options(u, origin, "approve:" + a.id)); return true; }
+        if (ok[3] === "approve" && req.method === "POST") {
+          await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + a.id); store.save();
+          const had = new Set(u.payments.map((x) => x.id));
+          const out = await ops.resolve(u, a.id, true, { origin });
+          ops.stampFees(u, had, X_FEE_BPS());
+          security.add("approved_by_passkey", { user: u.id.slice(0, 8), kind: a.kind }, now());
+          json(res, 200, { status: out.result["status"], reason: out.result["reason"] ?? null }); return true;
+        }
+      } catch (e) { const er = asMoopayError(e); json(res, er.code === "NOTE_NOT_FOUND" ? 404 : 400, { code: er.code, message: er.message }); return true; }
+      json(res, 404, { error: "not found" }); return true;
+    }
     if (p === "/stat" || p.startsWith("/stat/")) { const m = await statModule; if (m && m.handleStat(req, res, p, () => store.all(), now(), store.history(), (rows) => store.ingest(rows))) return true; }
     if (!p.startsWith("/agent/api/")) return false;
     lastOrigin = origin;
@@ -125,6 +179,38 @@ export async function makeAgent(d: AgentDeps) {
         json(res, 200, { accountId: k.accountId, secretKey: k.secretKey });
         return true;
       }
+      if (op === "passkey/status" && req.method === "GET") { json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true; }
+      if (op === "passkey/register-options" && req.method === "POST") { needMaster("Adding a passkey"); json(res, 200, await passkeys.registerOptions(u, origin)); return true; }
+      if (op === "passkey/register" && req.method === "POST") {
+        needMaster("Adding a passkey");
+        await passkeys.register(u, origin, (await bodyOf(req))["response"] as RegistrationResponseJSON);
+        security.add("passkey_added", { user: u.id.slice(0, 8) }, now()); store.event(u, "A passkey was added. Payments that need your OK now ask for your fingerprint, face or device PIN."); store.save();
+        json(res, 200, { ok: true, count: u.passkeys?.length ?? 0 }); return true;
+      }
+      // Does this action need a passkey, and if so, the challenge to sign. Asked by the page before it tries.
+      if (op === "passkey/options" && req.method === "POST") {
+        const b = await bodyOf(req), purpose = String(b["purpose"] ?? "");
+        const ap = u.approvals.find((x) => x.id === purpose.replace(/^approve:/, ""));
+        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock");
+        json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
+      }
+      if (op === "passkey/toggle" && req.method === "POST") {
+        const b = await bodyOf(req), want = { web: b["web"] === undefined ? undefined : b["web"] !== false, x: b["x"] === undefined ? undefined : b["x"] !== false };
+        if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Add a passkey first. Type /passkey.");
+        const cur = u.bio ?? { web: true, x: true };
+        if ((want.web === false && cur.web) || (want.x === false && cur.x)) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "toggle"); } // turning protection off needs the passkey itself
+        u.bio = { web: want.web ?? cur.web, x: want.x ?? cur.x };
+        security.add("passkey_toggle", { user: u.id.slice(0, 8), web: u.bio.web, x: u.bio.x }, now()); store.save();
+        json(res, 200, { bio: u.bio }); return true;
+      }
+      if (op === "backup" && req.method === "POST") {
+        needMaster("A backup");
+        if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
+        const k = store.keyOf(u), code = String(req.headers["x-moopay-device"] ?? "");
+        security.add("backup_made", { user: u.id.slice(0, 8) }, now());
+        json(res, 200, sealBackup({ accountId: k.accountId, secretKey: k.secretKey }, code));
+        return true;
+      }
       if (op === "session" && req.method === "POST") {
         needMaster("A temporary session");
         store.event(u, "A temporary session was opened from another browser. It ends after an hour. If this wasn't you, type /reset.");
@@ -133,7 +219,7 @@ export async function makeAgent(d: AgentDeps) {
       }
       if (op === "freeze" && req.method === "POST") {
         const b = await bodyOf(req), on = b["on"] !== false;
-        if (!on) needMaster("Unfreezing");
+        if (!on) { needMaster("Unfreezing"); if (hasPasskey(u)) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "unlock"); store.save(); } }
         u.frozen = on || undefined;
         store.event(u, on ? "Your account is frozen. Nothing can leave it until you type /unfreeze." : "Your account is unfrozen."); store.save();
         json(res, 200, { frozen: on });
@@ -181,6 +267,8 @@ export async function makeAgent(d: AgentDeps) {
         const b = await bodyOf(req);
         if (typeof b["id"] !== "string" || typeof b["approve"] !== "boolean") throw new MoopayError("INVALID_INPUT", "id and approve are required");
         const had = new Set(u.payments.map((p) => p.id));
+        const ap = u.approvals.find((x) => x.id === b["id"]);
+        if (b["approve"] && ap?.status === "pending" && hasPasskey(u) && (ap.strong || needsPasskey(u, "web"))) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + ap.id); store.save(); }
         const out = await ops.resolve(u, b["id"], b["approve"], ctx);
         ops.stampFees(u, had, CHAT_FEE_BPS());
         json(res, 200, { result: out.result, card: out.card });
@@ -219,7 +307,7 @@ export async function makeAgent(d: AgentDeps) {
         if (!d.llm) emit({ type: "text", text: "My AI isn't switched on yet. The owner needs to set NEAR_AI_API_KEY (or ANTHROPIC_API_KEY) on the server and restart it." });
         else {
           const had = new Set(u.payments.map((p) => p.id));
-          try { await runTurn({ id, ctl, extra: CHAT_RULES(CHAT_FEE_BPS()), llm: d.llm, model, u, text, ops, svc: d.svc, ctx, emit: emit as never, context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") }); }
+          try { await runTurn({ id, ctl, auditor, extra: CHAT_RULES(CHAT_FEE_BPS()), llm: d.llm, model, u, text, ops, svc: d.svc, ctx, emit: emit as never, context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") }); }
           catch (e) { emit({ type: "text", text: failText(e) }); }
           ops.stampFees(u, had, CHAT_FEE_BPS());
         }
@@ -243,12 +331,13 @@ export async function makeAgent(d: AgentDeps) {
     const llm = d.llm, feeBps = X_FEE_BPS();
     const origin = process.env["MOOPAY_PUBLIC_HOST"]?.trim() ? `https://${process.env["MOOPAY_PUBLIC_HOST"]!.trim()}` : lastOrigin;
     return startX({
-      store, feeBps, now,
+      store, feeBps, now, burst: new XBurst(),
+      tripped: (why) => void alertOwner("x-halt", why, now()).catch(() => undefined),
       stamp: (u, had, bps) => ops.stampFees(u, had, bps),
       ask: async (u, text) => {
         const urls: string[] = [];
         const emit = (e: { type: string; card?: Record<string, unknown>; label?: string; state?: string }) => { if (e.type === "step" && e.state !== "done") console.log(`[x] ${e.label}${e.state === "failed" ? " (failed)" : "…"}`); const url = e.type === "card" ? e.card?.["url"] : undefined; if (typeof url === "string") urls.push(url); };
-        const final = await runTurn({ llm, model, u, text, ops, svc: d.svc, ctx: { origin }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : ""), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
+        const final = await runTurn({ llm, model, auditor, u, text, ops, svc: d.svc, ctx: { origin, channel: "x" }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : ""), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
         if (SILENT.test(final)) u.chat.splice(-2, 2); // nothing was said, so nothing goes in the chat history
         store.save();
         return { text: final, urls };

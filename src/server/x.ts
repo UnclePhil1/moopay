@@ -1,5 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { AgentStore, UserRec } from "../agent/index.js";
+import { haltScope, setHalt, type XBurst } from "../security/halt.js";
+import { security } from "../security/audit.js";
 
 /*
  * The X agent: reads mentions of the MooPay account on X and answers them in public. Each mention from a linked X account is
@@ -58,6 +60,10 @@ export interface XDeps {
   /** marks the payments made in this turn with the fee rate they owe; the worker takes the fee once they land */
   stamp(u: UserRec, had: Set<string>, bps: number): void;
   reply(text: string, to: string, exclude?: string[]): Promise<void>;
+  /** the kill switch and the spike detector; left out in tests that do not need them */
+  burst?: XBurst;
+  /** called when a spike pauses X payments, so the owner hears about it */
+  tripped?: (why: string) => void;
 }
 
 /** X refuses posts that contain a crypto address while an account is new, so an address is shown as its first 4 and last 3 characters, like 2dj3...8d3. */
@@ -74,7 +80,7 @@ export function fit(text: string, urls: string[]): string {
  * Most mentions are not requests: questions about the product, praise, jokes. Those get no reply at all.
  * Two cheap checks run before the AI is ever asked, and the AI is told to stay silent when a message is not a request.
  */
-const MONEY_WORD = /\b(send|pay|transfer|split|stake|unstake|withdraw|claim|swap|bridge|schedule|balance|deposit|fund|confirm|cancel|yes|no|yep|link)\b|every (day|week|month)/i;
+const MONEY_WORD = /\b(send|pay|transfer|split|stake|unstake|withdraw|claim|swap|bridge|schedule|balance|deposit|fund|confirm|cancel|yes|no|yep|link|lock|freeze)\b|every (day|week|month)/i;
 const AMOUNT = /\$\s?\d|\b\d[\d.,]*\s?(usd|usdc|usdt|near|sol|eth|btc)\b/i;
 /** A request to a stranger-proof standard: an action word and a number. */
 const ASKS_FOR_MONEY = (s: string): boolean => /\b(send|pay|transfer|split|stake|swap|bridge|claim|withdraw)\b/i.test(s) && (AMOUNT.test(s) || /\d/.test(s));
@@ -100,6 +106,19 @@ export async function handleMention(d: XDeps, t: Mention): Promise<void> {
     if (d.store.kv[k] === day) return void console.log("[x] not linked, already hinted today");
     console.log("[x] not linked, sending the link hint"); d.store.kv[k] = day; d.store.save();
     return void (await say("To use MooPay on X, open MooPay, type \"link my X account\", then post the code it gives you here."));
+  }
+  // "lock" works at once and even while payments are paused: it only ever makes the account safer. Unlocking needs the app (and the passkey).
+  if (/^(please )?(lock|freeze)( it| my (account|wallet|moopay))?\W*$/i.test(clean)) {
+    u.frozen = true; d.store.event(u, "Your account was locked from X. Nothing can leave it until you unlock it in the app."); d.store.save();
+    security.add("locked_from_x", { user: u.id.slice(0, 8) }, d.now());
+    return void (await say("Locked. Nothing can leave your wallet now. To unlock, open the MooPay app and type /unfreeze."));
+  }
+  // The operator's kill switch, and the automatic one: a sudden spike of money requests on X looks like a hijack or a spam wave.
+  if (haltScope(d.store.kv)) return void (await say("Payments from X are paused for a short while. Please use the MooPay app or try again later."));
+  if (d.burst?.note(d.now())) {
+    setHalt(d.store.kv, "x"); d.store.save();
+    security.add("x_auto_halt", { why: "too many money requests at once" }, d.now()); d.tripped?.("X payments were paused because money requests spiked. Check for a hijacked account, then lift the pause.");
+    return void (await say("Payments from X are paused for a short while. Please use the MooPay app or try again later."));
   }
   u.msgTimes = u.msgTimes.filter((x) => d.now() - x < 60_000);
   if (u.msgTimes.length >= 6) return void (await say("Slow down a little and try again in a minute."));
