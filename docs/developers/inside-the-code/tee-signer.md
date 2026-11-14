@@ -28,11 +28,23 @@ The signer decodes the transaction itself (receiver, action, amount, token contr
 
 ## What the signer enforces
 
-1. Only the transaction kinds MooPay uses: NEAR transfer, `ft_transfer`, `near_deposit`, `near_withdraw`, staking calls, `storage_deposit`.
-2. Limits per asset, in the asset's smallest unit: one cap per payment and one per day (UTC). The signer has no price feed, so it cannot enforce dollar limits itself; the server's dollar rules stay as the first check, and the signer's caps are the hard ceiling behind them. An asset with no cap is refused. Attached NEAR on a contract call counts as NEAR leaving. The new-recipient limit and payout-wallet rule come with the passkey step.
-3. A WebAuthn assertion bound to the exact transaction hash for anything that needs approval.
-4. A lower daily cap for accounts without a passkey.
-5. A lock flag that refuses everything until the passkey unlocks it.
+Three layers, in order:
+
+1. **Allowlist.** Only the transaction kinds MooPay uses: NEAR transfer, `ft_transfer`, `near_deposit`, `near_withdraw`, staking calls, `storage_deposit`. Adding keys, deploying code, deleting accounts and any other call are refused.
+2. **Hard caps.** Per asset, in the asset's smallest unit: one cap per payment and one per day (UTC), whatever signature is attached. The signer has no price feed, so it cannot enforce dollar limits itself; the server's dollar rules stay as the first check. An asset with no cap is refused. Attached NEAR on a contract call counts as NEAR leaving.
+3. **The unattended allowance and the passkey.** A small per-asset allowance may be signed with no passkey. It is the whole allowance for an account without a passkey, and it covers scheduled runs. Anything above it, and every payment when the user has turned on strict mode, needs a passkey signature for that exact payment.
+
+### What a passkey signature covers
+
+The challenge is `sha256("moopay.pay.v1|user|nonce|payment text")`. The nonce is one-time and issued by the signer, and the payment text lists each outflow as method, asset, amount and recipient. The browser builds the same text from the card it shows, so the fingerprint signs what the user saw. A signature for one payment is refused for a different amount, a different recipient, another user's wallet, or a second use. The same construction (`moopay.action.v1`) covers adding a passkey, turning strict mode on or off, and unlocking.
+
+### First passkey and the waiting period
+
+The first passkey on an account is trust-on-first-use: whoever registers it first owns the account's protection. To blunt a thief who registers one, it only counts after a waiting period (24 hours by default), and until then the account stays on the small allowance. Once any passkey exists, adding another needs a signature from one of them, even during the waiting period. Locking is always allowed; unlocking needs the passkey.
+
+### What a passkey does not prove
+
+A passkey proves the owner's device approved a payment, not that the owner read it. If an attacker controls the MooPay server and also serves a modified approval page, the page can show one payment and have the user sign another. Hosting the approval page from a source the server cannot change (a pinned static build) is a follow-up.
 
 ## State
 
@@ -54,7 +66,7 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 1. Map every place the server uses `secretKey` (done: `keyOf` plus `near.ts` call sites).
 2. Add a `Signer` interface to `NearOps` so write calls take a key reference instead of a raw secret.
 3. Build the signer service and its tests with a local stand-in for the dstack socket. (Done: `src/signer/`, with tests in `tests/unit/signer.test.ts`. Not deployed.)
-4. Passkey verification and rules inside the signer.
+4. Passkey verification, strict mode, lock and the unattended allowance inside the signer. (Done, with tests. State is in memory until step 5.)
 5. Anchor passkeys and limits in `contracts/guard`.
 6. Build the image in CI and pin it by digest. Deploy with on-chain KMS.
 7. Prove unapproved code gets no key.
