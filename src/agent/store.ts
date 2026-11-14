@@ -39,7 +39,7 @@ export interface Payment {
   /** a private-route payment in progress (beta): `amt` in USDC units, `idem` makes a retried payout safe */
   pv?: { step: "funding" | "swapping" | "paying"; amt: string; idem: string; req?: string; /** where it goes: the OutLayer chain id and the token that leaves the private balance; swapTo and minOut when the receiver's coin is not USDC */ out: { chain: string; token: string; swapTo?: string; minOut?: string } };
 }
-export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; /** looked unusual (a drain, a burst): needs a passkey whatever the user's toggles say */ strong?: boolean; pf?: Preflight }
+export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim" | "schedule" | "schedulegroup"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; /** looked unusual (a drain, a burst): needs a passkey whatever the user's toggles say */ strong?: boolean; /** fee and total lines shown on the card */ rows?: [string, string][]; pf?: Preflight }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
 export interface GroupItem { chain: string; recipient: string; amountUsd?: string; amount?: string; assetSymbol?: string }
 export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; items?: GroupItem[]; every: "day" | "week" | "month"; nextAt: number; text: string }

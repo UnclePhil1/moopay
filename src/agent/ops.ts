@@ -12,6 +12,7 @@ import type { MooPayService } from "./service.js";
 import { alertOwner } from "../util/alert.js";
 import { haltScope } from "../security/halt.js";
 import { riskOf } from "../security/risk.js";
+import { hasPasskey, needsPasskey } from "../security/passkeys.js";
 import { security } from "../security/audit.js";
 import { agentDeny, decide, earnPoints, nameProblem, PAYOUT_HOLD_MS, recipientKey, remaining, rulesNeedApproval, scopeDeny, spentToday, today } from "./policy.js";
 import type { AgentKey, Approval, AgentStore, GroupItem, Payment, Rules, Task, UserRec } from "./store.js";
@@ -22,7 +23,7 @@ import { hashKey } from "./store.js";
 export interface Out { result: Record<string, unknown>; card?: Record<string, unknown> }
 export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x" }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
-export interface Who { ak?: AgentKey | undefined }
+export interface Who { ak?: AgentKey | undefined; /** a payment the user already approved when they set up the schedule */ sched?: boolean }
 export interface SendParams {
   amountUsd?: string | undefined; amount?: string | undefined; chain: string; recipient: string; assetSymbol?: string | undefined;
   /** true: pay from the agent wallet. false, or a fromChain: the user signs in their own wallet. Unset: the agent wallet only when it can cover it. */
@@ -84,13 +85,13 @@ export function approvalCard(a: Approval): Record<string, unknown> {
   const rows: [string, string | undefined][] = [
     ["To", str("recipient") ?? str("receiver") ?? str("to")], ["New payout wallet", str("payoutAddress")],
     ["Amount", str("amountUsd") ? `$${str("amountUsd")}` : str("amount") ? `${str("amount")} ${str("assetSymbol") ?? ""}`.trim() : undefined],
-    ["Chain", (str("chain") ?? str("assetSymbol"))?.toUpperCase()],
+    ["Chain", (str("chain") ?? str("assetSymbol"))?.toUpperCase()], ["Repeats", str("every") ? `every ${str("every")}` : undefined],
   ];
   if (Array.isArray(p["items"])) { // a group: every line is listed in full
     const lines = (p["items"] as Record<string, unknown>[]).map((i): [string, string] => [String(i["recipient"] ?? i["receiver"]), `${i["amountUsd"] ? "$" + i["amountUsd"] : `${i["amount"]} ${i["assetSymbol"] ?? ""}`.trim()} (${String(i["chain"] ?? "near").toUpperCase()}${i["assetSymbol"] && i["amountUsd"] ? " " + String(i["assetSymbol"]).toUpperCase() : ""})`]);
-    return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: lines };
+    return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...lines, ...(str("every") ? [["Repeats", `every ${str("every")}`] as [string, string]] : []), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}) };
   }
-  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: rows.filter((r): r is [string, string] => Boolean(r[1])), ...(a.pf ? { preflight: a.pf } : {}) };
+  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...rows.filter((r): r is [string, string] => Boolean(r[1])), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}), ...(a.pf ? { preflight: a.pf } : {}) };
 }
 
 export class AgentOps {
@@ -124,6 +125,19 @@ export class AgentOps {
   }
   private async lack(u: UserRec, need: number): Promise<string> { return this.why(u, await this.gap(u, need)); }
   /** Fee and total lines for a card; nothing when the fee is not known yet. */
+  /** With biometrics on, every payment waits for the owner's fingerprint, face or PIN, however small. Outside agent keys have their own leash, and a scheduled run was approved when it was set up. */
+  private bio(u: UserRec, ctx: Ctx | undefined, who: Who): boolean {
+    return !who.ak && !who.sched && hasPasskey(u) && needsPasskey(u, ctx?.channel === "x" ? "x" : "web");
+  }
+  /** MooPay's own fee on a payment from this door, in dollars. */
+  private moo(amt: number, ctx: Ctx | undefined): { bps: number; fee: number } {
+    const bps = ctx?.channel === "x" ? X_FEE_BPS() : CHAT_FEE_BPS();
+    return { bps, fee: Math.round((amt * bps) / 100) / 100 };
+  }
+  private mooRows(amt: number, ctx: Ctx | undefined, more: [string, string][] = [], totalNote = ""): [string, string][] {
+    const { bps, fee } = this.moo(amt, ctx);
+    return [...more, ["MooPay fee" + (bps && fee >= 0.01 ? ` (${bps / 100}%)` : ""), fee >= 0.01 ? usd(fee) : "none"], ["Total", usd(amt + (fee >= 0.01 ? fee : 0)) + totalNote]];
+  }
   private feeFields(amt: number, fee?: number) { return fee === undefined ? {} : { fees: fee >= 0.005 ? usd(fee) : "none added", total: usd(amt + (fee >= 0.005 ? fee : 0)), feeUsd: fee }; }
 
   /** If a payment needs more USDC than the wallet holds, quietly swaps USDT, then spare NEAR, into USDC first. */
@@ -289,14 +303,17 @@ export class AgentOps {
     let d = decide(u, amt, key, this.now(), ctx?.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const what = coinUnits ? `${p.amount} ${sym}` : usd(amt);
-    const pf = approved ? undefined : await preflight(this.near, u, { chain, recipient: p.recipient, what, sym, receive: expected, private: priv, pay: usd(quote ? Math.max(quote.payUsd, amt) : amt), fees: quote && quote.payUsd - amt >= 0.005 ? usd(quote.payUsd - amt) : "none added" });
+    const mf = this.moo(amt, ctx);
+    const pf = approved ? undefined : await preflight(this.near, u, { chain, recipient: p.recipient, what, sym, receive: expected, private: priv, pay: usd((quote ? Math.max(quote.payUsd, amt) : amt) + (mf.fee >= 0.01 ? mf.fee : 0)), fees: [quote && quote.payUsd - amt >= 0.005 ? `${usd(quote.payUsd - amt)}${mf.fee >= 0.01 ? " network and swap" : ""}` : "", mf.fee >= 0.01 ? `${usd(mf.fee)} MooPay (${mf.bps / 100}%)` : ""].filter(Boolean).join(" + ") || "none added" });
     if (pf?.missing) return { result: { status: "denied", reason: `${p.recipient} does not exist on NEAR, so money sent there could be lost. Ask the user to check the address.` } };
     if (pf?.warnings.length && d.action === "auto") d = { action: "ask", reason: pf.warnings[0]! };
     // A payment that looks like a drain or a burst cannot go on a "no biometrics" setting: it waits for the user (and a passkey, if they have one).
     const rk = riskOf(u, amt, (await this.balances(u)).totalUsd, !u.known.includes(key), this.now());
     if (rk.stepUp) { security.add("risk_step_up", { user: u.id.slice(0, 8), why: rk.why[0] ?? "" }, this.now()); if (d.action === "auto") d = { action: "ask", reason: `This looks unusual: ${rk.why[0]}. Please confirm it's you` }; }
+    const bio = this.bio(u, ctx, who);
+    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
-    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp);
+    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio);
     let pay: Payment;
     try {
       pay = priv ? await this.doPrivate(u, usdc, p, chain, sym, dest, destUnits, units, amt, who.ak) : direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
@@ -336,7 +353,8 @@ export class AgentOps {
     const asks = items.map((it, i) => decide(u, usds[i]!, this.recipientKey(it.chain.toLowerCase(), it.recipient), this.now(), ctx?.channel)).find((d) => d.action === "ask");
     const lines = items.map((it, i) => `${usd(usds[i]!)} to ${it.recipient} (${it.chain.toUpperCase()}${it.assetSymbol ? " " + it.assetSymbol.toUpperCase() : ""})`);
     const summary = `Send ${usd(total)} to ${items.length} wallets: ${lines.join("; ")}`;
-    if ((whole.action === "ask" || asks) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks!.action === "ask" ? asks!.reason : "a new recipient");
+    const bio = this.bio(u, ctx, who);
+    if ((whole.action === "ask" || asks || bio) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks?.action === "ask" ? asks.reason : bio ? "biometric approval is on, so every payment needs your fingerprint, face or PIN" : "a new recipient", undefined, bio, this.mooRows(total, ctx, [["Network and swap fees", "added on each line when it runs"]], " plus network and swap fees"));
     const rows: { to: string; chain: string; amount: string; status: string; url?: string }[] = [];
     let feeSum = 0;
     const had = new Set(u.payments.map((p) => p.id));
@@ -589,10 +607,12 @@ export class AgentOps {
     const amt = Number(p.amountUsd);
     const denied = this.blocked(u, who, amt, chain, "USDC", p.receiver);
     if (denied) return { result: { status: "denied", reason: denied } };
-    const d = decide(u, amt, this.recipientKey(chain, p.receiver), this.now(), ctx.channel);
+    let d = decide(u, amt, this.recipientKey(chain, p.receiver), this.now(), ctx.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason } };
+    const bio = this.bio(u, ctx, who);
+    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Create a private claim of ${usd(amt)} that only ${p.receiver}${chain === "near" ? "" : ` (${chain.toUpperCase()})`} can open`;
-    if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
+    if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", `about ${fmt(CLAIM_GAS, 24, 2)} NEAR, paid from the agent wallet`], ...(chain === "near" ? [] : [["Swap fee", "a small fee comes out of the amount"] as [string, string]]), ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
     const usdc = await this.svc.usdcAsset();
     const units = parseDecimal(p.amountUsd, usdc.decimals);
     await this.ensureUsdc(u, units);
@@ -681,10 +701,12 @@ export class AgentOps {
     return { result: { status: "updated", rules: next }, card: { kind: "rules", rules: next } };
   }
 
-  async schedule(u: UserRec, p: SendParams & { every: "day" | "week" | "month" }): Promise<Out> {
+  async schedule(u: UserRec, p: SendParams & { every: "day" | "week" | "month" }, approved = false, ctx?: Ctx): Promise<Out> {
     this.active(u);
     const chain = p.chain.toLowerCase(); this.validate(chain, p.recipient);
     if (!(Number(p.amountUsd) > 0) || !(p.every in EVERY_MS)) throw new MoopayError("INVALID_INPUT", "give an amount and every: day, week or month");
+    const bio = this.bio(u, ctx, {});
+    if (bio && !approved) return this.ask(u, "schedule", { ...p, chain }, `Send ${usd(Number(p.amountUsd))} to ${p.recipient} (${chain.toUpperCase()}) every ${p.every}`, "biometric approval is on, so setting up a payment that repeats needs your fingerprint, face or PIN. Each run then goes by itself", undefined, true, this.mooRows(Number(p.amountUsd), ctx, [["Network and swap fees", "added each time it runs"]], " each time, plus network and swap fees"));
     const t: Task = { id: id(), amountUsd: Number(p.amountUsd), chain, recipient: p.recipient, ...(p.assetSymbol ? { assetSymbol: p.assetSymbol } : {}), every: p.every, nextAt: this.now() + EVERY_MS[p.every], text: `${usd(Number(p.amountUsd))} to ${p.recipient} (${chain.toUpperCase()}) every ${p.every}` };
     u.tasks.push(t); this.store.save();
     return { result: { status: "scheduled", id: t.id, text: t.text, firstRun: new Date(t.nextAt).toISOString() }, card: { kind: "note", text: "Scheduled: " + t.text } };
@@ -697,7 +719,8 @@ export class AgentOps {
     const total = items.reduce((a, i) => a + Number(i.amountUsd), 0);
     const whole = decide(u, total, "groupclaim", this.now(), ctx.channel);
     if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason } };
-    if (whole.action === "ask" && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.reason);
+    const bio = this.bio(u, ctx, who);
+    if ((whole.action === "ask" || bio) && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.action === "ask" ? whole.reason : "biometric approval is on, so every payment needs your fingerprint, face or PIN", undefined, bio, this.mooRows(total, ctx, [["Network fee", `about ${fmt(CLAIM_GAS * BigInt(items.length), 24, 2)} NEAR, paid from the agent wallet`], ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
     const entries: { receiver: string; chain: string; claimKey: string }[] = [];
     for (const it of items) {
       const r = await this.claim(u, { amountUsd: it.amountUsd, receiver: it.receiver, ...(it.chain ? { chain: it.chain } : {}) }, ctx, true, who);
@@ -712,20 +735,22 @@ export class AgentOps {
   }
 
   /** Repeats a whole group payout every day, week or month. Each run follows the rules like any other payment. */
-  async scheduleGroup(u: UserRec, items: GroupItem[], every: "day" | "week" | "month"): Promise<Out> {
+  async scheduleGroup(u: UserRec, items: GroupItem[], every: "day" | "week" | "month", approved = false, ctx?: Ctx): Promise<Out> {
     this.active(u);
     if (!(every in EVERY_MS)) throw new MoopayError("INVALID_INPUT", "every must be day, week or month");
     if (items.length < 2 || items.length > MAX_GROUP) throw new MoopayError("INVALID_INPUT", `a group payout takes 2 to ${MAX_GROUP} receivers`);
     let total = 0;
     for (const it of items) { this.validate(it.chain.toLowerCase(), it.recipient); total += await this.itemUsd(it); }
+    const bio = this.bio(u, ctx, {});
+    if (bio && !approved) return this.ask(u, "schedulegroup", { items, every }, `Send ${usd(total)} to ${items.length} wallets every ${every}`, "biometric approval is on, so setting up a payment that repeats needs your fingerprint, face or PIN. Each run then goes by itself", undefined, true, this.mooRows(total, ctx, [["Network and swap fees", "added on each line each time it runs"]], " each time, plus network and swap fees"));
     const t: Task = { id: id(), amountUsd: total, chain: "multi", recipient: `${items.length} wallets`, items, every, nextAt: this.now() + EVERY_MS[every], text: `${usd(total)} to ${items.length} wallets every ${every}` };
     u.tasks.push(t); this.store.save();
     return { result: { status: "scheduled", id: t.id, text: t.text, firstRun: new Date(t.nextAt).toISOString() }, card: { kind: "note", text: "Scheduled: " + t.text } };
   }
   cancel(u: UserRec, taskId: string): Out { u.tasks = u.tasks.filter((t) => t.id !== taskId); this.store.save(); return { result: { status: "cancelled" } }; }
 
-  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight, strong = false): Out {
-    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(strong ? { strong } : {}), ...(pf ? { pf } : {}) };
+  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight, strong = false, rows?: [string, string][]): Out {
+    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(strong ? { strong } : {}), ...(rows ? { rows } : {}), ...(pf ? { pf } : {}) };
     u.approvals.push(a); this.store.save();
     return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: approvalCard(a) };
   }
@@ -746,7 +771,9 @@ export class AgentOps {
     if (a.kind === "groupclaim") return this.groupClaim(u, a.params["items"] as never, ctx, true, { ak });
     if (a.kind === "batch") return this.sendMany(u, a.params["items"] as GroupItem[], true, { ak }, ctx);
     if (a.kind === "claim") return this.claim(u, a.params as { amountUsd: string; receiver: string }, ctx, true, { ak });
-    if (a.kind === "withdraw") return this.withdraw(u, a.params as never, true);
+    if (a.kind === "withdraw") return this.withdraw(u, a.params as never, true, ctx);
+    if (a.kind === "schedule") return this.schedule(u, a.params as never, true, ctx);
+    if (a.kind === "schedulegroup") return this.scheduleGroup(u, a.params["items"] as GroupItem[], a.params["every"] as "day", true, ctx);
     if (a.kind === "stake") return this.stakeRnear(u, a.params as never, true, {}, ctx);
     return this.rules(u, a.params as Partial<Rules>, true);
   }
@@ -885,11 +912,13 @@ export class AgentOps {
     if (b.totalUsd < amt * 1.02 + roomUsd) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, amt + roomUsd / 1.02));
     const denied = this.blocked(u, who, amt, "near", "RNEAR", payout);
     if (denied) return { result: { status: "denied", reason: denied } };
-    const d = decide(u, amt, this.recipientKey("near", payout), this.now(), ctx?.channel);
+    let d = decide(u, amt, this.recipientKey("near", payout), this.now(), ctx?.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
+    const bio = this.bio(u, ctx, who);
+    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
     const shown = fmt(nearAmt, 24, 4);
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Stake ${shown} NEAR (about ${usd(amt)}) into rNEAR on Rhea; rNEAR goes to ${payout}`;
-    if (d.action === "ask" && !approved) return this.ask(u, "stake", { amount: fmt(nearAmt, 24, 24), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason);
+    if (d.action === "ask" && !approved) return this.ask(u, "stake", { amount: fmt(nearAmt, 24, 24), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", "about 0.02 NEAR in gas; unused gas comes back"], ["You receive", "about the same value in rNEAR, sent to " + payout]]));
     const r = await this.runStake(u, nearAmt, payout);
     const pay: Payment = { id: id(), kind: "stake", amountUsd: amt, chain: "near", recipient: payout, status: "STAKED", createdAt: this.now(), txHash: r.tx, settled: true, expected: `${r.rnear} rNEAR`, ...(who.ak ? { agentId: who.ak.id } : {}) };
     this.spend(u, amt, this.recipientKey("near", payout), who.ak);
@@ -1133,14 +1162,15 @@ export class AgentOps {
 
 
   /* ---- withdraw: the user's money is always theirs to take back ---- */
-  async withdraw(u: UserRec, p: { amountUsd?: string | undefined; asset?: "USDC" | "NEAR" | undefined; to?: string | undefined }, approved = false): Promise<Out> {
+  async withdraw(u: UserRec, p: { amountUsd?: string | undefined; asset?: "USDC" | "NEAR" | undefined; to?: string | undefined }, approved = false, ctx?: Ctx): Promise<Out> {
     this.active(u);
     const to = p.to ?? u.rules.payoutAddress;
     if (!to) throw new MoopayError("INVALID_INPUT", "Tell me your own NEAR wallet first, then I can send your money there.");
     if (!isNearAccountId(to)) throw new MoopayError("BAD_RECIPIENT", "withdrawals go to a NEAR wallet; to reach another chain, use a payment instead");
     const asset = p.asset ?? "USDC";
-    if (to !== u.rules.payoutAddress && !approved)
-      return this.ask(u, "withdraw", { ...p, to }, `Withdraw ${asset === "NEAR" ? "your NEAR" : p.amountUsd ? usd(Number(p.amountUsd)) : "everything"} to ${to}`, "a wallet that isn't your payout wallet");
+    const bio = this.bio(u, ctx, {});
+    if ((to !== u.rules.payoutAddress || bio) && !approved)
+      return this.ask(u, "withdraw", { ...p, to }, `Withdraw ${asset === "NEAR" ? "your NEAR" : p.amountUsd ? usd(Number(p.amountUsd)) : "everything"} to ${to}`, to !== u.rules.payoutAddress ? "a wallet that isn't your payout wallet" : "biometric approval is on, so every payment needs your fingerprint, face or PIN", undefined, bio, [["Network fee", "a few thousandths of a NEAR, paid from the wallet"], ["MooPay fee", "none"]]);
     const b = await this.balances(u);
     const k = this.store.keyOf(u);
     let r: { txHash: string }; let shown: number;

@@ -936,7 +936,8 @@ test("group payout: many receivers, chains and assets in one request, one approv
   assert.equal(ask.result["status"], "needs_approval", "new recipients above the limit ask once for the whole batch");
   assert.equal(a.u.approvals.length, 1);
   const rows = (ask.card as { details: [string, string][] }).details;
-  assert.equal(rows.length, 2, "every line is listed on the approval card");
+  assert.equal(rows.filter(([k]) => !/fee|Total/i.test(k)).length, 2, "every line is listed on the approval card, then its fees and total");
+  assert.ok(rows.some(([k]) => k === "Total"));
   assert.equal(a.near.transfers.length, 0);
   const done = await a.ops.resolve(a.u, a.u.approvals[0]!.id, true, CTX);
   assert.equal(done.result["status"], "group_done");
@@ -1579,4 +1580,44 @@ test("X lock: a linked user can freeze the account with one word, even while pay
 test("a new account auto-approves only up to 10 cents; bigger payments ask", async () => {
   const src = await (await import("node:fs/promises")).readFile(new URL("../../src/agent/store.ts", import.meta.url), "utf8");
   assert.match(src, /DEFAULT_RULES: Rules = \{[^}]*approveAboveUsd: 0\.1 \}/);
+});
+
+const withPasskey = (u: { passkeys?: unknown }): void => { u.passkeys = [{ id: "k", publicKey: "", counter: 0, at: 0 }]; };
+
+test("biometrics on: even a tiny payment waits for the passkey, and the card lists the fee and total", async () => {
+  const a = await agent();
+  a.fund(100); withPasskey(a.u as never);
+  const r = await a.ops.send(a.u, { amountUsd: "0.50", chain: "near", recipient: BOB });
+  assert.equal(r.result["status"], "needs_approval");
+  assert.equal(a.near.transfers.length, 0, "nothing moved");
+  const appr = a.u.approvals.at(-1)!;
+  assert.equal(appr.strong, true, "this approval needs a passkey signature");
+  const card = r.card as { details: [string, string][]; preflight?: { fees: string; pay: string } };
+  assert.ok(card.preflight?.pay && card.preflight.fees, "fees and total are on the card");
+  a.u.bio = { web: false, x: true };
+  const r2 = await a.ops.send(a.u, { amountUsd: "0.50", chain: "near", recipient: BOB });
+  assert.equal(r2.result["status"], "sent", "with the web toggle off a small payment goes");
+});
+
+test("biometrics on: claims, group payouts, staking, withdrawals and schedules all wait; a scheduled run does not", async () => {
+  const a = await agent();
+  a.fund(100); withPasskey(a.u as never);
+  a.u.rules.payoutAddress = "me.near";
+  const ctx = { origin: "https://x" };
+  const asks = async (o: Promise<{ result: Record<string, unknown>; card?: unknown }>, label: string) => {
+    const r = await o; assert.equal(r.result["status"], "needs_approval", label);
+    const card = r.card as { details: [string, string][]; passkey?: boolean };
+    assert.equal(card.passkey, true, label + " asks for the passkey");
+    assert.ok(card.details.some(([k]) => /fee/i.test(k)), label + " shows its fees");
+    assert.ok(card.details.some(([k]) => k === "Total"), label + " shows a total");
+  };
+  await asks(a.ops.claim(a.u, { amountUsd: "1", receiver: BOB }, ctx), "claim");
+  await asks(a.ops.sendMany(a.u, [{ chain: "near", recipient: BOB, amountUsd: "1" }, { chain: "near", recipient: "carol.near", amountUsd: "1" }], false, {}, ctx), "group payout");
+  await asks(a.ops.groupClaim(a.u, [{ receiver: BOB, amountUsd: "1" }, { receiver: "carol.near", amountUsd: "1" }], ctx), "group claim");
+  await asks(a.ops.schedule(a.u, { amountUsd: "1", chain: "near", recipient: BOB, every: "week" }, false, ctx), "schedule");
+  await asks(a.ops.scheduleGroup(a.u, [{ chain: "near", recipient: BOB, amountUsd: "1" }, { chain: "near", recipient: "carol.near", amountUsd: "1" }], "week", false, ctx), "group schedule");
+  assert.equal(a.u.tasks.length, 0, "no schedule exists until approved");
+  const w = await a.ops.withdraw(a.u, { amountUsd: "1" }, false, ctx); assert.equal(w.result["status"], "needs_approval", "withdraw");
+  const s = await a.ops.send(a.u, { amountUsd: "1", chain: "near", recipient: BOB }, false, { sched: true });
+  assert.equal(s.result["status"], "sent", "a scheduled run was approved when it was set up");
 });

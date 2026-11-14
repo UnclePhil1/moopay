@@ -96,11 +96,11 @@ async function run(name: Name, a: Record<string, never>, u: UserRec, ops: AgentO
     case "check_payment": return ops.status(u, a["paymentId"]!, ctx);
     case "list_activity": return ops.activity(u, a["limit"]);
     case "update_rules": return ops.rules(u, a as never);
-    case "group_payout": { const g = a as unknown as { items: never[]; every?: "day" | "week" | "month" }; return g.every ? ops.scheduleGroup(u, g.items, g.every) : ops.sendMany(u, g.items, false, {}, ctx); }
+    case "group_payout": { const g = a as unknown as { items: never[]; every?: "day" | "week" | "month" }; return g.every ? ops.scheduleGroup(u, g.items, g.every, false, ctx) : ops.sendMany(u, g.items, false, {}, ctx); }
     case "group_claim": return ops.groupClaim(u, (a as unknown as { items: never[] }).items, ctx);
-    case "schedule_payment": return ops.schedule(u, a as never);
+    case "schedule_payment": return ops.schedule(u, a as never, false, ctx);
     case "cancel_schedule": return ops.cancel(u, a["id"]!);
-    case "withdraw": return ops.withdraw(u, a as never);
+    case "withdraw": return ops.withdraw(u, a as never, false, ctx);
     case "fund_wallet": return ops.fundWallet(u, a as never, ctx);
     case "pay_from_my_wallet": return ops.payFromWallet(u, a as never);
     case "payment_link": return ops.paymentLink(a as never, ctx);

@@ -45,7 +45,10 @@ A payment that matters has to be confirmed by something the attacker cannot copy
 
 MooPay uses **passkeys (WebAuthn)**. The private key lives in the owner's phone or computer, never leaves it, and signs only after the device checks a fingerprint, face or PIN. No password and no sign-up.
 
-- **Payments that need your OK need your biometrics.** Anything above the auto-approve limit (new accounts start at **$0.10**), a first payment to a new address from X, and any large or fast drain of the wallet produces an approval card. Approving it asks the device for a fingerprint, face or PIN.
+- **Every payment needs your biometrics while it is on.** Once you have a passkey and the toggle is on, no payment from the agent wallet is automatic, however small: sends, group payouts, private sends, private claims and group claim links, staking, withdrawals, and setting up a repeating payment. Each one shows an approval card and waits for your fingerprint, face or PIN. This holds in the web app and on X, whatever your auto-approve limit says (new accounts start at **$0.10**; older accounts keep theirs).
+- **Every card shows the full cost.** The amount, the receiver, what they get, the network and swap fees, MooPay's own fee, and the total you pay are on the card before you confirm.
+- **Repeating payments.** You approve the schedule once with your biometrics. Each later run then goes by itself, inside your rules.
+- **Not covered by design.** Payments you sign in your own NEAR wallet (the pay window, unstaking, withdrawing unstaked NEAR) are confirmed by that wallet, and outside agent keys (`mpk_`) work inside their own budgets. Moving money to your own payout wallet by the automatic sweep is not a payment from you.
 - **One signature, one payment.** The challenge is random, used once and tied to that payment. A signature cannot be replayed or reused on another payment.
 - **Look-alike sites fail.** The browser signs only for `moopay.cash`, so a phishing page gets nothing usable.
 - **Cloned keys are caught.** The signature counter must go up. A counter that does not is refused.

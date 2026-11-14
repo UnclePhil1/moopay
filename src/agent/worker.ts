@@ -55,7 +55,7 @@ async function one(ops: AgentOps, store: AgentStore, u: UserRec, origin: string,
     t.nextAt = now + PERIOD[t.every];
     const had = new Set(u.payments.map((p) => p.id));
     try {
-      const out = t.items ? await ops.sendMany(u, t.items, false) : await ops.send(u, { amountUsd: String(t.amountUsd), chain: t.chain, recipient: t.recipient, assetSymbol: t.assetSymbol }, false);
+      const out = t.items ? await ops.sendMany(u, t.items, false, { sched: true }) : await ops.send(u, { amountUsd: String(t.amountUsd), chain: t.chain, recipient: t.recipient, assetSymbol: t.assetSymbol }, false, { sched: true });
       const st = out.result["status"];
       if (st === "sent" || st === "group_done") store.event(u, `Scheduled payment sent: ${t.text}.`, out.card);
       else if (st === "needs_approval") store.event(u, `Your scheduled payment (${t.text}) needs your OK.`, out.card);
