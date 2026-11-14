@@ -4,8 +4,7 @@ An AI money agent. Say who to pay and how much, in plain text. MooPay sends it t
 
 | | |
 | --- | --- |
-| Live demo | `LIVE_DEMO_URL` |
-| Demo video (X post) | `X_DEMO_POST_URL` |
+| Demo video (X post) | [Watch the demo on X](https://x.com/moopaydotcash/status/2121242873270071778) |
 | Documentation | `/docs` on the running site (source in [`docs/`](docs/)) |
 | Security policy | [SECURITY.md](SECURITY.md) |
 
@@ -265,7 +264,7 @@ This is experimental and unaudited. What you are trusting:
 ![X agent](./docs/media/x-agent.png)
 *The X agent: the bot quotes the stake with its fee, the user replies "confirm", the bot reports the result. Frame from the demo video; the numbers are illustrative.*
 
-[Watch the full demo video](X_DEMO_POST_URL)
+[Watch the full demo video](https://x.com/moopaydotcash/status/2121242873270071778)
 
 Short clips already in the repository: `moopay-landing-demo.mp4`, `moopay-stake-x.mp4`, `moopay-reel-1.mp4`, `moopay-reel-2.mp4`, `moopay-stake-recut.mp4`.
 
