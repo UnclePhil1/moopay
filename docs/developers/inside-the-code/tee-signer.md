@@ -29,7 +29,7 @@ The signer decodes the transaction itself (receiver, action, amount, token contr
 ## What the signer enforces
 
 1. Only the transaction kinds MooPay uses: NEAR transfer, `ft_transfer`, `near_deposit`, `near_withdraw`, staking calls, `storage_deposit`.
-2. The user's limits: per-payment, daily cap, new-recipient limit, payout wallet.
+2. Limits per asset, in the asset's smallest unit: one cap per payment and one per day (UTC). The signer has no price feed, so it cannot enforce dollar limits itself; the server's dollar rules stay as the first check, and the signer's caps are the hard ceiling behind them. An asset with no cap is refused. Attached NEAR on a contract call counts as NEAR leaving. The new-recipient limit and payout-wallet rule come with the passkey step.
 3. A WebAuthn assertion bound to the exact transaction hash for anything that needs approval.
 4. A lower daily cap for accounts without a passkey.
 5. A lock flag that refuses everything until the passkey unlocks it.
@@ -53,7 +53,7 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 
 1. Map every place the server uses `secretKey` (done: `keyOf` plus `near.ts` call sites).
 2. Add a `Signer` interface to `NearOps` so write calls take a key reference instead of a raw secret.
-3. Build the signer service and its tests with a local stand-in for the dstack socket.
+3. Build the signer service and its tests with a local stand-in for the dstack socket. (Done: `src/signer/`, with tests in `tests/unit/signer.test.ts`. Not deployed.)
 4. Passkey verification and rules inside the signer.
 5. Anchor passkeys and limits in `contracts/guard`.
 6. Build the image in CI and pin it by digest. Deploy with on-chain KMS.
