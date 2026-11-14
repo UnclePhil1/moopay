@@ -189,6 +189,7 @@ Other controls:
 
 - **Firewall in front of the model** (`src/security/guard.ts`). Messages are screened for instruction overrides, fake role tags and hidden characters. A blocked message never reaches the model.
 - **Typed addresses only.** Before any tool that sends money or changes a payout wallet runs, every destination must be one the user typed, has paid before, or owns. A model tricked by a pasted page cannot invent a new destination.
+- **Typed amounts only.** A payment whose amount is not a number the user wrote is not refused, but it cannot go through on its own: it waits on an approval card.
 - **A second model checks the first.** A separate call with no tools must agree the action matches what the user asked. Anything unclear counts as a no. `MOOPAY_AUDITOR=off` turns it off.
 - **Hard ceiling.** One payment from the agent wallet is at most $3,000 (`MOOPAY_TX_CEILING_USD`). Above that the user pays from their own wallet.
 - **X gets tighter limits.** A payment started from X to a new recipient always needs approval in the app, and so does anything above $10 (`MOOPAY_X_AUTO_USD`).
@@ -203,6 +204,41 @@ Other controls:
 - **Tamper-evident log.** Blocked messages, refused addresses, halts and backups go to a hash-chained log next to the state file. An edited line breaks the chain, and `/admin/security-log` reports it.
 - **Offline backup.** `/backup` in the chat downloads the wallet key sealed with the recovery code (Argon2id and XChaCha20-Poly1305). `/recover` opens it in the browser with no MooPay server, so money stays reachable if MooPay is gone. The server sees the recovery code on every request, so this protects against losing the server, not against a malicious one.
 - **On-chain guard (not wired in yet).** `contracts/guard` is a NEAR contract that enforces the same limits, allowlist and hold on chain. It is tested but not deployed or audited.
+
+### Every layer that protects funds
+
+The AI is treated as an untrusted translator. It turns a sentence into a typed request; plain code decides, and the owner's device approves.
+
+| Layer | What it does | Where |
+| --- | --- | --- |
+| Injection firewall | Blocks instruction overrides, fake role tags and hidden text before the model sees them | `src/security/guard.ts` |
+| Typed addresses only | Every destination must be one the user typed, has paid, or owns | `ungrounded()` |
+| Typed amounts only | An amount the user never wrote cannot go through on its own: it waits on a card for the owner | `amountUnmatched()` |
+| Second model audit | A tool-less model must agree the call matches the request; unclear counts as no | `auditIntent()` |
+| Rules in code | Limits, daily cap, new-recipient limit, allow-lists and the $3,000 ceiling run before any money moves | `src/agent/policy.ts` |
+| Biometrics on every payment | Sends, claims, groups, staking, withdrawals and schedules each need a passkey signature | `src/security/passkeys.ts` |
+| Drain and burst check | A payment of 85% or more of the wallet, or 3 in a minute, needs a passkey even with biometrics off | `src/security/risk.ts` |
+| Cards built from the real request | The approval card is rendered from the parameters, with fees and total, not from the model's words | `approvalCard()` |
+| X has fewer powers | From X: first-time recipients and anything above $10 wait for approval; changing rules, minting agent keys and linking accounts are refused and only work in the app | `src/ai/tools.ts` |
+| Passkey is hard to replace | Adding a second passkey, turning biometrics on or off, showing the wallet key, and unfreezing all need the existing passkey | `routes/agent.ts` |
+| Rule changes need the passkey | Raising a limit or changing the payout wallet needs it; a new payout wallet also waits 24 hours | `ops.rules()` |
+| Lock from X | `@moopaybot lock` freezes the wallet at once; unlocking needs the passkey | `src/server/x.ts` |
+| Kill switch | Operator halt for X or everything, and an automatic pause on a spike of X requests | `src/security/halt.ts` |
+| Tamper-evident log | Hash-chained log of blocked messages, step-ups, halts, key exports and passkey approvals | `src/security/audit.ts` |
+| Offline backup | Wallet key sealed with the recovery code, openable without the MooPay server | `src/agent/recovery.ts` |
+
+### If an account is compromised, are the funds and key safe?
+
+| What the attacker has | Funds | Wallet key |
+| --- | --- | --- |
+| The user's X account | Safe if a passkey is set: a payment needs the owner's device. From X they cannot change limits, create keys, link accounts or export. They can start requests that wait for approval, and the owner can lock from X. Without a passkey, first-time recipients and anything above $10 still wait for approval in the app. | Cannot be shown from X |
+| A prompt injection (a web page, message or contact name the AI reads) | Safe: addresses and amounts must be the user's own words or they wait on a card, and the second model must agree | Never seen by the model |
+| The browser session or recovery code, no passkey set | At risk: the attacker can use the web app inside the limits | At risk once they add their own passkey, which is why users should set one up now |
+| The browser session or recovery code, passkey set | Payments, rule changes, adding a passkey and key export all need the owner's device | Protected by the passkey |
+| The phone, unlocked, with fingerprint or PIN | At risk. That is physical access. | At risk |
+| **The MooPay server or its `SEED_KEY` secret** | **At risk. The server derives and holds every wallet key, so a server compromise can sign without a passkey.** | **At risk** |
+
+The last row is the main open risk. Moving key custody into a hardware-isolated TEE with the passkey checked inside it, and enforcing limits on chain with `contracts/guard`, is the next step. Until then, keep only what you need in the agent wallet (the float rule sweeps the rest to your own wallet).
 
 ### Trust boundaries
 

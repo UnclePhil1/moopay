@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { asMoopayError, MoopayError } from "../util/errors.js";
 import type { AgentOps, Ctx, MooPayService, UserRec } from "../agent/index.js";
 import { READ_ONLY, runTool, STEP_LABEL, TOOLS } from "./tools.js";
-import { auditIntent, MONEY_TOOLS, refusal, screenText, ungrounded, WATCH_NOTE, type AuditLlm } from "../security/guard.js";
+import { amountUnmatched, auditIntent, MONEY_TOOLS, refusal, screenText, ungrounded, WATCH_NOTE, type AuditLlm } from "../security/guard.js";
 import { security } from "../security/audit.js";
 
 /* The agent loop: the model plans, calls tools, reads results, and answers. Stops after a few rounds. */
@@ -93,7 +93,7 @@ ${bio ? `- This user has biometric approval on, and it is the confirmation: do N
  * Before any tool that sends money or changes where money goes runs: the destination must be one the user wrote or has paid,
  * and (when an auditor is given) a second model must agree the call matches what the user asked. Throws a plain refusal otherwise.
  */
-async function vet(p: { u: UserRec; text: string; ctx: Ctx; ops: AgentOps; auditor?: { llm: AuditLlm; model: string } | undefined }, name: string, input: unknown): Promise<void> {
+async function vet(p: { u: UserRec; text: string; ctx: Ctx; ops: AgentOps; auditor?: { llm: AuditLlm; model: string } | undefined }, name: string, input: unknown): Promise<boolean> {
   const who = { user: p.u.id.slice(0, 8), tool: name, via: p.ctx.channel ?? "web" };
   if (p.ops.paused(p.ctx.channel)) { security.add("paused_refusal", who); throw new MoopayError("INVALID_INPUT", p.ctx.channel === "x" ? "Payments from X are paused for a short while. Please use the app or try again later." : "Payments are paused for a short while. Nothing was sent. Please try again later."); }
   const said = [...p.u.chat.filter((m) => m.role === "user").slice(-12).map((m) => m.content), p.text];
@@ -103,6 +103,10 @@ async function vet(p: { u: UserRec; text: string; ctx: Ctx; ops: AgentOps; audit
     const v = await auditIntent(p.auditor.llm, p.auditor.model, p.u, p.text, name, input).catch(() => ({ ok: false, why: "the check could not run" }));
     if (!v.ok) { security.add("auditor_blocked", { ...who, why: v.why ?? "" }); throw refusal("intent"); }
   }
+  // An amount the user never wrote cannot go through on its own: it waits for them to read it on a card.
+  const review = amountUnmatched(name, input, said);
+  if (review) security.add("amount_not_typed", who);
+  return review;
 }
 
 export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: Llm; model: string; u: UserRec; text: string; ops: AgentOps; svc: MooPayService; ctx: Ctx; emit: Emit; context: string; /** a second model that must agree before money moves; left out in tests */ auditor?: { llm: AuditLlm; model: string } | undefined }): Promise<string> {
@@ -130,8 +134,8 @@ export async function runTurn(p: { id?: string; ctl?: Ctl; extra?: string; llm: 
       if (p.ctl && !READ_ONLY.has(c.name)) p.ctl.ran = true;
       p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "running" });
       try {
-        if (MONEY_TOOLS.has(c.name)) await vet(p, c.name, c.input);
-        const out = await runTool(c.name, c.input, p.u, p.ops, p.svc, p.ctx);
+        const review = MONEY_TOOLS.has(c.name) ? await vet(p, c.name, c.input) : false;
+        const out = await runTool(c.name, c.input, p.u, p.ops, p.svc, review ? { ...p.ctx, review: true } : p.ctx);
         p.emit({ type: "step", id: c.id, label: STEP_LABEL[c.name] ?? c.name, state: "done" });
         if (out.card) p.emit({ type: "card", card: out.card });
         results.push({ type: "tool_result", tool_use_id: c.id, content: JSON.stringify(out.result) });

@@ -1629,3 +1629,28 @@ test("X: with a passkey the agent replies publicly with the approval link", asyn
   await handleMention(deps, { id: "1", text: "@moopaybot send $5 to bob.near", author_id: "42" });
   assert.match(said[0]!, /Send \$5 to bob\.near[\s\S]*\/ok\/abc123def456$/);
 });
+
+test("intent binding: an amount the user never wrote cannot go through on its own", async () => {
+  const { amountUnmatched } = await import("../../src/security/guard.js");
+  assert.equal(amountUnmatched("send_money", { amountUsd: "5", recipient: BOB, chain: "near" }, ["send $5 to bob.near"]), false);
+  assert.equal(amountUnmatched("send_money", { amountUsd: "5.00", recipient: BOB, chain: "near" }, ["send 5 dollars"]), false, "5 and 5.00 are the same");
+  assert.equal(amountUnmatched("send_money", { amountUsd: "500", recipient: BOB, chain: "near" }, ["send $5 to bob.near"]), true, "a bigger amount than written");
+  assert.equal(amountUnmatched("group_payout", { items: [{ amountUsd: "1" }, { amountUsd: "9" }] }, ["pay $1 and $2"]), true, "one line is off");
+  assert.equal(amountUnmatched("withdraw", { to: BOB }, ["withdraw everything"]), false, "no amount, nothing to match");
+  const a = await agent(); a.fund(100);
+  const r = await a.ops.send(a.u, { amountUsd: "1", chain: "near", recipient: BOB }, false, {}, { origin: "https://x", review: true });
+  assert.equal(r.result["status"], "needs_approval", "a small payment waits when the amount was not the user's own");
+  assert.match(String(r.result["reason"]), /own words/);
+  assert.equal(a.near.transfers.length, 0);
+});
+
+test("X cannot change rules, mint agent keys or link accounts; the app can; rule changes need the passkey", async () => {
+  const { runTool } = await import("../../src/ai/tools.js");
+  const a = await agent();
+  for (const [tool, input] of [["update_rules", { approveAboveUsd: 1000 }], ["create_agent_key", { name: "x" }], ["link_x", {}], ["unlink_x", {}]] as const)
+    await assert.rejects(runTool(tool, input, a.u, a.ops, a.svc, { origin: "https://x", channel: "x" }), /only be done in the MooPay app/, tool);
+  withPasskey(a.u as never);
+  const r = await a.ops.rules(a.u, { dailyCapUsd: 100000 });
+  assert.equal(r.result["status"], "needs_approval");
+  assert.equal(a.u.approvals.at(-1)!.strong, true, "loosening a limit needs the passkey");
+});

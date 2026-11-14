@@ -21,7 +21,7 @@ import { hashKey } from "./store.js";
 /* What the agent can do. Every money move goes through decide() first; the language model cannot skip it. */
 
 export interface Out { result: Record<string, unknown>; card?: Record<string, unknown> }
-export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x"; /** the post that started it, so the result can be answered there */ tweet?: string }
+export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x"; /** the post that started it, so the result can be answered there */ tweet?: string; /** the amount was not in the user's own words, so this must wait for their OK */ review?: boolean }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
 export interface Who { ak?: AgentKey | undefined; /** a payment the user already approved when they set up the schedule */ sched?: boolean }
 export interface SendParams {
@@ -127,7 +127,11 @@ export class AgentOps {
   /** Fee and total lines for a card; nothing when the fee is not known yet. */
   /** With biometrics on, every payment waits for the owner's fingerprint, face or PIN, however small. Outside agent keys have their own leash, and a scheduled run was approved when it was set up. */
   private bio(u: UserRec, ctx: Ctx | undefined, who: Who): boolean {
-    return !who.ak && !who.sched && hasPasskey(u) && needsPasskey(u, ctx?.channel === "x" ? "x" : "web");
+    if (who.ak || who.sched) return false;
+    return ctx?.review === true || (hasPasskey(u) && needsPasskey(u, ctx?.channel === "x" ? "x" : "web"));
+  }
+  private holdWhy(ctx: Ctx | undefined): string {
+    return ctx?.review ? "I couldn't match that amount to your own words, so please read it and confirm" : "biometric approval is on, so every payment needs your fingerprint, face or PIN";
   }
   /** MooPay's own fee on a payment from this door, in dollars. */
   private moo(amt: number, ctx: Ctx | undefined): { bps: number; fee: number } {
@@ -311,7 +315,7 @@ export class AgentOps {
     const rk = riskOf(u, amt, (await this.balances(u)).totalUsd, !u.known.includes(key), this.now());
     if (rk.stepUp) { security.add("risk_step_up", { user: u.id.slice(0, 8), why: rk.why[0] ?? "" }, this.now()); if (d.action === "auto") d = { action: "ask", reason: `This looks unusual: ${rk.why[0]}. Please confirm it's you` }; }
     const bio = this.bio(u, ctx, who);
-    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
+    if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
     if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio);
     let pay: Payment;
@@ -354,7 +358,7 @@ export class AgentOps {
     const lines = items.map((it, i) => `${usd(usds[i]!)} to ${it.recipient} (${it.chain.toUpperCase()}${it.assetSymbol ? " " + it.assetSymbol.toUpperCase() : ""})`);
     const summary = `Send ${usd(total)} to ${items.length} wallets: ${lines.join("; ")}`;
     const bio = this.bio(u, ctx, who);
-    if ((whole.action === "ask" || asks || bio) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks?.action === "ask" ? asks.reason : bio ? "biometric approval is on, so every payment needs your fingerprint, face or PIN" : "a new recipient", undefined, bio, this.mooRows(total, ctx, [["Network and swap fees", "added on each line when it runs"]], " plus network and swap fees"));
+    if ((whole.action === "ask" || asks || bio) && !approved) return this.ask(u, "batch", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, whole.action === "ask" ? whole.reason : asks?.action === "ask" ? asks.reason : bio ? this.holdWhy(ctx) : "a new recipient", undefined, bio, this.mooRows(total, ctx, [["Network and swap fees", "added on each line when it runs"]], " plus network and swap fees"));
     const rows: { to: string; chain: string; amount: string; status: string; url?: string }[] = [];
     let feeSum = 0;
     const had = new Set(u.payments.map((p) => p.id));
@@ -610,7 +614,7 @@ export class AgentOps {
     let d = decide(u, amt, this.recipientKey(chain, p.receiver), this.now(), ctx.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason } };
     const bio = this.bio(u, ctx, who);
-    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
+    if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Create a private claim of ${usd(amt)} that only ${p.receiver}${chain === "near" ? "" : ` (${chain.toUpperCase()})`} can open`;
     if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", `about ${fmt(CLAIM_GAS, 24, 2)} NEAR, paid from the agent wallet`], ...(chain === "near" ? [] : [["Swap fee", "a small fee comes out of the amount"] as [string, string]]), ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
     const usdc = await this.svc.usdcAsset();
@@ -689,12 +693,12 @@ export class AgentOps {
       if (!isNearAccountId(patch.payoutAddress)) throw new MoopayError("BAD_RECIPIENT", "Your payout wallet must be a NEAR wallet, like alice.near.");
       if (!u.rules.payoutAddress) next.payoutAddress = patch.payoutAddress; // first one takes effect now
       else if (patch.payoutAddress === u.rules.payoutAddress) delete next.pendingPayout; // setting the current one again cancels a pending change
-      else if (!approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", "changing your payout wallet");
+      else if (!approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", "changing your payout wallet", undefined, hasPasskey(u));
       else next.pendingPayout = { address: patch.payoutAddress, at: this.now() + PAYOUT_HOLD_MS };
     }
     if (next.payoutAddress && !u.known.includes(this.recipientKey("near", next.payoutAddress))) u.known.push(this.recipientKey("near", next.payoutAddress)); // your own wallet is never a "new recipient"
     const why = rulesNeedApproval(u.rules, next);
-    if (why && !approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", why);
+    if (why && !approved) return this.ask(u, "rules", patch as Record<string, unknown>, "Update your rules", why, undefined, hasPasskey(u));
     u.rules = next;
     if (next.pendingPayout && next.pendingPayout.address === patch.payoutAddress) this.store.event(u, `Payout wallet change to ${patch.payoutAddress} starts on ${new Date(next.pendingPayout.at).toUTCString()}. Until then I keep using your current one. If this wasn't you, set your current payout wallet again to cancel it.`);
     this.store.save();
@@ -720,7 +724,7 @@ export class AgentOps {
     const whole = decide(u, total, "groupclaim", this.now(), ctx.channel);
     if (whole.action === "deny") return { result: { status: "denied", reason: whole.reason } };
     const bio = this.bio(u, ctx, who);
-    if ((whole.action === "ask" || bio) && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.action === "ask" ? whole.reason : "biometric approval is on, so every payment needs your fingerprint, face or PIN", undefined, bio, this.mooRows(total, ctx, [["Network fee", `about ${fmt(CLAIM_GAS * BigInt(items.length), 24, 2)} NEAR, paid from the agent wallet`], ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
+    if ((whole.action === "ask" || bio) && !approved) return this.ask(u, "groupclaim", { items, ...(who.ak ? { agentId: who.ak.id } : {}) }, `One link with private claims totalling ${usd(total)}: ${items.map((i) => `${usd(Number(i.amountUsd))} for ${i.receiver}`).join("; ")}`, whole.action === "ask" ? whole.reason : this.holdWhy(ctx), undefined, bio, this.mooRows(total, ctx, [["Network fee", `about ${fmt(CLAIM_GAS * BigInt(items.length), 24, 2)} NEAR, paid from the agent wallet`], ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
     const entries: { receiver: string; chain: string; claimKey: string }[] = [];
     for (const it of items) {
       const r = await this.claim(u, { amountUsd: it.amountUsd, receiver: it.receiver, ...(it.chain ? { chain: it.chain } : {}) }, ctx, true, who);
@@ -915,7 +919,7 @@ export class AgentOps {
     let d = decide(u, amt, this.recipientKey("near", payout), this.now(), ctx?.channel);
     if (d.action === "deny") return { result: { status: "denied", reason: d.reason, hint: "The user can raise the limit with update_rules (needs their approval)." } };
     const bio = this.bio(u, ctx, who);
-    if (bio && d.action === "auto") d = { action: "ask", reason: "biometric approval is on, so every payment needs your fingerprint, face or PIN" };
+    if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const shown = fmt(nearAmt, 24, 4);
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Stake ${shown} NEAR (about ${usd(amt)}) into rNEAR on Rhea; rNEAR goes to ${payout}`;
     if (d.action === "ask" && !approved) return this.ask(u, "stake", { amount: fmt(nearAmt, 24, 24), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", "about 0.02 NEAR in gas; unused gas comes back"], ["You receive", "about the same value in rNEAR, sent to " + payout]]));
@@ -1170,7 +1174,7 @@ export class AgentOps {
     const asset = p.asset ?? "USDC";
     const bio = this.bio(u, ctx, {});
     if ((to !== u.rules.payoutAddress || bio) && !approved)
-      return this.ask(u, "withdraw", { ...p, to }, `Withdraw ${asset === "NEAR" ? "your NEAR" : p.amountUsd ? usd(Number(p.amountUsd)) : "everything"} to ${to}`, to !== u.rules.payoutAddress ? "a wallet that isn't your payout wallet" : "biometric approval is on, so every payment needs your fingerprint, face or PIN", undefined, bio, [["Network fee", "a few thousandths of a NEAR, paid from the wallet"], ["MooPay fee", "none"]]);
+      return this.ask(u, "withdraw", { ...p, to }, `Withdraw ${asset === "NEAR" ? "your NEAR" : p.amountUsd ? usd(Number(p.amountUsd)) : "everything"} to ${to}`, to !== u.rules.payoutAddress ? "a wallet that isn't your payout wallet" : this.holdWhy(ctx), undefined, bio, [["Network fee", "a few thousandths of a NEAR, paid from the wallet"], ["MooPay fee", "none"]]);
     const b = await this.balances(u);
     const k = this.store.keyOf(u);
     let r: { txHash: string }; let shown: number;

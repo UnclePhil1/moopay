@@ -511,7 +511,8 @@ async function strong(purpose) {
 async function addPasskey() {
   if (!(await ask({ title: "Add a passkey?", text: "Your device will ask for your fingerprint, face or PIN. After that, payments that need your OK ask for it too. No password and no sign-up.", confirm: "Add passkey" }))) return;
   try {
-    const o = await post("passkey/register-options");
+    const st = await (await api("passkey/status")).json();
+    const o = await post("passkey/register-options", st.count ? { assertion: await strong("addkey") } : undefined);
     const resp = await window.moopayPasskey.register(o);
     await post("passkey/register", { response: resp });
     clearEmpty(); await say(agent(), "Done. Your passkey is on. Payments that need your OK now ask for your fingerprint, face or PIN, on this app and on X.");

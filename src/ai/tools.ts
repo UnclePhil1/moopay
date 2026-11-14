@@ -74,11 +74,16 @@ export const STEP_LABEL: Record<string, string> = {
   list_activity: "Looking through your activity", update_rules: "Updating your rules", schedule_payment: "Scheduling it", cancel_schedule: "Cancelling it", list_supported_assets: "Looking up assets", withdraw: "Preparing your withdrawal", fund_wallet: "Getting a deposit address", pay_from_my_wallet: "Getting a deposit address", payment_link: "Making your payment link", create_agent_key: "Creating the agent key", stake_rnear: "Staking with Rhea", unstake_rnear: "Getting your unstake ready", cancel_unstake: "Cancelling the unstake", withdraw_unstaked: "Getting your withdrawal ready", rnear_position: "Checking your stake", list_agent_keys: "Looking at your agents", revoke_agent_key: "Switching it off",
 };
 
+/** Changing limits or the payout wallet, minting keys, and linking accounts are never done from X. */
+const APP_ONLY: ReadonlySet<string> = new Set(["update_rules", "create_agent_key", "link_x", "unlink_x"]);
+
 export async function runTool(name: string, input: unknown, u: UserRec, ops: AgentOps, svc: MooPayService, ctx: Ctx): Promise<Out> {
   if (!(name in ZS)) throw new MoopayError("INVALID_INPUT", `unknown tool ${name}`);
   const parsed = ZS[name as Name].safeParse(input ?? {});
   if (!parsed.success) throw new MoopayError("INVALID_INPUT", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
   const a = parsed.data as never as Record<string, never>;
+  // A post on X is the easiest door to abuse, so nothing that changes who or what can reach the money is done from there.
+  if (ctx.channel === "x" && APP_ONLY.has(name)) throw new MoopayError("INVALID_INPUT", "For your safety this can only be done in the MooPay app, not from X. Open the app and ask there.");
   const out = await run(name as Name, a, u, ops, svc, ctx);
   // From X, an approval has no button to press: a user with a passkey gets a link that opens the signing sheet and asks for their fingerprint, face or PIN.
   if (ctx.channel === "x" && out.card?.["kind"] === "approval" && u.passkeys?.length) {

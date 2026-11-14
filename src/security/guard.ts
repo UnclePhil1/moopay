@@ -70,6 +70,24 @@ export function destinations(tool: string, input: unknown): string[] {
   }
 }
 
+/** Every amount a tool call would pay, as plain numbers. */
+export function amountsOf(tool: string, input: unknown): number[] {
+  const a = (input ?? {}) as Record<string, unknown>;
+  const one = (o: Record<string, unknown>): number[] => [o["amountUsd"], o["amount"]].map((v) => (typeof v === "string" || typeof v === "number" ? Number(v) : NaN)).filter((n) => Number.isFinite(n) && n > 0);
+  if (tool === "group_payout" || tool === "group_claim") return Array.isArray(a["items"]) ? (a["items"] as Record<string, unknown>[]).flatMap(one) : [];
+  if (["send_money", "schedule_payment", "payment_link", "pay_from_my_wallet", "create_claim", "withdraw", "stake_rnear"].includes(tool)) return one(a);
+  return [];
+}
+
+/**
+ * True when a payment amount in the call is not a number the user wrote. The call is not refused (people write "five dollars"),
+ * but it can no longer go through on its own: it waits for the user to read the card and approve it.
+ */
+export function amountUnmatched(tool: string, input: unknown, userTexts: string[]): boolean {
+  const said = new Set((userTexts.join("\n").match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map((n) => Number(n.replace(/,/g, ""))));
+  return amountsOf(tool, input).some((n) => ![...said].some((s) => Math.abs(s - n) < 1e-9));
+}
+
 const wholeWord = (text: string, word: string): boolean => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`).test(text);
 
 /**

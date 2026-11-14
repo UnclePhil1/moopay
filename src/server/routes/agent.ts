@@ -185,7 +185,12 @@ export async function makeAgent(d: AgentDeps) {
         return true;
       }
       if (op === "passkey/status" && req.method === "GET") { json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true; }
-      if (op === "passkey/register-options" && req.method === "POST") { needMaster("Adding a passkey"); json(res, 200, await passkeys.registerOptions(u, origin)); return true; }
+      if (op === "passkey/register-options" && req.method === "POST") {
+        needMaster("Adding a passkey");
+        // With a passkey already set, adding another needs the first one, so a stolen recovery code cannot enrol the thief's own device.
+        if (hasPasskey(u)) await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "addkey");
+        json(res, 200, await passkeys.registerOptions(u, origin)); return true;
+      }
       if (op === "passkey/register" && req.method === "POST") {
         needMaster("Adding a passkey");
         await passkeys.register(u, origin, (await bodyOf(req))["response"] as RegistrationResponseJSON);
@@ -196,7 +201,7 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "passkey/options" && req.method === "POST") {
         const b = await bodyOf(req), purpose = String(b["purpose"] ?? "");
         const ap = u.approvals.find((x) => x.id === purpose.replace(/^approve:/, ""));
-        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export");
+        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
       }
       if (op === "passkey/toggle" && req.method === "POST") {
