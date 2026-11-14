@@ -3,11 +3,17 @@ import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { deriveWallet, type KeySource } from "./keys.js";
-import { inspect, Ledger, Refused, withinCaps, type SignerPolicy } from "./policy.js";
+import { inspect, Refused, Tally, withinCaps, type SignerPolicy } from "./policy.js";
 import { SignerPasskeys } from "./passkeys.js";
+import type { StateStore, UserState } from "./state.js";
 
 /** A passkey signature the user's device made for one payment or action, with the one-time nonce it was bound to. */
 export interface Approval { nonce: string; assertion: AuthenticationResponseJSON }
+
+/** A user's state as loaded for one operation. `save` writes it to the store and throws if the record changed underneath. */
+interface Open { state: UserState; save(): Promise<void> }
+
+const WRITER = "__state-writer__";
 
 /**
  * The signer. It holds the wallet keys (derived from the TEE's root key), decodes every transaction itself, and signs only what
@@ -17,21 +23,44 @@ export interface Approval { nonce: string; assertion: AuthenticationResponseJSON
  *   1. caps: a hard ceiling per asset that no signature can lift.
  *   2. the unattended allowance: small payments may go with no passkey, unless the user turned on strict mode.
  *   3. a passkey signature for that exact payment, for everything else.
+ *
+ * State (passkeys, strict mode, lock, today's totals) is read from the store at the start of every call and written back
+ * BEFORE a signature is made. So a rolled-back disk or a stale copy cannot reset a limit: the write is refused, and nothing is signed.
  */
 export class WalletSigner {
   private root: Buffer | undefined;
+  private readonly busy = new Map<string, Promise<unknown>>();
   constructor(
     private readonly keys: KeySource,
     private readonly policy: SignerPolicy,
     readonly passkeys: SignerPasskeys,
-    private readonly total = new Ledger(),
-    private readonly unattended = new Ledger(),
+    private readonly store: StateStore,
+    private readonly now: () => number = Date.now,
   ) {}
 
-  private async wallet(userId: string) {
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) throw new Refused("bad_transaction", "bad user id");
+  private async derive(id: string) {
     this.root ??= await this.keys.root();
-    return deriveWallet(this.root, userId);
+    return deriveWallet(this.root, id);
+  }
+  private async wallet(userId: string) {
+    // Ids starting with "__" are reserved for the signer's own accounts.
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(userId)) throw new Refused("bad_transaction", "bad user id");
+    return this.derive(userId);
+  }
+
+  /** The signer's own NEAR account. It pays the gas for writing state, and it is the account the contract lets write. Fund it with a little NEAR. */
+  async writer(): Promise<{ accountId: string; publicKey: string; secretKey: string }> { return this.derive(WRITER); }
+
+  /** One operation at a time per user, on state that was just read. */
+  private async open<T>(userId: string, fn: (o: Open) => Promise<T>): Promise<T> {
+    const prev = this.busy.get(userId) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(async () => {
+      const { state, version } = await this.store.load(userId);
+      let v = version;
+      return fn({ state, save: async () => { v = await this.store.save(userId, state, v); } });
+    });
+    this.busy.set(userId, run);
+    try { return await run; } finally { if (this.busy.get(userId) === run) this.busy.delete(userId); }
   }
 
   async pubkey(userId: string): Promise<{ accountId: string; publicKey: string }> {
@@ -42,8 +71,7 @@ export class WalletSigner {
   /** Where the user stands: what the app needs to know to ask for a passkey or explain a refusal. */
   async status(userId: string) {
     await this.wallet(userId);
-    const s = this.passkeys.state(userId);
-    return { passkeys: this.passkeys.list(userId), active: this.passkeys.active(userId), pending: this.passkeys.pending(userId), activeAt: s.activeAt, strict: s.strict, locked: s.locked };
+    return this.open(userId, async ({ state: s }) => ({ passkeys: this.passkeys.list(s), active: this.passkeys.active(s), pending: this.passkeys.pending(s), activeAt: s.activeAt, strict: s.strict, locked: s.locked }));
   }
 
   nonce(userId: string): string { return this.passkeys.nonce(userId); }
@@ -53,45 +81,70 @@ export class WalletSigner {
     const w = await this.wallet(userId);
     const seen = inspect(unsigned);
     if (seen.publicKey !== w.publicKey) throw new Refused("bad_transaction", "that transaction names a different key");
-    const st = this.passkeys.state(userId);
-    if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
-    withinCaps(this.policy.caps, this.total, userId, seen.outflows);
+    return this.open(userId, async ({ state: st, save }) => {
+      if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
+      const total = new Tally(st.total, this.now), free = new Tally(st.free, this.now);
+      withinCaps(this.policy.caps, total, seen.outflows);
 
-    let free = false;
-    if (!st.strict) { try { withinCaps(this.policy.unattended, this.unattended, userId, seen.outflows); free = true; } catch { /* needs a passkey */ } }
-    if (!free) {
-      if (!this.passkeys.active(userId)) {
-        throw new Refused("passkey_required", this.passkeys.pending(userId)
-          ? "Your passkey is still in its waiting period, so larger payments are not available yet."
-          : "Add a passkey to send more than the small limit.");
+      let isFree = false;
+      if (!st.strict) {
+        try { withinCaps(this.policy.unattended, free, seen.outflows); isFree = true; }
+        catch (e) { if (!(e instanceof Refused)) throw e; /* needs a passkey */ }
       }
-      if (!approval) throw new Refused("passkey_required", "This payment needs your fingerprint, face or PIN.");
-      await this.passkeys.verifyPayment(userId, approval.nonce, seen.outflows, approval.assertion);
-    }
-    const out = await KeyPairSigner.fromSecretKey(w.secretKey as never).signTransaction(decodeTransaction(unsigned));
-    for (const o of seen.outflows) { this.total.add(userId, o.asset, o.amount); if (free) this.unattended.add(userId, o.asset, o.amount); }
-    return { signed: encodeTransaction(out.signedTransaction), txHash: baseEncode(out.txHash) };
+      if (!isFree) {
+        if (!this.passkeys.active(st)) {
+          throw new Refused("passkey_required", this.passkeys.pending(st)
+            ? "Your passkey is still in its waiting period, so larger payments are not available yet."
+            : "Add a passkey to send more than the small limit.");
+        }
+        if (!approval) throw new Refused("passkey_required", "This payment needs your fingerprint, face or PIN.");
+        await this.passkeys.verifyPayment(st, userId, approval.nonce, seen.outflows, approval.assertion);
+      }
+      for (const o of seen.outflows) { total.add(o.asset, o.amount); if (isFree) free.add(o.asset, o.amount); }
+      await save(); // on record before it is signed
+      const out = await KeyPairSigner.fromSecretKey(w.secretKey as never).signTransaction(decodeTransaction(unsigned));
+      return { signed: encodeTransaction(out.signedTransaction), txHash: baseEncode(out.txHash) };
+    });
   }
 
   /** Locking is always allowed (it can only make the wallet safer). Unlocking needs the passkey. */
-  lock(userId: string): void { this.passkeys.state(userId).locked = true; }
-  async unlock(userId: string, a: Approval): Promise<void> { await this.passkeys.verifyAction(userId, a.nonce, "unlock", a.assertion); this.passkeys.state(userId).locked = false; }
+  async lock(userId: string): Promise<void> {
+    await this.wallet(userId);
+    await this.open(userId, async ({ state, save }) => { state.locked = true; await save(); });
+  }
+  async unlock(userId: string, a: Approval): Promise<void> {
+    await this.wallet(userId);
+    await this.open(userId, async ({ state, save }) => { await this.passkeys.verifyAction(state, userId, a.nonce, "unlock", a.assertion); state.locked = false; await save(); });
+  }
 
   /** Strict mode: every payment needs the passkey. Either direction needs the passkey. */
   async setStrict(userId: string, on: boolean, a: Approval): Promise<void> {
-    if (!this.passkeys.active(userId)) throw new Refused("passkey_required", "Add a passkey first.");
-    await this.passkeys.verifyAction(userId, a.nonce, on ? "strict:on" : "strict:off", a.assertion);
-    this.passkeys.state(userId).strict = on;
+    await this.wallet(userId);
+    await this.open(userId, async ({ state, save }) => {
+      if (!this.passkeys.active(state)) throw new Refused("passkey_required", "Add a passkey first.");
+      await this.passkeys.verifyAction(state, userId, a.nonce, on ? "strict:on" : "strict:off", a.assertion);
+      state.strict = on;
+      await save();
+    });
+  }
+
+  async registerOptions(userId: string) {
+    await this.wallet(userId);
+    return this.open(userId, ({ state }) => this.passkeys.registerOptions(state, userId));
   }
 
   /** Adds a passkey. The first one starts counting after the waiting period. Once any exists, adding another needs one of them. */
   async addPasskey(userId: string, response: RegistrationResponseJSON, a?: Approval): Promise<{ activeAt: number }> {
     await this.wallet(userId);
-    if (this.passkeys.state(userId).credentials.length > 0) {
-      if (!a) throw new Refused("passkey_required", "Adding another passkey needs one you already have.");
-      await this.passkeys.verifyAction(userId, a.nonce, "addkey", a.assertion);
-    }
-    return this.passkeys.register(userId, response);
+    return this.open(userId, async ({ state, save }) => {
+      if (state.credentials.length > 0) {
+        if (!a) throw new Refused("passkey_required", "Adding another passkey needs one you already have.");
+        await this.passkeys.verifyAction(state, userId, a.nonce, "addkey", a.assertion);
+      }
+      await this.passkeys.register(state, userId, response);
+      await save();
+      return { activeAt: state.activeAt };
+    });
   }
 }
 
@@ -123,10 +176,10 @@ export function signerServer(signer: WalletSigner, token: string, log: (m: strin
               const out = await signer.sign(id, Buffer.from(b.tx, "base64"), typeof b.nonce === "string" && b.assertion ? approval() : undefined);
               return send(200, { signed: Buffer.from(out.signed).toString("base64"), txHash: out.txHash });
             }
-            case "/v1/lock": signer.lock(id); return send(200, { ok: true });
+            case "/v1/lock": await signer.lock(id); return send(200, { ok: true });
             case "/v1/unlock": await signer.unlock(id, approval()); return send(200, { ok: true });
             case "/v1/strict": await signer.setStrict(id, b.on === true, approval()); return send(200, { ok: true });
-            case "/v1/passkey/register-options": return send(200, await signer.passkeys.registerOptions(id));
+            case "/v1/passkey/register-options": return send(200, await signer.registerOptions(id));
             case "/v1/passkey/register": {
               if (!b.response) return send(400, { error: "response is required" });
               return send(200, await signer.addPasskey(id, b.response, typeof b.nonce === "string" && b.assertion ? approval() : undefined));

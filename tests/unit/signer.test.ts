@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { actions, createTransaction, encodeTransaction, PublicKey, type Transaction } from "near-api-js";
 import { FixedKeySource, deriveWallet } from "../../src/signer/keys.js";
-import { inspect, Ledger, Refused, withinCaps, type SignerPolicy } from "../../src/signer/policy.js";
+import { emptyTally, inspect, Refused, Tally, withinCaps, type SignerPolicy } from "../../src/signer/policy.js";
+import { MemoryStateStore, NearStateStore, type StateStore, type UserState, type Versioned } from "../../src/signer/state.js";
 import { signerServer, WalletSigner, type Approval } from "../../src/signer/service.js";
 import { actionChallenge, paymentChallenge, SignerPasskeys, type Action } from "../../src/signer/passkeys.js";
 import { RemoteSigner, SignerApi } from "../../src/signer/client.js";
@@ -20,9 +21,8 @@ const keys = new FixedKeySource("unit");
 const hash = new Uint8Array(32);
 const HOUR = 3600_000;
 
-function setup(p: SignerPolicy = open, now = () => Date.now(), delay = 0) {
-  const signer = new WalletSigner(keys, p, new SignerPasskeys(ORIGIN, delay, now), new Ledger(now), new Ledger(now));
-  return signer;
+function setup(p: SignerPolicy = open, now = () => Date.now(), delay = 0, store: StateStore = new MemoryStateStore()) {
+  return new WalletSigner(keys, p, new SignerPasskeys(ORIGIN, delay, now), store, now);
 }
 const mk = (signerId: string, pub: string, receiver: string, acts: ReturnType<typeof actions.transfer>[]): Transaction => createTransaction(signerId, PublicKey.from(pub), receiver, 1n, acts, hash);
 const ft = (to: string, amount: string) => actions.functionCall("ft_transfer", { receiver_id: to, amount }, 12n * 10n ** 12n, 1n);
@@ -30,7 +30,7 @@ const pay = (me: { accountId: string; publicKey: string }, to: string, amount: s
 
 /** Enrols a pretend phone, as the browser would: options from the signer, a created credential back. */
 async function enrol(signer: WalletSigner, user: string, ph = phone()) {
-  await signer.addPasskey(user, ph.create((await signer.passkeys.registerOptions(user)).challenge));
+  await signer.addPasskey(user, ph.create((await signer.registerOptions(user)).challenge));
   return ph;
 }
 /** What the browser does to approve one payment: ask for a nonce, hash it with what the card shows, have the phone sign it. */
@@ -87,8 +87,8 @@ test("signer: the daily total resets the next day, and a check does not record a
   await assert.rejects(send("1"));
   t += 24 * HOUR;
   await send("50000000");
-  const l = new Ledger(); withinCaps(caps, l, "x", [{ asset: USDC, amount: 1n, to: "b", method: "ft_transfer" }]);
-  assert.equal(l.used("x", USDC), 0n);
+  const tally = new Tally(emptyTally()); withinCaps(caps, tally, [{ asset: USDC, amount: 1n, to: "b", method: "ft_transfer" }]);
+  assert.equal(tally.used(USDC), 0n);
 });
 
 test("signer: the signature is valid, and a transaction for another key is refused", async () => {
@@ -161,7 +161,7 @@ test("passkey: the first passkey waits before it counts, so a thief who adds one
 test("passkey: once one exists, adding another needs the first, even before it is in force", async () => {
   const signer = setup(small, undefined, 24 * HOUR);
   const mine = await enrol(signer, "alice"), thief = phone();
-  const create = async () => thief.create((await signer.passkeys.registerOptions("alice")).challenge);
+  const create = async () => thief.create((await signer.registerOptions("alice")).challenge);
   await assert.rejects(signer.addPasskey("alice", await create()), code("passkey_required"), "a stolen server cannot add its own device");
   await assert.rejects(signer.addPasskey("alice", await create(), await approveAction(signer, "alice", thief, "addkey")), code("bad_assertion"), "the thief's own phone is not a passkey on this account");
   await signer.addPasskey("alice", await create(), await approveAction(signer, "alice", mine, "addkey"));
@@ -183,7 +183,7 @@ test("passkey: strict mode makes even a tiny payment need the passkey, and only 
 test("passkey: locking needs nothing, unlocking needs the passkey, and a locked wallet signs nothing", async () => {
   const signer = setup(open), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
   const tx = pay(me, "bob.near", "100");
-  signer.lock("alice");
+  await signer.lock("alice");
   await assert.rejects(signer.sign("alice", encodeTransaction(tx)), code("locked"));
   await assert.rejects(signer.sign("alice", encodeTransaction(tx), await approve(signer, "alice", ph, tx)), code("locked"), "not even with a passkey");
   await assert.rejects(signer.unlock("alice", await approveAction(signer, "alice", phone(), "unlock")), code("bad_assertion"));
@@ -228,4 +228,75 @@ test("signer: over HTTP, through the remote signer and the passkey calls", async
     await api.lock("alice");
     assert.equal((await api.status("alice")).locked, true);
   } finally { server.close(); }
+});
+
+/** A store that can be told to fail, or to answer with an older copy, like a rolled-back disk or a lagging node. */
+class Flaky implements StateStore {
+  failSave = false; stale: Versioned | undefined;
+  constructor(readonly inner: MemoryStateStore) {}
+  async load(user: string) { return this.stale ?? this.inner.load(user); }
+  async save(user: string, state: UserState, v: number) { if (this.failSave) throw new Refused("state_unavailable", "down"); return this.inner.save(user, state, v); }
+}
+
+test("state: a restart keeps passkeys, locks and the day's totals, because they are on record, not in memory", async () => {
+  const store = new MemoryStateStore();
+  const a = setup(small, undefined, 0, store), me = await a.pubkey("alice"), ph = await enrol(a, "alice");
+  await a.sign("alice", encodeTransaction(pay(me, "bob.near", "1000000")));
+  await a.setStrict("alice", true, await approveAction(a, "alice", ph, "strict:on"));
+  await a.lock("alice");
+  const b = setup(small, undefined, 0, store); // a fresh signer process over the same record
+  const st = await b.status("alice");
+  assert.deepEqual([st.passkeys.length, st.active, st.strict, st.locked], [1, true, true, true]);
+  await assert.rejects(b.sign("alice", encodeTransaction(pay(me, "bob.near", "1"))), code("locked"));
+});
+
+test("state: the free allowance used today is remembered after a restart", async () => {
+  const store = new MemoryStateStore();
+  const me = await setup().pubkey("alice");
+  await setup(small, undefined, 0, store).sign("alice", encodeTransaction(pay(me, "bob.near", "1000000")));
+  await assert.rejects(setup(small, undefined, 0, store).sign("alice", encodeTransaction(pay(me, "bob.near", "1"))), code("passkey_required"), "a restart does not hand back the free allowance");
+});
+
+test("state: an older copy of the record cannot reset a limit, and nothing is signed", async () => {
+  const flaky = new Flaky(new MemoryStateStore());
+  const signer = setup(open, undefined, 0, flaky), me = await signer.pubkey("alice");
+  const old = await flaky.load("alice"); // version 0: nothing spent yet
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "50000000")));
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "50000000")));
+  flaky.stale = old; // the host serves the state from before those two payments
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "50000000"))), code("state_unavailable"), "the write is refused, so there is no signature");
+});
+
+test("state: if the record cannot be saved, nothing is signed", async () => {
+  const flaky = new Flaky(new MemoryStateStore());
+  const signer = setup(open, undefined, 0, flaky), me = await signer.pubkey("alice");
+  flaky.failSave = true;
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "1"))), code("state_unavailable"));
+  flaky.failSave = false;
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "1")));
+});
+
+test("state: payments sent at the same moment cannot beat the daily limit", async () => {
+  const signer = setup(), me = await signer.pubkey("alice");
+  const go = () => signer.sign("alice", encodeTransaction(pay(me, "bob.near", "50000000"))).then(() => "ok", () => "refused");
+  const results = await Promise.all([go(), go(), go(), go(), go()]);
+  assert.equal(results.filter((r) => r === "ok").length, 2, "the daily limit is 100 USDC, so two of 50");
+});
+
+test("state: the signer's own writer account is reserved and cannot be asked for as a user", async () => {
+  const signer = setup();
+  assert.ok((await signer.writer()).accountId.length === 64);
+  await assert.rejects(signer.pubkey("__state-writer__"), (e) => e instanceof Refused);
+});
+
+test("state: the on-chain store reads what the contract returns, and any trouble means no signing", async () => {
+  const provider = (answer: () => unknown) => ({ callFunction: async () => answer() }) as never;
+  const none = new NearStateStore("state.near", provider(() => null), "w", "ed25519:x");
+  assert.deepEqual(await none.load("alice"), { state: { credentials: [], activeAt: 0, strict: false, locked: false, total: { day: "", used: {} }, free: { day: "", used: {} } }, version: 0 });
+  const some = new NearStateStore("state.near", provider(() => ({ version: 3, state: JSON.stringify({ credentials: [], activeAt: 0, strict: true, locked: false, total: { day: "d", used: {} }, free: { day: "d", used: {} } }) })), "w", "ed25519:x");
+  const got = await some.load("alice");
+  assert.equal(got.version, 3); assert.equal(got.state.strict, true);
+  for (const bad of [() => { throw new Error("rpc down"); }, () => ({ version: "x", state: 1 }), () => ({ version: 1, state: "{not json" })]) {
+    await assert.rejects(new NearStateStore("state.near", provider(bad), "w", "ed25519:x").load("alice"), code("state_unavailable"));
+  }
 });

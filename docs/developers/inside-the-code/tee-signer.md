@@ -50,9 +50,13 @@ A passkey proves the owner's device approved a payment, not that the owner read 
 
 The signer's disk can be rolled back by the host operator, so rules and counters cannot live only on it.
 
-- Passkey public keys, limits, daily totals and the lock flag are anchored in the NEAR guard contract (`contracts/guard`).
-- The signer reads them before every signature and writes the new totals after.
-- If it cannot reach the contract, it refuses to sign.
+- Passkey public keys and counters, strict mode, the lock flag and today's totals (all payments, and the part sent with no passkey) are kept in a small NEAR contract, `contracts/signer-state`. The existing `contracts/guard` is a different design (it holds funds and limits an agent), so it is not used for this.
+- The contract stores one opaque string per user with a version. Only the signer's writer account can write, and a write must name the version it last read.
+- For every call the signer reads the user's record fresh, then, **before it signs**, writes the new totals. If the write fails or the version is stale, nothing is signed. A restart, a rolled-back disk or a lagging RPC therefore cannot hand back a spent limit.
+- Calls for one user run one at a time, so payments sent together cannot both slip under the daily cap.
+- The contract does not enforce limits itself, because signing happens off chain. The limits are enforced by the signer's code, which the on-chain key service only releases the key to when its hash is approved.
+- Cost: about 0.01 to 0.02 NEAR of storage per user, held by the contract account, and one small transaction per signature from the signer's writer account.
+- If the chain cannot be reached, the signer refuses to sign. That is the safe failure, and it means NEAR RPC outages stop payments.
 
 ## Known limits
 
@@ -67,7 +71,7 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 2. Add a `Signer` interface to `NearOps` so write calls take a key reference instead of a raw secret.
 3. Build the signer service and its tests with a local stand-in for the dstack socket. (Done: `src/signer/`, with tests in `tests/unit/signer.test.ts`. Not deployed.)
 4. Passkey verification, strict mode, lock and the unattended allowance inside the signer. (Done, with tests. State is in memory until step 5.)
-5. Anchor passkeys and limits in `contracts/guard`.
+5. Anchor passkeys and limits on chain. (Done: `contracts/signer-state` and `src/signer/state.ts`, tested against an in-memory store and a fake reader. Not deployed, so the real write path has not run against a chain.)
 6. Build the image in CI and pin it by digest. Deploy with on-chain KMS.
 7. Prove unapproved code gets no key.
 8. Migrate existing wallets.

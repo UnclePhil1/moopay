@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, AuthenticatorTransport, PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { Refused, type Outflow } from "./policy.js";
+import type { UserState } from "./state.js";
 
 /*
  * Passkeys inside the signer.
@@ -14,17 +15,6 @@ import { Refused, type Outflow } from "./policy.js";
  * What this does not cover: if the page the user is looking at is itself altered by an attacker who controls the MooPay
  * server, it can show one payment and sign another. A passkey proves "the owner's device approved this", not "the owner read it".
  */
-export interface Credential { id: string; publicKey: string; counter: number; transports?: string[]; at: number }
-export interface UserState {
-  credentials: Credential[];
-  /** Until this time (ms) the first passkey is not yet in force, so a thief who registers one cannot use it at once. */
-  activeAt: number;
-  /** Every payment needs a passkey signature, however small. */
-  strict: boolean;
-  /** Nothing is signed until the passkey unlocks it. */
-  locked: boolean;
-}
-
 export type Action = "addkey" | "strict:on" | "strict:off" | "unlock";
 
 const TTL = 5 * 60_000;
@@ -41,24 +31,18 @@ export const paymentChallenge = (userId: string, nonce: string, flows: Pick<Outf
 export const actionChallenge = (userId: string, nonce: string, action: Action): string => sha(`moopay.action.v1|${userId}|${nonce}|${action}`);
 
 export class SignerPasskeys {
-  private readonly users = new Map<string, UserState>();
   private readonly nonces = new Map<string, { user: string; exp: number }>();
   private readonly regs = new Map<string, { user: string; exp: number }>();
 
   constructor(private readonly origin: string, private readonly delayMs = 24 * 3600_000, private readonly now: () => number = Date.now) {}
 
   private get rpID(): string { return new URL(this.origin).hostname; }
-  state(user: string): UserState {
-    let s = this.users.get(user);
-    if (!s) { s = { credentials: [], activeAt: 0, strict: false, locked: false }; this.users.set(user, s); }
-    return s;
-  }
   /** True once the user has a passkey that is in force. */
-  active(user: string): boolean { const s = this.state(user); return s.credentials.length > 0 && this.now() >= s.activeAt; }
-  pending(user: string): boolean { const s = this.state(user); return s.credentials.length > 0 && this.now() < s.activeAt; }
-  list(user: string) { return this.state(user).credentials.map((c) => ({ id: c.id, ...(c.transports ? { transports: c.transports } : {}) })); }
+  active(s: UserState): boolean { return s.credentials.length > 0 && this.now() >= s.activeAt; }
+  pending(s: UserState): boolean { return s.credentials.length > 0 && this.now() < s.activeAt; }
+  list(s: UserState) { return s.credentials.map((c) => ({ id: c.id, ...(c.transports ? { transports: c.transports } : {}) })); }
 
-  /** A fresh one-time nonce. The browser hashes it with what it is about to sign. */
+  /** A fresh one-time nonce. The browser hashes it with what it is about to sign. Nonces live in memory only: a restart voids them, which is safe. */
   nonce(user: string): string {
     for (const [k, v] of this.nonces) if (v.exp < this.now()) this.nonces.delete(k);
     const n = randomBytes(18).toString("base64url");
@@ -70,9 +54,8 @@ export class SignerPasskeys {
     return !!v && v.user === user && v.exp >= this.now();
   }
 
-  /** Checks a passkey signature against the challenge the signer computes itself. Spends the nonce either way. */
-  private async check(user: string, nonce: string, challenge: string, response: AuthenticationResponseJSON | undefined): Promise<void> {
-    const s = this.state(user);
+  /** Checks a passkey signature against the challenge the signer computes itself, and moves the counter. Spends the nonce either way. */
+  private async check(s: UserState, user: string, nonce: string, challenge: string, response: AuthenticationResponseJSON | undefined): Promise<void> {
     const key = response && s.credentials.find((c) => c.id === response.id);
     const ok = this.take(this.nonces, nonce, user);
     if (!ok || !response || !key) throw new Refused("bad_assertion", "That fingerprint or face did not match. Nothing was sent. Please try again.");
@@ -86,16 +69,15 @@ export class SignerPasskeys {
     } catch { throw new Refused("bad_assertion", "That fingerprint or face did not match. Nothing was sent. Please try again."); }
   }
 
-  async verifyPayment(user: string, nonce: string, flows: Outflow[], response: AuthenticationResponseJSON | undefined): Promise<void> {
-    return this.check(user, nonce, paymentChallenge(user, nonce, flows), response);
+  verifyPayment(s: UserState, user: string, nonce: string, flows: Outflow[], response: AuthenticationResponseJSON | undefined): Promise<void> {
+    return this.check(s, user, nonce, paymentChallenge(user, nonce, flows), response);
   }
-  async verifyAction(user: string, nonce: string, action: Action, response: AuthenticationResponseJSON | undefined): Promise<void> {
-    return this.check(user, nonce, actionChallenge(user, nonce, action), response);
+  verifyAction(s: UserState, user: string, nonce: string, action: Action, response: AuthenticationResponseJSON | undefined): Promise<void> {
+    return this.check(s, user, nonce, actionChallenge(user, nonce, action), response);
   }
 
-  /** Options for the browser to create a passkey. The first one waits `delayMs` before it counts; further ones need an existing passkey's approval. */
-  async registerOptions(user: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
-    const s = this.state(user);
+  /** Options for the browser to create a passkey. */
+  async registerOptions(s: UserState, user: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
     const o = await generateRegistrationOptions({
       rpName: "MooPay", rpID: this.rpID, userName: "MooPay wallet", userDisplayName: "MooPay wallet", userID: createHash("sha256").update("moopay.user|" + user).digest(),
       attestationType: "none", authenticatorSelection: { residentKey: "required", userVerification: "required" },
@@ -107,11 +89,10 @@ export class SignerPasskeys {
   }
 
   /**
-   * Saves a new passkey. With none yet, it is saved and starts counting after the delay; with one already in force, the caller must
-   * have passed `verifyAction(.., "addkey")` first (the route does that), so a stolen server cannot enrol its own device.
+   * Adds a new passkey to `s`. With none yet, it starts counting after the delay; with one already, the caller must have passed
+   * `verifyAction(.., "addkey")` first, so a stolen server cannot enrol its own device.
    */
-  async register(user: string, response: RegistrationResponseJSON): Promise<{ activeAt: number }> {
-    const s = this.state(user);
+  async register(s: UserState, user: string, response: RegistrationResponseJSON): Promise<void> {
     let v;
     try { v = await verifyRegistrationResponse({ response, expectedChallenge: (c) => this.take(this.regs, c, user), expectedOrigin: this.origin, expectedRPID: this.rpID, requireUserVerification: true }); }
     catch { throw new Refused("bad_assertion", "I couldn't save that passkey. Please try again."); }
@@ -120,6 +101,5 @@ export class SignerPasskeys {
     const first = s.credentials.length === 0;
     s.credentials = [...s.credentials, { id: c.id, publicKey: b64(c.publicKey), counter: c.counter, ...(c.transports ? { transports: c.transports } : {}), at: this.now() }].slice(-5);
     if (first) s.activeAt = this.now() + this.delayMs;
-    return { activeAt: s.activeAt };
   }
 }

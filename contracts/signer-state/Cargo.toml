@@ -1,0 +1,24 @@
+[package]
+name = "moopay-signer-state"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "On-chain record of the MooPay TEE signer's per-user state (passkeys, strict mode, lock, daily totals), so a rolled-back disk cannot reset it."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "=5.15.1"
+
+[dev-dependencies]
+near-sdk = { version = "=5.15.1", features = ["unit-testing"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true

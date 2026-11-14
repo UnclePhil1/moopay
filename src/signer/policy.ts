@@ -17,7 +17,7 @@ const CALLS = new Set(["ft_transfer", "near_deposit", "near_withdraw", "storage_
 const big = (v: unknown): bigint => { try { return BigInt(String(v)); } catch { return -1n; } };
 
 export class Refused extends Error {
-  constructor(readonly code: "forbidden_action" | "unknown_asset" | "over_limit" | "bad_transaction" | "passkey_required" | "bad_assertion" | "locked", message: string) { super(message); }
+  constructor(readonly code: "forbidden_action" | "unknown_asset" | "over_limit" | "bad_transaction" | "passkey_required" | "bad_assertion" | "locked" | "state_unavailable", message: string) { super(message); }
 }
 
 /** Reads an unsigned transaction and lists every outflow, or refuses it. */
@@ -57,24 +57,21 @@ export function inspect(bytes: Uint8Array): { signerId: string; publicKey: strin
   return { signerId: tx.signerId, publicKey: tx.publicKey.toString(), outflows };
 }
 
-/** Per-user running totals for the current day (UTC). Kept in memory for now; step 5 anchors them on chain. */
-export class Ledger {
-  private readonly days = new Map<string, { day: string; total: bigint }>();
-  constructor(private readonly now: () => number = Date.now) {}
-  private day(): string { return new Date(this.now()).toISOString().slice(0, 10); }
-  used(user: string, asset: string): bigint {
-    const e = this.days.get(user + "|" + asset);
-    return e && e.day === this.day() ? e.total : 0n;
+/** A day's running totals for one user, as stored on chain. It starts again when the UTC day changes. */
+export interface TallyData { day: string; used: Record<string, string> }
+export const emptyTally = (): TallyData => ({ day: "", used: {} });
+
+export class Tally {
+  constructor(private readonly d: TallyData, private readonly now: () => number = Date.now) {
+    const today = new Date(this.now()).toISOString().slice(0, 10);
+    if (d.day !== today) { d.day = today; d.used = {}; }
   }
-  add(user: string, asset: string, amount: bigint): void {
-    this.days.set(user + "|" + asset, { day: this.day(), total: this.used(user, asset) + amount });
-  }
+  used(asset: string): bigint { return BigInt(this.d.used[asset] ?? "0"); }
+  add(asset: string, amount: bigint): void { this.d.used[asset] = (this.used(asset) + amount).toString(); }
 }
 
 /** Throws unless every outflow is within the caps. Nothing is recorded here, so a refusal leaves the totals alone. */
-export function checkCaps(policy: SignerPolicy, ledger: Ledger, user: string, outflows: Outflow[]): void { withinCaps(policy.caps, ledger, user, outflows); }
-
-export function withinCaps(caps: Record<string, Cap>, ledger: Ledger, user: string, outflows: Outflow[]): void {
+export function withinCaps(caps: Record<string, Cap>, tally: Pick<Tally, "used">, outflows: Outflow[]): void {
   const sum = new Map<string, bigint>();
   for (const o of outflows) {
     const cap = caps[o.asset];
@@ -84,6 +81,6 @@ export function withinCaps(caps: Record<string, Cap>, ledger: Ledger, user: stri
   }
   for (const [asset, amount] of sum) {
     const cap = caps[asset]!;
-    if (ledger.used(user, asset) + amount > cap.daily) throw new Refused("over_limit", `that would pass the daily ${asset} limit`);
+    if (tally.used(asset) + amount > cap.daily) throw new Refused("over_limit", `that would pass the daily ${asset} limit`);
   }
 }
