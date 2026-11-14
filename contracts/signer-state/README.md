@@ -2,7 +2,7 @@
 
 The on-chain record for the TEE signer (`src/signer/`). It keeps each user's passkeys, strict-mode flag, lock flag and today's totals, so the host that runs the enclave cannot roll the enclave's disk back and reset a limit.
 
-**Status: written and unit tested (11 tests), builds to wasm. Not deployed, not audited, not used by the live app yet.**
+**Status: written, unit tested (11 tests), and exercised on NEAR testnet through the signer's real store. Not on mainnet, not audited, not used by the live app yet.**
 
 ## What it does
 

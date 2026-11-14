@@ -61,7 +61,7 @@ export class NearStateStore implements StateStore {
 
   async load(user: string): Promise<Versioned> {
     let entry: unknown;
-    try { entry = await this.provider.callFunction({ contractId: this.contractId, method: "get", args: { user } }); } catch { throw unavailable(); }
+    try { entry = await this.provider.callFunction({ contractId: this.contractId, method: "get", args: { user } }); } catch (e) { if (process.env["SIGNER_DEBUG"]) console.error("[state.load]", String(e).slice(0, 300)); throw unavailable(); }
     if (entry === null || entry === undefined) return { state: newUser(), version: 0 };
     const e = entry as { version?: unknown; state?: unknown };
     if (typeof e.version !== "number" || typeof e.state !== "string") throw unavailable();
@@ -77,6 +77,6 @@ export class NearStateStore implements StateStore {
       const status = (out as unknown as { status?: unknown }).status;
       if (status && typeof status === "object" && "Failure" in (status as object)) throw new Error("failed");
       return expectedVersion + 1;
-    } catch { throw unavailable(); }
+    } catch (e) { if (process.env['SIGNER_DEBUG']) console.error('[state.save]', e); throw unavailable(); }
   }
 }
