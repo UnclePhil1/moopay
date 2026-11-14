@@ -42,7 +42,7 @@ export interface Payment {
   /** a private-route payment in progress (beta): `amt` in USDC units, `idem` makes a retried payout safe */
   pv?: { step: "funding" | "swapping" | "paying"; amt: string; idem: string; req?: string; /** where it goes: the OutLayer chain id and the token that leaves the private balance; swapTo and minOut when the receiver's coin is not USDC */ out: { chain: string; token: string; swapTo?: string; minOut?: string } };
 }
-export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim" | "schedule" | "schedulegroup"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; /** looked unusual (a drain, a burst): needs a passkey whatever the user's toggles say */ strong?: boolean; /** the X post that started this, so the outcome is answered there */ tweet?: string; /** fee and total lines shown on the card */ rows?: [string, string][]; pf?: Preflight }
+export interface Approval { id: string; kind: "send" | "claim" | "rules" | "withdraw" | "stake" | "batch" | "groupclaim" | "schedule" | "schedulegroup"; params: Record<string, unknown>; summary: string; reason: string; createdAt: number; status: "pending" | "approved" | "declined" | "expired"; /** looked unusual (a drain, a burst): needs a passkey whatever the user's toggles say */ strong?: boolean; /** the X post that started this, so the outcome is answered there */ tweet?: string; /** fee and total lines shown on the card */ rows?: [string, string][]; pf?: Preflight; /** for an account whose key is in the signer: the exact payments this approval will make, as the passkey signs them (amount in the smallest unit) */ flows?: { asset: string; to: string; amount: string }[] }
 /** One line of a group payout: where it goes, in what, and how much (dollars or coins). */
 export interface GroupItem { chain: string; recipient: string; amountUsd?: string; amount?: string; assetSymbol?: string }
 export interface Task { id: string; amountUsd: number; chain: string; recipient: string; assetSymbol?: string; items?: GroupItem[]; every: "day" | "week" | "month"; nextAt: number; text: string }
@@ -72,7 +72,7 @@ export interface UserRec {
   /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
   outlayer?: { key: string; account: string };
   /** Set when this wallet's key lives in the TEE signer, not on this server. Only the public key is kept here. */
-  tee?: { publicKey: string };
+  tee?: { publicKey: string; /** mirrored from the signer: a passkey is in force */ passkey?: boolean; /** mirrored from the signer: strict mode */ strict?: boolean };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
   points?: number;
   /** the name the user chose; their wallet address is then <name>.<parent account> */
@@ -139,6 +139,8 @@ export class AgentStore {
   private pendingTee = new Map<string, { accountId: string; publicKey: string }>();
   useSigner(cfg: { url: string; token: string } | undefined): void { this.signerCfg = cfg; }
   get usesSigner(): boolean { return !!this.signerCfg; }
+  /** The signer's account calls (passkeys, nonces, mandates), or undefined when none is set. */
+  signerApi(): SignerApi | undefined { return this.signerCfg ? new SignerApi(this.signerCfg.url, this.signerCfg.token) : undefined; }
 
   /** Before a brand-new account is made, ask the signer for its address. Does nothing for known accounts or when no signer is set. */
   async prepare(token: string): Promise<void> {

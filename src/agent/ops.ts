@@ -89,9 +89,9 @@ export function approvalCard(a: Approval): Record<string, unknown> {
   ];
   if (Array.isArray(p["items"])) { // a group: every line is listed in full
     const lines = (p["items"] as Record<string, unknown>[]).map((i): [string, string] => [String(i["recipient"] ?? i["receiver"]), `${i["amountUsd"] ? "$" + i["amountUsd"] : `${i["amount"]} ${i["assetSymbol"] ?? ""}`.trim()} (${String(i["chain"] ?? "near").toUpperCase()}${i["assetSymbol"] && i["amountUsd"] ? " " + String(i["assetSymbol"]).toUpperCase() : ""})`]);
-    return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...lines, ...(str("every") ? [["Repeats", `every ${str("every")}`] as [string, string]] : []), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}) };
+    return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...lines, ...(str("every") ? [["Repeats", `every ${str("every")}`] as [string, string]] : []), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}), ...(a.flows ? { flows: a.flows } : {}) };
   }
-  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...rows.filter((r): r is [string, string] => Boolean(r[1])), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}), ...(a.pf ? { preflight: a.pf } : {}) };
+  return { kind: "approval", id: a.id, summary: a.summary, reason: a.reason, details: [...rows.filter((r): r is [string, string] => Boolean(r[1])), ...(a.rows ?? [])], ...(a.strong ? { passkey: true } : {}), ...(a.flows ? { flows: a.flows } : {}), ...(a.pf ? { preflight: a.pf } : {}) };
 }
 
 export class AgentOps {
@@ -317,7 +317,9 @@ export class AgentOps {
     const bio = this.bio(u, ctx, who);
     if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
-    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio);
+    // For an account whose key is in the signer, a direct NEAR send lists exactly what the passkey will sign: this asset, to this wallet, this much.
+    const flows = u.tee && !priv && direct ? [{ asset: direct === "near" ? "NEAR" : direct === "usdc" ? usdc.contract : dest.contractAddress!, to: p.recipient, amount: (direct === "near" ? nearUnits : direct === "usdc" ? units : destUnits).toString() }] : undefined;
+    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio, undefined, flows);
     let pay: Payment;
     try {
       pay = priv ? await this.doPrivate(u, usdc, p, chain, sym, dest, destUnits, units, amt, who.ak) : direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
@@ -753,8 +755,8 @@ export class AgentOps {
   }
   cancel(u: UserRec, taskId: string): Out { u.tasks = u.tasks.filter((t) => t.id !== taskId); this.store.save(); return { result: { status: "cancelled" } }; }
 
-  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight, strong = false, rows?: [string, string][]): Out {
-    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(strong ? { strong } : {}), ...(rows ? { rows } : {}), ...(pf ? { pf } : {}) };
+  private ask(u: UserRec, kind: Approval["kind"], params: Record<string, unknown>, summary: string, reason: string, pf?: Preflight, strong = false, rows?: [string, string][], flows?: Approval["flows"]): Out {
+    const a: Approval = { id: id(), kind, params, summary, reason, createdAt: this.now(), status: "pending", ...(strong ? { strong } : {}), ...(rows ? { rows } : {}), ...(pf ? { pf } : {}), ...(flows?.length ? { flows } : {}) };
     u.approvals.push(a); this.store.save();
     return { result: { status: "needs_approval", approvalId: a.id, reason, note: "An approval card was shown. Tell the user briefly why and wait." }, card: approvalCard(a) };
   }

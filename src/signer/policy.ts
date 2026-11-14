@@ -7,6 +7,26 @@ export interface SignerPolicy {
   caps: Record<string, Cap>;
   /** What may be signed with no passkey signature: the whole allowance for an account without a passkey, and for scheduled runs. Unlisted assets always need one. */
   unattended: Record<string, Cap>;
+  /** MooPay's own fee account. Fee transfers to it are taken after a payment lands, with nobody there to sign, so they get their own small allowance. */
+  feeAccount?: string;
+  feeCaps?: Record<string, Cap>;
+}
+
+/** One payment a passkey signature approves: this asset, this recipient, up to this amount. */
+export interface Flow { asset: string; to: string; amount: bigint }
+/** What a passkey signature allows for a while. `left` shrinks as transactions use it. */
+export interface Mandate { exp: number; allow: { asset: string; to: string; left: string }[] }
+
+/** Returns the mandate with `outflows` taken out of it, or null when they are not all covered. Does not change the input. */
+export function useMandate(m: Mandate | undefined, outflows: Outflow[], now: number): Mandate | null {
+  if (!m || m.exp < now) return null;
+  const allow = m.allow.map((a) => ({ ...a }));
+  for (const o of outflows) {
+    const slot = allow.find((a) => a.asset === o.asset && a.to === o.to && BigInt(a.left) >= o.amount);
+    if (!slot) return null;
+    slot.left = (BigInt(slot.left) - o.amount).toString();
+  }
+  return { exp: m.exp, allow };
 }
 
 /** One thing a transaction would take out of the wallet. */

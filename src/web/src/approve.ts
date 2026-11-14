@@ -1,4 +1,5 @@
 import { startAuthentication } from "@simplewebauthn/browser";
+import { describeFlow, signerChallenge, type PayFlow, type SignerPrompt } from "./signer-challenge.js";
 
 /*
  * The one-tap signing sheet that the X reply links to. It shows what will be paid, then asks the device for a fingerprint, face
@@ -19,7 +20,10 @@ async function approve(): Promise<void> {
   if (busy) return; busy = true; $("go").hidden = true;
   try {
     say("Waiting for your fingerprint, face or PIN…");
-    const options = (await api("/options", {})) as unknown as Parameters<typeof startAuthentication>[0]["optionsJSON"];
+    const raw = (await api("/options", {})) as Record<string, unknown>;
+    const prompt = raw["signer"] as SignerPrompt | undefined;
+    // An account whose key is in the signer: the challenge is built here from the payment shown, not handed over by the server.
+    const options = (prompt ? { challenge: await signerChallenge(prompt), rpId: prompt.rpId, allowCredentials: prompt.allowCredentials, userVerification: "required", timeout: 120_000 } : raw) as unknown as Parameters<typeof startAuthentication>[0]["optionsJSON"];
     // Some phones fail with "unknown error while talking to the credential manager" when asked for one named key. Asking again with no
     // name lets the phone offer whichever MooPay passkey it holds, which works because the passkey is a discoverable one.
     const assertion = await startAuthentication({ optionsJSON: options }).catch(async (e: unknown) => {
@@ -28,7 +32,7 @@ async function approve(): Promise<void> {
       return startAuthentication({ optionsJSON: open as unknown as Parameters<typeof startAuthentication>[0]["optionsJSON"] });
     });
     say("Sending…");
-    const r = await api("/approve", { assertion });
+    const r = await api("/approve", { assertion: prompt ? { ...assertion, moopayNonce: prompt.nonce } : assertion });
     $("card").hidden = true;
     say(r["status"] === "sent" || r["status"] === "group_done" || r["status"] === "created" ? "Done. You can close this page." : String(r["reason"] ?? "It was not sent."), r["status"] === "sent" || r["status"] === "group_done" || r["status"] === "created" ? "ok" : "bad");
   } catch (e) {
@@ -54,6 +58,9 @@ api("").then((s) => {
     const row = document.createElement("div"); row.className = "row";
     const a = document.createElement("span"), b = document.createElement("b"); a.textContent = k; b.textContent = v; row.append(a, b); rows.append(row);
   }
+  // For an account whose key is in the signer, say plainly what the passkey will approve, worked out here from the same list that is signed.
+  const flows = s["flows"] as PayFlow[] | undefined;
+  if (flows?.length) { const row = document.createElement("div"); row.className = "row"; const a = document.createElement("span"), b = document.createElement("b"); a.textContent = "Your passkey approves"; b.textContent = flows.map(describeFlow).join("; "); row.append(a, b); rows.append(row); }
   $("card").hidden = false;
   void approve(); // one tap: the sheet opens straight away
 }).catch((e: unknown) => say(e instanceof Error ? e.message : "This approval is not available.", "bad"));

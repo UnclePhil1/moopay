@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, AuthenticatorTransport, PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { Refused, type Outflow } from "./policy.js";
+import { Refused, type Flow, type Outflow } from "./policy.js";
 import type { UserState } from "./state.js";
 
 /*
@@ -28,6 +28,9 @@ export const paymentText = (flows: Pick<Outflow, "asset" | "amount" | "to" | "me
 
 /** The challenge a passkey signs for a payment. Exported so the browser code can match it byte for byte. */
 export const paymentChallenge = (userId: string, nonce: string, flows: Pick<Outflow, "asset" | "amount" | "to" | "method">[]): string => sha(`moopay.pay.v1|${userId}|${nonce}|${paymentText(flows)}`);
+/** The text a mandate is reduced to: each payment as asset, amount, recipient. The browser must produce the identical text. */
+export const flowsText = (flows: Pick<Flow, "asset" | "amount" | "to">[]): string => flows.map((f) => [f.asset, f.amount.toString(), f.to].join(" ")).sort().join("\n");
+export const mandateChallenge = (userId: string, nonce: string, flows: Pick<Flow, "asset" | "amount" | "to">[]): string => sha(`moopay.mandate.v1|${userId}|${nonce}|${flowsText(flows)}`);
 export const actionChallenge = (userId: string, nonce: string, action: Action): string => sha(`moopay.action.v1|${userId}|${nonce}|${action}`);
 
 export class SignerPasskeys {
@@ -71,6 +74,9 @@ export class SignerPasskeys {
 
   verifyPayment(s: UserState, user: string, nonce: string, flows: Outflow[], response: AuthenticationResponseJSON | undefined): Promise<void> {
     return this.check(s, user, nonce, paymentChallenge(user, nonce, flows), response);
+  }
+  verifyMandate(s: UserState, user: string, nonce: string, flows: Flow[], response: AuthenticationResponseJSON | undefined): Promise<void> {
+    return this.check(s, user, nonce, mandateChallenge(user, nonce, flows), response);
   }
   verifyAction(s: UserState, user: string, nonce: string, action: Action, response: AuthenticationResponseJSON | undefined): Promise<void> {
     return this.check(s, user, nonce, actionChallenge(user, nonce, action), response);

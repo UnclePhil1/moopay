@@ -367,7 +367,7 @@ function preflight(p) {
 }
 function approvalCard(c) {
   const ok = h("button", { class: "btn" }, "Confirm"), no = h("button", { class: "btn ghost" }, "Decline");
-  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), c.preflight ? preflight(c.preflight) : null, (c.details || []).map(([k, v]) => h("div", { class: "row" }, h("span", {}, k), h("b", { style: "word-break:break-all;text-align:right;max-width:70%" }, v))), h("div", { class: "btns" }, ok, no));
+  const el = h("div", { class: "card" }, h("div", { class: "sub" }, "Needs your OK"), h("h3", {}, c.summary), h("div", { class: "sub", style: "margin-top:4px" }, c.reason), c.preflight ? preflight(c.preflight) : null, c.flows ? h("div", { class: "sub", style: "margin-top:6px" }, h("b", {}, "Your passkey approves: "), window.moopayPasskey.describe(c.flows).join("; ")) : null, (c.details || []).map(([k, v]) => h("div", { class: "row" }, h("span", {}, k), h("b", { style: "word-break:break-all;text-align:right;max-width:70%" }, v))), h("div", { class: "btns" }, ok, no));
   const act = async (yes) => {
     ok.disabled = no.disabled = true; el.style.opacity = ".7"; work(true, yes ? "Working…" : "Cancelling");
     try {
@@ -502,10 +502,11 @@ function passkeyWords(e) {
   if (e && e.name === "NotSupportedError" || e && e.name === "SecurityError") return "This browser can't use passkeys on this page. Try Chrome, Safari or Edge on the real site.";
   return (e && e.message && !/^The operation|webauthn/i.test(e.message)) ? e.message : "I couldn't use your passkey. Please try again.";
 }
-async function strong(purpose) {
-  const r = await post("passkey/options", { purpose });
+async function strong(purpose, extra) {
+  const r = await post("passkey/options", { purpose, ...extra });
   if (!r.required) return undefined;
-  try { return await window.moopayPasskey.assert(r.options); }
+  // r.signer: an account whose key is in the signer. The page builds the challenge from the payment it shows (see signer-challenge.ts).
+  try { return r.signer ? await window.moopayPasskey.signer(r.signer) : await window.moopayPasskey.assert(r.options); }
   catch (e) { throw new Error(passkeyWords(e)); }
 }
 async function addPasskey() {
@@ -534,7 +535,7 @@ async function toggleBio(door) {
     const st = await (await api("passkey/status")).json();
     if (!st.count) return void (clearEmpty(), await say(agent(), "Add a passkey first. Type /passkey."));
     const next = !st.bio[door], name = door === "x" ? "X" : "this app";
-    const assertion = await strong("toggle");
+    const assertion = await strong("toggle", { on: next });
     await post("passkey/toggle", { [door]: next, ...(assertion ? { assertion } : {}) });
     clearEmpty(); await say(agent(), next ? `Passkey approval is on for ${name}.` : `Passkey approval is off for ${name}. Payments that look unusual still ask for it. Type /biometrics-${door} to turn it back on.`);
   } catch (e) { await fail(e, "I couldn't change that."); }

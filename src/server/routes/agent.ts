@@ -12,6 +12,7 @@ import { haltScope, setHalt, XBurst, type HaltScope } from "../../security/halt.
 import { auditorOn } from "../../security/guard.js";
 import { sealBackup } from "../../agent/recovery.js";
 import { hasPasskey, needsPasskey, Passkeys } from "../../security/passkeys.js";
+import { Tee } from "../tee.js";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { Vault } from "../../storage/index.js";
 import { clientIp, rateLimiter } from "../middleware/security.js";
@@ -43,6 +44,8 @@ export async function makeAgent(d: AgentDeps) {
   const model = d.model ?? "claude-sonnet-5-5";
   let lastOrigin = "http://localhost:3333";
   const passkeys = new Passkeys(now);
+  const tee = new Tee(store);
+  const rpOf = (origin: string): string => new URL(origin).hostname;
   /** A second model that must agree before money moves. Off with MOOPAY_AUDITOR=off. */
   const auditor = d.llm && auditorOn() ? { llm: d.llm as never, model: process.env["MOOPAY_AUDITOR_MODEL"]?.trim() || model } : undefined;
   /** The operator's switchboard: pause payments, lift the pause, read the security log. Needs MOOPAY_ADMIN_TOKEN; with none set the routes do not exist. */
@@ -138,11 +141,17 @@ export async function makeAgent(d: AgentDeps) {
       try {
         if (!hit?.a || hit.a.status !== "pending") throw new MoopayError("NOTE_NOT_FOUND", "This approval is no longer waiting. Nothing was sent.");
         const { u, a } = hit as { u: UserRec; a: NonNullable<typeof hit.a> };
+        if (u.tee) await tee.refresh(u);
         if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "This account has no passkey. Approve it in the MooPay app instead.");
-        if (!ok[3] && req.method === "GET") { json(res, 200, { summary: a.summary, reason: a.reason, details: (approvalCard(a)["details"] as unknown[]) ?? [] }); return true; }
-        if (ok[3] === "options" && req.method === "POST") { json(res, 200, await passkeys.options(u, origin, "approve:" + a.id)); return true; }
+        if (!ok[3] && req.method === "GET") { json(res, 200, { summary: a.summary, reason: a.reason, details: (approvalCard(a)["details"] as unknown[]) ?? [], ...(a.flows ? { flows: a.flows } : {}) }); return true; }
+        if (ok[3] === "options" && req.method === "POST") {
+          if (u.tee) { if (!a.flows?.length) throw new MoopayError("INVALID_INPUT", "This kind of payment can't be approved from a link yet. Approve it in the MooPay app instead."); json(res, 200, { signer: await tee.prompt(u, rpOf(origin), { kind: "mandate", flows: a.flows }) }); return true; }
+          json(res, 200, await passkeys.options(u, origin, "approve:" + a.id)); return true;
+        }
         if (ok[3] === "approve" && req.method === "POST") {
-          await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + a.id); store.save();
+          const body = await bodyOf(req);
+          if (u.tee) { if (!a.flows?.length) throw new MoopayError("INVALID_INPUT", "This kind of payment can't be approved from a link yet. Approve it in the MooPay app instead."); await tee.approve(u, a, body["assertion"]); }
+          else { await passkeys.verify(u, origin, body["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + a.id); store.save(); }
           const had = new Set(u.payments.map((x) => x.id));
           const out = await ops.resolve(u, a.id, true, { origin });
           ops.stampFees(u, had, X_FEE_BPS());
@@ -181,6 +190,7 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "export" && req.method === "POST") {
         needMaster("Showing your wallet key");
         if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
+        store.rawKeyOf(u); // refuses for an account whose key is in the secure signer, whatever passkeys it has
         // The key is the whole wallet, so showing it needs the owner's fingerprint, face or PIN, and an account with none must add one first.
         if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Set up biometrics first. Type /passkey, then ask for your key again.");
         await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "export"); store.save();
@@ -189,15 +199,25 @@ export async function makeAgent(d: AgentDeps) {
         json(res, 200, { accountId: k.accountId, secretKey: k.secretKey });
         return true;
       }
-      if (op === "passkey/status" && req.method === "GET") { json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true; }
+      if (op === "passkey/status" && req.method === "GET") {
+        if (u.tee) { const st = await tee.refresh(u); json(res, 200, { count: st.passkeys.length, active: st.active, pending: st.pending, activeAt: st.activeAt, bio: { web: st.strict, x: st.strict }, strict: st.strict, secure: true }); return true; }
+        json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true;
+      }
       if (op === "passkey/register-options" && req.method === "POST") {
         needMaster("Adding a passkey");
+        if (u.tee) { json(res, 200, await tee.api().registerOptions(u.id)); return true; }
         // With a passkey already set, adding another needs the first one, so a stolen recovery code cannot enrol the thief's own device.
         if (hasPasskey(u)) await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "addkey");
         json(res, 200, await passkeys.registerOptions(u, origin)); return true;
       }
       if (op === "passkey/register" && req.method === "POST") {
         needMaster("Adding a passkey");
+        if (u.tee) {
+          const b = await bodyOf(req), r = await tee.api().register(u.id, b["response"] as RegistrationResponseJSON, tee.proofOf(b["assertion"]));
+          const st = await tee.refresh(u);
+          security.add("passkey_added", { user: u.id.slice(0, 8), signer: true }, now()); store.event(u, "A passkey was added. It counts after a waiting period of " + Math.max(1, Math.round((r.activeAt - now()) / 3_600_000)) + " hours; until then only small payments can go."); store.save();
+          json(res, 200, { ok: true, count: st.passkeys.length, activeAt: r.activeAt }); return true;
+        }
         await passkeys.register(u, origin, (await bodyOf(req))["response"] as RegistrationResponseJSON);
         security.add("passkey_added", { user: u.id.slice(0, 8) }, now()); store.event(u, "A passkey was added. Payments that need your OK now ask for your fingerprint, face or device PIN."); store.save();
         json(res, 200, { ok: true, count: u.passkeys?.length ?? 0 }); return true;
@@ -206,10 +226,27 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "passkey/options" && req.method === "POST") {
         const b = await bodyOf(req), purpose = String(b["purpose"] ?? "");
         const ap = u.approvals.find((x) => x.id === purpose.replace(/^approve:/, ""));
+        if (u.tee) {
+          const st = await tee.refresh(u);
+          if (purpose.startsWith("approve:")) {
+            const needs = !!ap && ap.status === "pending" && !!ap.flows?.length && st.active;
+            json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "mandate", flows: ap!.flows! }) } : { required: false }); return true;
+          }
+          const action = purpose === "toggle" ? (b["on"] === false ? "strict:off" : "strict:on") : purpose === "unlock" ? "unlock" : purpose === "addkey" ? "addkey" : undefined;
+          const needs = !!action && (action === "addkey" ? st.passkeys.length > 0 : st.active);
+          json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: action! }) } : { required: false }); return true;
+        }
         const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
       }
       if (op === "passkey/toggle" && req.method === "POST") {
+        if (u.tee) {
+          const b = await bodyOf(req), on = b["web"] !== false && b["x"] !== false;
+          await tee.api().setStrict(u.id, on, tee.proofOf(b["assertion"]) ?? (() => { throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first."); })());
+          const st = await tee.refresh(u);
+          security.add("passkey_toggle", { user: u.id.slice(0, 8), strict: st.strict, signer: true }, now());
+          json(res, 200, { bio: { web: st.strict, x: st.strict } }); return true;
+        }
         const b = await bodyOf(req), want = { web: b["web"] === undefined ? undefined : b["web"] !== false, x: b["x"] === undefined ? undefined : b["x"] !== false };
         if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Add a passkey first. Type /passkey.");
         const cur = u.bio ?? { web: true, x: true };
@@ -234,7 +271,11 @@ export async function makeAgent(d: AgentDeps) {
       }
       if (op === "freeze" && req.method === "POST") {
         const b = await bodyOf(req), on = b["on"] !== false;
-        if (!on) { needMaster("Unfreezing"); if (hasPasskey(u)) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "unlock"); store.save(); } }
+        if (u.tee) { // the lock is the signer's, so a stolen server cannot lift it
+          if (on) await tee.api().lock(u.id);
+          else { needMaster("Unfreezing"); const proof = tee.proofOf(b["assertion"]); if (!proof) throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first."); await tee.api().unlock(u.id, proof); }
+        }
+        if (!on) { needMaster("Unfreezing"); if (hasPasskey(u) && !u.tee) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "unlock"); store.save(); } }
         u.frozen = on || undefined;
         store.event(u, on ? "Your account is frozen. Nothing can leave it until you type /unfreeze." : "Your account is unfrozen."); store.save();
         json(res, 200, { frozen: on });
@@ -283,7 +324,8 @@ export async function makeAgent(d: AgentDeps) {
         if (typeof b["id"] !== "string" || typeof b["approve"] !== "boolean") throw new MoopayError("INVALID_INPUT", "id and approve are required");
         const had = new Set(u.payments.map((p) => p.id));
         const ap = u.approvals.find((x) => x.id === b["id"]);
-        if (b["approve"] && ap?.status === "pending" && hasPasskey(u) && (ap.strong || needsPasskey(u, "web"))) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + ap.id); store.save(); }
+        if (u.tee && b["approve"] && ap?.status === "pending") await tee.approve(u, ap, b["assertion"]);
+        else if (b["approve"] && ap?.status === "pending" && hasPasskey(u) && (ap.strong || needsPasskey(u, "web"))) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + ap.id); store.save(); }
         const out = await ops.resolve(u, b["id"], b["approve"], ctx);
         ops.stampFees(u, had, CHAT_FEE_BPS());
         if (ap && b["approve"]) xDone(ap, out.result["status"]);

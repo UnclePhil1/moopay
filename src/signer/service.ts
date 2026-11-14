@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { deriveWallet, type KeySource } from "./keys.js";
-import { inspect, Refused, Tally, withinCaps, type SignerPolicy } from "./policy.js";
+import { emptyTally, inspect, Refused, Tally, useMandate, withinCaps, type Flow, type Outflow, type SignerPolicy } from "./policy.js";
 import { SignerPasskeys } from "./passkeys.js";
 import type { StateStore, UserState } from "./state.js";
 
@@ -83,27 +83,63 @@ export class WalletSigner {
     if (seen.publicKey !== w.publicKey) throw new Refused("bad_transaction", "that transaction names a different key");
     return this.open(userId, async ({ state: st, save }) => {
       if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
-      const total = new Tally(st.total, this.now), free = new Tally(st.free, this.now);
-      withinCaps(this.policy.caps, total, seen.outflows);
+      const now = this.now();
+      const total = new Tally(st.total, this.now), free = new Tally(st.free, this.now), fee = new Tally((st.fee ??= emptyTally()), this.now);
+      withinCaps(this.policy.caps, total, seen.outflows); // the hard ceiling covers everything, fees included
 
-      let isFree = false;
-      if (!st.strict) {
-        try { withinCaps(this.policy.unattended, free, seen.outflows); isFree = true; }
+      // Fee transfers to MooPay's own account are taken after a payment lands, with nobody to sign, so they have a small allowance of their own.
+      const isFee = (o: Outflow) => !!this.policy.feeAccount && o.to === this.policy.feeAccount && o.method === "ft_transfer";
+      const fees = seen.outflows.filter(isFee), rest = seen.outflows.filter((o) => !isFee(o));
+      if (fees.length) withinCaps(this.policy.feeCaps ?? {}, fee, fees);
+
+      let isFree = rest.length === 0;
+      if (!isFree && !st.strict) {
+        try { withinCaps(this.policy.unattended, free, rest); isFree = true; }
         catch (e) { if (!(e instanceof Refused)) throw e; /* needs a passkey */ }
       }
       if (!isFree) {
-        if (!this.passkeys.active(st)) {
-          throw new Refused("passkey_required", this.passkeys.pending(st)
-            ? "Your passkey is still in its waiting period, so larger payments are not available yet."
-            : "Add a passkey to send more than the small limit.");
+        const left = useMandate(st.mandate, rest, now); // a passkey signature already approved exactly this
+        if (left) st.mandate = left;
+        else {
+          if (!this.passkeys.active(st)) {
+            throw new Refused("passkey_required", this.passkeys.pending(st)
+              ? "Your passkey is still in its waiting period, so larger payments are not available yet."
+              : "Add a passkey to send more than the small limit.");
+          }
+          if (!approval) throw new Refused("passkey_required", "This payment needs your fingerprint, face or PIN.");
+          await this.passkeys.verifyPayment(st, userId, approval.nonce, rest, approval.assertion);
         }
-        if (!approval) throw new Refused("passkey_required", "This payment needs your fingerprint, face or PIN.");
-        await this.passkeys.verifyPayment(st, userId, approval.nonce, seen.outflows, approval.assertion);
       }
-      for (const o of seen.outflows) { total.add(o.asset, o.amount); if (isFree) free.add(o.asset, o.amount); }
+      for (const o of seen.outflows) total.add(o.asset, o.amount);
+      if (rest.length && isFree) for (const o of rest) free.add(o.asset, o.amount);
+      for (const o of fees) fee.add(o.asset, o.amount);
       await save(); // on record before it is signed
       const out = await KeyPairSigner.fromSecretKey(w.secretKey as never).signTransaction(decodeTransaction(unsigned));
       return { signed: encodeTransaction(out.signedTransaction), txHash: baseEncode(out.txHash) };
+    });
+  }
+
+  /**
+   * The owner's passkey signature for specific payments (asset, recipient, up to this amount), good for a few minutes. Transactions that
+   * match are then signed without another prompt, however many it takes (a token transfer after a storage deposit, say). The challenge
+   * covers the exact list, so a signature for one list cannot approve another.
+   */
+  async mandate(userId: string, flows: Flow[], a: Approval, ttlMs = 10 * 60_000): Promise<{ expiresAt: number }> {
+    await this.wallet(userId);
+    if (!flows.length || flows.length > 8) throw new Refused("bad_transaction", "a mandate lists between 1 and 8 payments");
+    for (const f of flows) {
+      if (typeof f.asset !== "string" || typeof f.to !== "string" || !f.to || f.to.length > 128 || typeof f.amount !== "bigint" || f.amount <= 0n) throw new Refused("bad_transaction", "bad payment in the list");
+      const cap = this.policy.caps[f.asset];
+      if (!cap) throw new Refused("unknown_asset", `${f.asset} is not an asset this signer will move`);
+      if (f.amount > cap.perTx) throw new Refused("over_limit", `that is more than the ${f.asset} limit for one payment`);
+    }
+    return this.open(userId, async ({ state, save }) => {
+      if (state.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
+      if (!this.passkeys.active(state)) throw new Refused("passkey_required", "Add a passkey first.");
+      await this.passkeys.verifyMandate(state, userId, a.nonce, flows, a.assertion);
+      state.mandate = { exp: this.now() + ttlMs, allow: flows.map((f) => ({ asset: f.asset, to: f.to, left: f.amount.toString() })) };
+      await save();
+      return { expiresAt: state.mandate.exp };
     });
   }
 
@@ -153,7 +189,7 @@ const same = (a: string, b: string): boolean => { const x = Buffer.from(a), y = 
 /** A small HTTP front for the signer. The bearer token only keeps strangers out; the policy and the passkey are the real checks. */
 export function signerServer(signer: WalletSigner, token: string, log: (m: string) => void = () => undefined): Server {
   if (token.length < 32) throw new Error("SIGNER_TOKEN must be at least 32 characters");
-  type Body = { userId?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean };
+  type Body = { userId?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
   return createServer((req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "GET" && req.url === "/health") return send(200, { ok: true });
@@ -175,6 +211,10 @@ export function signerServer(signer: WalletSigner, token: string, log: (m: strin
               if (typeof b.tx !== "string") return send(400, { error: "tx is required" });
               const out = await signer.sign(id, Buffer.from(b.tx, "base64"), typeof b.nonce === "string" && b.assertion ? approval() : undefined);
               return send(200, { signed: Buffer.from(out.signed).toString("base64"), txHash: out.txHash });
+            }
+            case "/v1/mandate": {
+              const flows = (Array.isArray(b.flows) ? b.flows : []).map((f) => ({ asset: String(f.asset), to: String(f.to), amount: BigInt(String(f.amount)) }));
+              return send(200, await signer.mandate(id, flows, approval()));
             }
             case "/v1/lock": await signer.lock(id); return send(200, { ok: true });
             case "/v1/unlock": await signer.unlock(id, approval()); return send(200, { ok: true });

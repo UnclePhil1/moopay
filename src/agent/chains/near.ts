@@ -6,6 +6,9 @@ import { verifyMessage } from "near-api-js/nep413";
 import { MoopayError } from "../../util/errors.js";
 import type { Config } from "../../../config/index.js";
 
+/** A refusal from the TEE signer carries a reason and a message meant for the user ("add a passkey", "over the daily limit"). It must not be replaced by a generic failure. */
+const refusal = (e: unknown): e is MoopayError => e instanceof MoopayError && typeof e.details?.["reason"] === "string";
+
 /* near-api-js prints every failed RPC call, even the expected "this account doesn't exist yet" for a new, unfunded agent wallet.
  * We already treat that as a zero balance, so that one message is dropped; every other error is still printed. */
 const printError = console.error.bind(console);
@@ -139,6 +142,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const out = await new Account(accountId, provider, secretKey as never).transfer({ receiverId: to, amount });
         return { txHash: (out as unknown as { transaction: { hash: string } }).transaction.hash };
       } catch (e) {
+        if (refusal(e)) throw e;
         if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before sending again.");
         throw new MoopayError("DEPOSIT_FAILED", "The NEAR transfer didn't go through. Nothing was taken. Try again.");
       }
@@ -149,6 +153,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         const out = await new Account(accountId, provider, secretKey as never).callFunctionRaw({ contractId, methodName: method, args, deposit, gas });
         return { txHash: out.transaction.hash as string };
       } catch (e) {
+        if (refusal(e)) throw e;
         if (process.env["MOOPAY_DEBUG"]) console.error(`[moopay] ${contractId}.${method} failed:`, e instanceof Error ? `${e.name}: ${e.message}` : e);
         if (e instanceof Error && /time(d)? ?out/i.test(e.message)) throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before trying again.");
         throw new MoopayError("DEPOSIT_FAILED", "That step on the NEAR network didn't go through. Nothing was taken. Try again.");
@@ -163,7 +168,8 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       try {
         const out = await new Account(accountId, provider, secretKey as never).callFunctionRaw({ contractId: wrapContract, methodName: "near_deposit", args: {}, deposit: amount, gas: 30n * TGAS });
         return { txHash: out.transaction.hash as string };
-      } catch {
+      } catch (e) {
+        if (refusal(e)) throw e;
         throw new MoopayError("DEPOSIT_FAILED", "I couldn't prepare your NEAR for the swap. Nothing was taken. Try again.");
       }
     },
@@ -211,6 +217,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
         });
         return { txHash: outcome.transaction.hash as string };
       } catch (e) {
+        if (refusal(e)) throw e;
         if (process.env["MOOPAY_DEBUG"]) console.error("[moopay] ft_transfer failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
         if (e instanceof Error && /time(d)? ?out/i.test(e.message))
           throw new MoopayError("UPSTREAM_TIMEOUT", "The NEAR network was slow to answer, so I can't tell yet whether this went through. Check your activity before sending again.");

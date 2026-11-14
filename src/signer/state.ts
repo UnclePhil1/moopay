@@ -1,5 +1,5 @@
 import { Account, KeyPairSigner, type Signer } from "near-api-js";
-import { Refused, emptyTally, type TallyData } from "./policy.js";
+import { Refused, emptyTally, type Mandate, type TallyData } from "./policy.js";
 
 export interface Credential { id: string; publicKey: string; counter: number; transports?: string[]; at: number }
 
@@ -16,6 +16,10 @@ export interface UserState {
   total: TallyData;
   /** Today's total moved with no passkey signature, per asset. */
   free: TallyData;
+  /** Today's total moved to MooPay's fee account, per asset. */
+  fee?: TallyData;
+  /** What the owner's last passkey signature allows, for a few minutes. */
+  mandate?: Mandate;
 }
 
 export const newUser = (): UserState => ({ credentials: [], activeAt: 0, strict: false, locked: false, total: emptyTally(), free: emptyTally() });

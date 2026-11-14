@@ -6,9 +6,10 @@ import { FixedKeySource, deriveWallet } from "../../src/signer/keys.js";
 import { emptyTally, inspect, Refused, Tally, withinCaps, type SignerPolicy } from "../../src/signer/policy.js";
 import { MemoryStateStore, NearStateStore, type StateStore, type UserState, type Versioned } from "../../src/signer/state.js";
 import { signerServer, WalletSigner, type Approval } from "../../src/signer/service.js";
-import { actionChallenge, paymentChallenge, SignerPasskeys, type Action } from "../../src/signer/passkeys.js";
+import { actionChallenge, mandateChallenge, paymentChallenge, SignerPasskeys, type Action } from "../../src/signer/passkeys.js";
 import { RemoteSigner, SignerApi } from "../../src/signer/client.js";
 import { ORIGIN, phone } from "../fakes/phone.js";
+import * as page from "../../src/web/src/signer-challenge.js";
 
 const TOKEN = "t".repeat(40);
 const USDC = "usdc.token.near";
@@ -299,4 +300,96 @@ test("state: the on-chain store reads what the contract returns, and any trouble
   for (const bad of [() => { throw new Error("rpc down"); }, () => ({ version: "x", state: 1 }), () => ({ version: 1, state: "{not json" })]) {
     await assert.rejects(new NearStateStore("state.near", provider(bad), "w", "ed25519:x").load("alice"), code("state_unavailable"));
   }
+});
+
+const FEE = "fee.moopay.near";
+const withFees: SignerPolicy = { ...small, feeAccount: FEE, feeCaps: { [USDC]: { perTx: 2_000_000n, daily: 3_000_000n } } };
+type Flow = { asset: string; to: string; amount: bigint };
+async function mandate(signer: WalletSigner, user: string, ph: ReturnType<typeof phone>, flows: Flow[], ttl?: number) {
+  const nonce = signer.nonce(user);
+  return signer.mandate(user, flows, { nonce, assertion: ph.get(mandateChallenge(user, nonce, flows)) }, ttl);
+}
+
+test("mandate: one passkey signature approves exactly one payment, however many transactions it takes to make it", async () => {
+  const signer = setup(small), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  const flow = { asset: USDC, to: "bob.near", amount: 20_000_000n };
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "20000000"))), code("passkey_required"));
+  await mandate(signer, "alice", ph, [flow]);
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "12000000")));
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "8000000")));
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "2000000"))), code("passkey_required"), "the approved amount is used up, and 2 USDC is above the free allowance");
+});
+
+test("mandate: a different recipient, a bigger amount or a different asset is not covered", async () => {
+  const signer = setup(small), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  await mandate(signer, "alice", ph, [{ asset: USDC, to: "bob.near", amount: 20_000_000n }]);
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "mallory.near", "20000000"))), code("passkey_required"), "another recipient");
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "20000001"))), code("passkey_required"), "one unit more");
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "20000000")));
+});
+
+test("mandate: it runs out after a few minutes, and needs a real passkey signature to make", async () => {
+  let t = Date.parse("2026-11-14T10:00:00Z");
+  const signer = setup(small, () => t), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  const flow = { asset: USDC, to: "bob.near", amount: 20_000_000n };
+  await mandate(signer, "alice", ph, [flow]);
+  t += 11 * 60_000;
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "20000000"))), code("passkey_required"), "expired");
+  const nonce = signer.nonce("alice");
+  await assert.rejects(signer.mandate("alice", [flow], { nonce, assertion: phone().get(mandateChallenge("alice", nonce, [flow])) }), code("bad_assertion"), "someone else's phone");
+  const n2 = signer.nonce("alice");
+  await assert.rejects(signer.mandate("alice", [{ ...flow, amount: 30_000_000n }], { nonce: n2, assertion: ph.get(mandateChallenge("alice", n2, [flow])) }), code("bad_assertion"), "a signature for one list cannot approve a bigger one");
+  await assert.rejects(signer.mandate("alice", [{ ...flow, amount: 60_000_000n }], await approveAction(signer, "alice", ph, "unlock")), code("over_limit"), "the hard cap holds before anything is checked");
+});
+
+test("mandate: works in strict mode (it is a passkey approval), but not on a locked wallet or before the first passkey counts", async () => {
+  const signer = setup(small), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  await signer.setStrict("alice", true, await approveAction(signer, "alice", ph, "strict:on"));
+  await mandate(signer, "alice", ph, [{ asset: USDC, to: "bob.near", amount: 100n }]);
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "100")));
+  await signer.lock("alice");
+  await assert.rejects(mandate(signer, "alice", ph, [{ asset: USDC, to: "bob.near", amount: 100n }]), code("locked"));
+  const t0 = Date.parse("2026-11-14T10:00:00Z");
+  const fresh = setup(small, () => t0, 24 * HOUR), ph2 = await enrol(fresh, "carol");
+  await assert.rejects(mandate(fresh, "carol", ph2, [{ asset: USDC, to: "bob.near", amount: 100n }]), code("passkey_required"));
+});
+
+test("fees: transfers to MooPay's fee account need no passkey within their own small allowance, and nothing else gets that", async () => {
+  const signer = setup(withFees), me = await signer.pubkey("alice");
+  await signer.sign("alice", encodeTransaction(pay(me, FEE, "2000000")));
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, FEE, "2000001"))), code("over_limit"), "above the fee allowance for one transfer");
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, FEE, "2000000"))), code("over_limit"), "above the fee allowance for the day");
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "mallory.near", "5000000"))), code("passkey_required"), "any other recipient is not a fee");
+  const plain = setup(small);
+  await assert.rejects(plain.sign("alice", encodeTransaction(pay(me, FEE, "2000000"))), code("passkey_required"), "with no fee account configured it is an ordinary payment");
+});
+
+test("fees: they still work in strict mode, because they are taken with nobody there to sign", async () => {
+  const signer = setup(withFees), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  await signer.setStrict("alice", true, await approveAction(signer, "alice", ph, "strict:on"));
+  await signer.sign("alice", encodeTransaction(pay(me, FEE, "1000000")));
+  await assert.rejects(signer.sign("alice", encodeTransaction(pay(me, "bob.near", "100"))), code("passkey_required"));
+});
+
+test("page and signer build the same challenge, so what the page signs is what the signer checks", async () => {
+  const flows = [
+    { asset: USDC, to: "bob.near", amount: 20_000_000n },
+    { asset: "NEAR", to: "zoë-müller.near", amount: 10n ** 24n },
+    { asset: USDC, to: "alice.near", amount: 1n },
+  ];
+  const asStrings = flows.map((f) => ({ ...f, amount: f.amount.toString() }));
+  assert.equal(await page.mandateChallenge("user-1", "n0nce_-x", asStrings), mandateChallenge("user-1", "n0nce_-x", flows));
+  assert.equal(await page.mandateChallenge("user-1", "n0nce_-x", [...asStrings].reverse()), mandateChallenge("user-1", "n0nce_-x", flows), "order of the list does not matter");
+  for (const a of ["addkey", "strict:on", "strict:off", "unlock"] as const) assert.equal(await page.actionChallenge("user-1", "n0nce", a), actionChallenge("user-1", "n0nce", a));
+  assert.notEqual(await page.mandateChallenge("user-1", "n0nce_-x", asStrings), await page.mandateChallenge("user-2", "n0nce_-x", asStrings), "the user is part of it");
+  assert.notEqual(await page.mandateChallenge("user-1", "a", asStrings), await page.mandateChallenge("user-1", "b", asStrings), "so is the nonce");
+});
+
+test("page: amounts are read from a table the page owns, so the server cannot make a big payment look small", () => {
+  const usdc = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
+  assert.equal(page.describeFlow({ asset: usdc, to: "bob.near", amount: "5000000" }), "5.00 USDC to bob.near");
+  assert.equal(page.describeFlow({ asset: usdc, to: "bob.near", amount: "5500000" }), "5.50 USDC to bob.near");
+  assert.equal(page.describeFlow({ asset: "NEAR", to: "bob.near", amount: "1500000000000000000000000" }), "1.50 NEAR to bob.near");
+  assert.equal(page.describeFlow({ asset: "fake.near", to: "bob.near", amount: "5000000" }), "5000000 units of fake.near to bob.near", "an unknown token is never given a friendly name or decimals");
+  assert.match(page.describeFlow({ asset: "NEAR", to: "bob.near", amount: "1e24" }), /units of NEAR/, "not a plain number: shown raw");
 });

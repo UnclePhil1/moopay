@@ -27,9 +27,10 @@ const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64url");
 const unb64 = (s: string): Uint8Array<ArrayBuffer> => new Uint8Array(Buffer.from(s, "base64url"));
 const refuse = (m: string): MoopayError => new MoopayError("INVALID_INPUT", m);
 
-export const hasPasskey = (u: UserRec): boolean => !!u.passkeys?.length;
+export const hasPasskey = (u: UserRec): boolean => !!u.passkeys?.length || !!u.tee?.passkey;
 /** Does this door (the web app or X) need a passkey for this user? */
-export const needsPasskey = (u: UserRec, door: "web" | "x"): boolean => hasPasskey(u) && (u.bio ?? { web: true, x: true })[door] !== false;
+/** An account whose key is in the signer always needs its passkey for a payment above the small free limit, so the toggle there means "strict" and does not turn this off. */
+export const needsPasskey = (u: UserRec, door: "web" | "x"): boolean => hasPasskey(u) && (u.tee ? true : (u.bio ?? { web: true, x: true })[door] !== false);
 
 export class Passkeys {
   private pending = new Map<string, { user: string; purpose: string; exp: number }>();

@@ -1,4 +1,5 @@
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
+import { describeFlow, signerChallenge, type PayFlow, type SignerPrompt } from "./signer-challenge.js";
 
 /* The two device prompts the chat page needs. The browser picks what to show: Face ID, Touch ID, Android biometrics,
    Windows Hello, a device PIN, a security key, or a QR code to scan with a phone. */
@@ -12,15 +13,26 @@ async function hints(): Promise<("client-device" | "hybrid" | "security-key")[]>
   return platform ? ["client-device", "hybrid"] : ["hybrid", "security-key"];
 }
 
+async function assert(optionsJSON: Auth) {
+  const hint = await hints();
+  // Some phones fail with an "unknown error" when asked for one named key; asking again with no name lets them offer the MooPay passkey they hold.
+  return startAuthentication({ optionsJSON: { ...optionsJSON, hints: hint } }).catch((e: unknown) => {
+    if (!(e instanceof Error) || e.name === "NotAllowedError" || e.name === "AbortError") throw e;
+    const { allowCredentials: _drop, ...open } = optionsJSON as unknown as Record<string, unknown>;
+    return startAuthentication({ optionsJSON: { ...(open as unknown as Auth), hints: hint } });
+  });
+}
+
+/** For an account whose key is in the signer: build the challenge here from what is shown, sign it, and attach the signer's one-time nonce. */
+async function signer(prompt: SignerPrompt) {
+  const challenge = await signerChallenge(prompt);
+  const a = await assert({ challenge, rpId: prompt.rpId, allowCredentials: prompt.allowCredentials, userVerification: "required", timeout: 120_000 } as Auth);
+  return { ...a, moopayNonce: prompt.nonce };
+}
+
 (window as unknown as { moopayPasskey: unknown }).moopayPasskey = {
   register: async (optionsJSON: Reg) => startRegistration({ optionsJSON: { ...optionsJSON, hints: await hints() } }),
-  assert: async (optionsJSON: Auth) => {
-    const hint = await hints();
-    // Some phones fail with an "unknown error" when asked for one named key; asking again with no name lets them offer the MooPay passkey they hold.
-    return startAuthentication({ optionsJSON: { ...optionsJSON, hints: hint } }).catch((e: unknown) => {
-      if (!(e instanceof Error) || e.name === "NotAllowedError" || e.name === "AbortError") throw e;
-      const { allowCredentials: _drop, ...open } = optionsJSON as unknown as Record<string, unknown>;
-      return startAuthentication({ optionsJSON: { ...(open as unknown as Auth), hints: hint } });
-    });
-  },
+  assert,
+  signer,
+  describe: (flows: PayFlow[]) => flows.map(describeFlow),
 };

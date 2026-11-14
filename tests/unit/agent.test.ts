@@ -26,6 +26,9 @@ import { FixedKeySource } from "../../src/signer/keys.js";
 import { signerServer, WalletSigner } from "../../src/signer/service.js";
 import { SignerPasskeys } from "../../src/signer/passkeys.js";
 import { MemoryStateStore } from "../../src/signer/state.js";
+import { phone } from "../fakes/phone.js";
+import { signerChallenge } from "../../src/web/src/signer-challenge.js";
+import { Signer, actions, createTransaction, PublicKey } from "near-api-js";
 
 const BOB = "bob.near";
 const TOKEN = "t".repeat(43);
@@ -658,7 +661,7 @@ async function serve(a: Awaited<ReturnType<typeof agent>>, extra: Partial<Parame
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const root = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const call = async (op: string, token: string, body?: object) => {
-    const r = await fetch(`${root}/agent/api/${op}`, { method: op === "state" ? "GET" : "POST", headers: { "x-moopay-device": token, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    const r = await fetch(`${root}/agent/api/${op}`, { method: op === "state" || op === "passkey/status" ? "GET" : "POST", headers: { "x-moopay-device": token, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: r.status, body: (await r.json()) as Record<string, string> };
   };
   return { m, call, root, close: () => server.close() };
@@ -1676,5 +1679,74 @@ test("signer: a new account opened through the real routes lives in the signer, 
       assert.equal(r.status, 400, op);
       assert.match(String(r.body["message"]), /secure enclave|biometrics|passkey/i, op);
     }
+  } finally { close(); sig.close(); }
+});
+
+test("signer: a secure account's passkey flows run through the signer, and a hacked server cannot change what the owner approved", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n }, [USDC_CONTRACT]: { perTx: 50_000_000n, daily: 100_000_000n } }, unattended: { [USDC_CONTRACT]: { perTx: 1_000_000n, daily: 1_000_000n } } };
+  const wallet = new WalletSigner(new FixedKeySource("e2e"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  const ph = phone(), T = "q".repeat(43);
+  /** What the page does: build the challenge itself from what the server sent, sign it, attach the nonce. */
+  const page = async (prompt: Parameters<typeof signerChallenge>[0]) => ({ ...(ph.get(await signerChallenge(prompt)) as object), moopayNonce: prompt.nonce });
+  try {
+    await call("state", T);
+    const u = m.store.open(T);
+    assert.ok(u.tee, "the account lives in the signer");
+
+    // Adding the first passkey goes to the signer.
+    const reg = await call("passkey/register-options", T, {});
+    assert.equal(reg.status, 200);
+    const done = await call("passkey/register", T, { response: ph.create(String(reg.body["challenge"])) });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    const st = await call("passkey/status", T);
+    assert.deepEqual([st.body["count"], st.body["active"]], [1, true]);
+    assert.equal(u.tee!.passkey, true, "the server keeps a copy of the flag");
+    assert.equal((await call("export", T, {})).status, 400, "no key to show");
+
+    // A $5 payment now needs the passkey, and the card lists exactly what it will sign.
+    a.near.fund(u.accountId, 20_000_000n);
+    const out = await m.ops.send(u, { amountUsd: "5", chain: "near", recipient: BOB }, false, {}, { origin: "https://moopay.cash" });
+    const card = out.card as { id: string; flows: { asset: string; to: string; amount: string }[]; passkey?: boolean };
+    assert.deepEqual(card.flows, [{ asset: USDC_CONTRACT, to: BOB, amount: "5000000" }]);
+    assert.equal(card.passkey, true);
+
+    // Declining a signature is not the same as approving: no assertion, nothing moves.
+    assert.equal((await call("approve", T, { id: card.id, approve: true })).status, 400);
+    assert.equal(a.near.transfers.length, 0);
+
+    // A hacked server changes the recipient after the owner's device signed the original. The signer refuses and nothing is sent.
+    const opt = await call("passkey/options", T, { purpose: "approve:" + card.id }) as unknown as { body: { required: boolean; signer: Parameters<typeof signerChallenge>[0] } };
+    assert.equal(opt.body.required, true);
+    const signed = await page(opt.body.signer);
+    const ap = u.approvals.find((x) => x.id === card.id)!;
+    ap.flows![0]!.to = "mallory.near";
+    assert.equal((await call("approve", T, { id: card.id, approve: true, assertion: signed })).status, 400);
+    assert.equal(a.near.transfers.length, 0, "nothing was sent");
+    ap.flows![0]!.to = BOB;
+
+    // The honest path: a fresh prompt, signed by the owner's device, then the payment runs and the signer signs exactly that.
+    const opt2 = await call("passkey/options", T, { purpose: "approve:" + card.id }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    const ok = await call("approve", T, { id: card.id, approve: true, assertion: await page(opt2.body.signer) }) as unknown as { status: number; body: { result: { status: string } } };
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.result.status, "sent");
+    const used = a.near.transfers.at(-1)!.secretKey as unknown as Signer, pk = await used.getPublicKey();
+    const tx = (to: string, amount: string) => createTransaction(u.accountId, pk, USDC_CONTRACT, 1n, [actions.functionCall("ft_transfer", { receiver_id: to, amount }, 12n * 10n ** 12n, 1n)], new Uint8Array(32));
+    await assert.rejects(used.signTransaction(tx("mallory.near", "5000000")), /fingerprint|passkey|PIN/i, "the approval was for BOB, not anyone else");
+    assert.ok(await used.signTransaction(tx(BOB, "5000000")), "the approved payment signs");
+    assert.ok(PublicKey.from(pk.toString()));
+
+    // Strict mode and the lock are the signer's, and need the owner's device.
+    const t1 = await call("passkey/options", T, { purpose: "toggle", on: true }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    assert.equal((await call("passkey/toggle", T, { web: true, x: true })).status, 400, "no signature, no change");
+    assert.equal((await call("passkey/toggle", T, { web: true, x: true, assertion: await page(t1.body.signer) })).status, 200);
+    assert.equal((await call("passkey/status", T)).body["strict"], true);
+    await call("freeze", T, { on: true });
+    assert.equal((await call("freeze", T, { on: false })).status, 400, "unlocking needs the passkey");
+    const t2 = await call("passkey/options", T, { purpose: "unlock" }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    assert.equal((await call("freeze", T, { on: false, assertion: await page(t2.body.signer) })).status, 200);
   } finally { close(); sig.close(); }
 });
