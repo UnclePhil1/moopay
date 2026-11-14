@@ -666,7 +666,7 @@ test("sessions: temporary tokens can pay but not export or reset; reset kills ol
     const master = "m".repeat(43);
     const st = await call("state", master);
     assert.equal(st.status, 200);
-    assert.equal((await call("export", master)).status, 200, "the recovery code can export");
+    const noBio = await call("export", master); assert.equal(noBio.status, 400, "no passkey, no key export"); assert.match(noBio.body["message"]!, /biometrics/i);
 
     const { body: { token } } = await call("session", master);
     assert.match(token!, /^mps\./);
