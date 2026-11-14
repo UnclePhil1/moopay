@@ -113,7 +113,7 @@ When the agent wallet cannot cover a payment, or you ask to pay from your wallet
 
 ### Policy and guardrails
 
-Defaults (`DEFAULT_RULES` in `src/agent/store.ts`): float $500, daily cap $50, new-recipient limit $10, auto-approve up to $25. Enforced in `decide()` before money moves:
+Defaults (`DEFAULT_RULES` in `src/agent/store.ts`): float $500, daily cap $50, new-recipient limit $10, auto-approve up to $0.10 (anything bigger asks for your OK). Enforced in `decide()` before money moves:
 
 1. Amount must be above zero, otherwise deny.
 2. Today's spend plus this payment over the daily cap: deny.

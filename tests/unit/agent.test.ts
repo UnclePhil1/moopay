@@ -10,7 +10,8 @@ import { makeAgent } from "../../src/server/routes/agent.js";
 import { runTurn, type Llm } from "../../src/ai/loop.js";
 import { AgentOps, CHAT_FEE_BPS, X_FEE_BPS, type Sponsor } from "../../src/agent/ops.js";
 import { decide, rulesNeedApproval } from "../../src/agent/policy.js";
-import { AgentStore } from "../../src/agent/store.js";
+import { AgentStore, DEFAULT_RULES } from "../../src/agent/store.js";
+DEFAULT_RULES.approveAboveUsd = 25; // production default is $0.10; these tests exercise money flows, not approvals
 import { tick } from "../../src/agent/worker.js";
 import { ClaimDesk } from "../../src/agent/claims.js";
 import type { NearOps } from "../../src/agent/chains/near.js";
@@ -1573,4 +1574,9 @@ test("X lock: a linked user can freeze the account with one word, even while pay
   const other = await agent(); other.u.x = { id: "7", handle: "someone" };
   await handleMention({ ...deps, store: other.store } as XDeps, { id: "2", text: "@moopaybot lock", author_id: "999" });
   assert.notEqual(other.u.frozen, true, "a stranger cannot lock someone else's account");
+});
+
+test("a new account auto-approves only up to 10 cents; bigger payments ask", async () => {
+  const src = await (await import("node:fs/promises")).readFile(new URL("../../src/agent/store.ts", import.meta.url), "utf8");
+  assert.match(src, /DEFAULT_RULES: Rules = \{[^}]*approveAboveUsd: 0\.1 \}/);
 });

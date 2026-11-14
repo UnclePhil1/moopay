@@ -77,7 +77,7 @@ export interface UserRec {
   chat: { id?: string; at?: number; role: "user" | "assistant"; content: string }[]; seen: { usdc: string; near: string }; msgTimes: number[];
 }
 
-export const DEFAULT_RULES: Rules = { floatUsd: 500, dailyCapUsd: 50, newRecipientLimitUsd: 10, approveAboveUsd: 25 };
+export const DEFAULT_RULES: Rules = { floatUsd: 500, dailyCapUsd: 50, newRecipientLimitUsd: 10, approveAboveUsd: 0.1 };
 export const hashKey = (key: string): string => createHash("sha256").update("moopay.agentkey|" + key).digest("hex");
 export const userIdOf = (deviceToken: string): string => createHash("sha256").update("moopay.device|" + deviceToken).digest("hex");
 

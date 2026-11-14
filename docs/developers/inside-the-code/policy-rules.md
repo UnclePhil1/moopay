@@ -17,7 +17,7 @@ export const DEFAULT_RULES: Rules = {
   floatUsd: 25,
   dailyCapUsd: 50,
   newRecipientLimitUsd: 10,
-  approveAboveUsd: 25,
+  approveAboveUsd: 0.1,
 };
 ```
 

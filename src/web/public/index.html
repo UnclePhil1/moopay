@@ -30,8 +30,8 @@
   header { display:flex; align-items:center; gap:12px; padding:14px 22px; border-bottom:1px solid var(--line); }
   header img { height:22px; }
   .spacer { flex:1; }
-  .back { display:inline-flex; align-items:center; gap:4px; color:var(--muted); text-decoration:none; font-size:13.5px; padding:6px 10px 6px 6px; margin-left:-6px; border-radius:10px; } .back:hover { color:#f4efe6; background:rgba(244,239,230,.07); }
-  .how { color:var(--muted); font-size:13.5px; text-decoration:none; } .how:hover { color:#f4efe6; }
+  .back { display:inline-flex; align-items:center; gap:4px; color:var(--muted); text-decoration:none; font-size:13.5px; padding:6px; margin-left:-6px; border-radius:10px; } .back:hover { color:#f4efe6; background:rgba(244,239,230,.07); }
+  .how { color:var(--muted); font-size:13.5px; text-decoration:none; } .how:hover { color:#f4efe6; } .how { display:inline-flex; align-items:center; } .how .ico { display:none; }
   .pill[hidden] { display:none; }
   .pill { display:inline-flex; align-items:center; gap:8px; padding:5px 12px; border:1px solid var(--line); border-radius:999px; font-size:12.5px; color:var(--muted); }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); } .dot.work { background:var(--warn); animation:pulse 1s infinite; }
@@ -118,17 +118,17 @@
   .cmd { display:flex; gap:14px; align-items:baseline; padding:10px 14px; border-radius:12px; width:100%; background:none; border:0; text-align:left; }
   .cmd.sel,.cmd:hover { background:rgba(244,239,230,.08); } .cmd b { min-width:84px; font-weight:700; } .cmd span { color:var(--muted); font-size:13.5px; }
   .toast { position:fixed; left:50%; bottom:100px; transform:translateX(-50%); background:#f4efe6; color:#000; padding:10px 18px; border-radius:999px; font-weight:600; font-size:14px; z-index:30; }
-  @media (max-width:640px) { header { padding:12px 14px; } .wrap { padding:16px 14px; } .composer { padding:8px 12px 12px; } .note { display:none; } }
+  @media (max-width:640px) { .how .txt { display:none; } .how .ico { display:block; } header { padding:12px 14px; } .wrap { padding:16px 14px; } .composer { padding:8px 12px 12px; } .note { display:none; } }
   @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
-    <a class="back" href="/?home" aria-label="Back to the MooPay home page" title="Back to home"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg><span>Home</span></a>
+    <a class="back" href="/?home" aria-label="Back to the MooPay home page" title="Back to home"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
     <img src="/app/assets/moopay-logo.png" alt="MooPay">
     <span class="spacer"></span>
-    <a class="how" href="/docs" target="_blank" rel="noopener">How it works</a>
+    <a class="how" href="/docs" target="_blank" rel="noopener" aria-label="How it works" title="How it works"><svg class="ico" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg><span class="txt">How it works</span></a>
     <span class="pill" id="nohist" hidden title="Your chat is not saved. Type /history to change that">Chat not saved</span>
     <span class="pill" id="frozen" hidden title="Nothing can leave this account. Type /unfreeze to lift it">Frozen</span>
     <span class="pill" id="temp" hidden title="Ends after an hour of not using it, or when you sign out">Temporary session</span>
@@ -508,6 +508,17 @@ async function addPasskey() {
     clearEmpty(); await say(agent(), "Done. Your passkey is on. Payments that need your OK now ask for your fingerprint, face or PIN, on this app and on X.");
   } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't add the passkey."); }
 }
+/** Opening the chat without a passkey: say so, and offer to set one up right there. */
+async function bioNudge() {
+  try {
+    const st = await (await api("passkey/status")).json();
+    if (st.count) return;
+    const b = agent();
+    await say(b, "Turn on biometric verification to keep your money safe. Add a passkey (fingerprint, face or PIN) and every payment that needs your OK has to be confirmed by you, here in the app and on X. Nobody else can approve a payment, even if someone gets into your X account.");
+    b.append(h("button", { class: "chip", type: "button", onclick: () => void addPasskey() }, "Set up biometrics"));
+    down();
+  } catch {}
+}
 async function toggleBio(door) {
   try {
     const st = await (await api("passkey/status")).json();
@@ -661,7 +672,7 @@ async function boot() {
     if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); { const tx = h("div", { class: "txt" }); setText(tx, m.content); b.append(tx); } } } }
     else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }
     for (const a of s.approvals || []) agent().append(card(a));
-    nudge(s.account?.balanceUsd);
+    nudge(s.account?.balanceUsd); await bioNudge();
   } catch (e) { $("state").textContent = "Offline"; }
   try { const open = sessionStorage.getItem(SHEET_KEY); if (open && new URL(open, location.href).origin === location.origin) openSheet(open); } catch {}
   setInterval(() => { if (!busy) void poll(); }, 6000);
