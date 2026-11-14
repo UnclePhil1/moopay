@@ -36,7 +36,7 @@ async function approve(): Promise<void> {
     const inApp = /Twitter|FBAN|FBAV|Instagram|; wv\)|FB_IAB/i.test(navigator.userAgent);
     const name = e instanceof Error ? e.name : "";
     say(name === "NotAllowedError" ? "Your device didn't confirm it. The prompt was closed, timed out, or this device has no fingerprint, face or PIN set up. Nothing was sent. Tap the button to try again."
-      : inApp ? "This page is open inside another app (like X), and phones often block passkeys there. Open this same link in your phone's own browser (Chrome or Safari) and confirm there. Nothing was sent."
+      : inApp ? "This page is open inside another app (like X), and phones often block passkeys there. Tap the \u22EE (three dots) or the share icon at the top of this page and choose Open in browser, then confirm there. Nothing was sent."
       : "Your phone's passkey manager couldn't finish. Check that you're signed in to your Google or Apple account on this phone, that this MooPay passkey is saved there, then tap the button again. If it keeps failing, approve it in the MooPay app. Nothing was sent.", "bad");
     $("open").hidden = false;
   } finally { busy = false; }
@@ -44,9 +44,8 @@ async function approve(): Promise<void> {
 
 $("go").addEventListener("click", () => void approve());
 $("open").addEventListener("click", () => {
-  // Android can hand the page to Chrome; elsewhere copy the link so it can be pasted into the browser.
-  if (/Android/i.test(navigator.userAgent)) { location.href = `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end`; return; }
-  void navigator.clipboard?.writeText(location.href).then(() => say("Link copied. Paste it into Safari or Chrome.", ""), () => say("Copy the address of this page and open it in Safari or Chrome.", "bad"));
+  // Apps like X do not let a page hand itself to the browser, so copy the link and say how to open it by hand.
+  void navigator.clipboard?.writeText(location.href).then(() => say("Link copied. Open Chrome or Safari and paste it in the address bar. Or tap the \u22EE or share icon at the top of this page and choose Open in browser.", ""), () => say("Tap the \u22EE or share icon at the top of this page and choose Open in browser.", "bad"));
 });
 api("").then((s) => {
   $("sum").textContent = String(s["summary"]); $("why").textContent = String(s["reason"] ?? "");

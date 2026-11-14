@@ -4,7 +4,7 @@ import { asMoopayError, MoopayError } from "../../util/errors.js";
 import { toJson } from "../../util/json.js";
 import { AgentOps, AgentStore, CHAT_FEE_BPS, X_FEE_BPS, approvalCard, followPayments, SESSION_ENDED, SESSION_MS, spentToday, tick, type MooPayService, type NameParent, type OutLayer, type Sponsor, type UserRec } from "../../agent/index.js";
 import { CHAT_RULES, plain, runTurn, X_RULES, type Ctl, type Llm } from "../../ai/loop.js";
-import { SILENT, startX, xFromEnv } from "../x.js";
+import { SILENT, startX, XClient, xFromEnv } from "../x.js";
 import { alertOwner } from "../../util/alert.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { security, useSecurityLog } from "../../security/audit.js";
@@ -142,6 +142,7 @@ export async function makeAgent(d: AgentDeps) {
           const had = new Set(u.payments.map((x) => x.id));
           const out = await ops.resolve(u, a.id, true, { origin });
           ops.stampFees(u, had, X_FEE_BPS());
+          xDone(a, out.result["status"]);
           security.add("approved_by_passkey", { user: u.id.slice(0, 8), kind: a.kind }, now());
           json(res, 200, { status: out.result["status"], reason: out.result["reason"] ?? null }); return true;
         }
@@ -175,6 +176,10 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "export" && req.method === "POST") {
         needMaster("Showing your wallet key");
         if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
+        // The key is the whole wallet, so showing it needs the owner's fingerprint, face or PIN, and an account with none must add one first.
+        if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Set up biometrics first. Type /passkey, then ask for your key again.");
+        await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "export"); store.save();
+        security.add("key_exported", { user: u.id.slice(0, 8) }, now());
         const k = store.keyOf(u);
         json(res, 200, { accountId: k.accountId, secretKey: k.secretKey });
         return true;
@@ -191,7 +196,7 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "passkey/options" && req.method === "POST") {
         const b = await bodyOf(req), purpose = String(b["purpose"] ?? "");
         const ap = u.approvals.find((x) => x.id === purpose.replace(/^approve:/, ""));
-        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock");
+        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
       }
       if (op === "passkey/toggle" && req.method === "POST") {
@@ -271,6 +276,7 @@ export async function makeAgent(d: AgentDeps) {
         if (b["approve"] && ap?.status === "pending" && hasPasskey(u) && (ap.strong || needsPasskey(u, "web"))) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "approve:" + ap.id); store.save(); }
         const out = await ops.resolve(u, b["id"], b["approve"], ctx);
         ops.stampFees(u, had, CHAT_FEE_BPS());
+        if (ap && b["approve"]) xDone(ap, out.result["status"]);
         json(res, 200, { result: out.result, card: out.card });
         return true;
       }
@@ -325,24 +331,34 @@ export async function makeAgent(d: AgentDeps) {
 
   const startWorker = (everyMs = 60_000) => setInterval(() => void tick(ops, store, lastOrigin, now()).catch(() => undefined), everyMs).unref();
   /** Answers mentions on X, when the X_ settings are set and the AI is on. */
+  let xPost: ((text: string, to: string) => Promise<void>) | undefined;
+  /** After an approval that started on X goes through, the bot answers on that post with the amount and nothing else. */
+  const xDone = (a: { tweet?: string; params: Record<string, unknown> }, status: unknown): void => {
+    if (!a.tweet || !xPost || !(status === "sent" || status === "created" || status === "staked" || status === "group_done" || status === "scheduled" || status === "updated")) return;
+    const p = a.params, items = Array.isArray(p["items"]) ? (p["items"] as { amountUsd?: string }[]) : undefined;
+    const amt = p["amountUsd"] ? `$${p["amountUsd"]}` : p["amount"] ? `${p["amount"]} ${String(p["assetSymbol"] ?? "NEAR")}` : items && items.every((i) => i.amountUsd) ? `$${items.reduce((n, i) => n + Number(i.amountUsd), 0)}` : "";
+    void xPost(`Transaction successful${amt ? `: ${amt}` : ""}`, a.tweet).catch(() => undefined);
+  };
   const startXAgent = () => {
     const cfg = xFromEnv();
     if (!cfg || !d.llm) return undefined;
     const llm = d.llm, feeBps = X_FEE_BPS();
     const origin = process.env["MOOPAY_PUBLIC_HOST"]?.trim() ? `https://${process.env["MOOPAY_PUBLIC_HOST"]!.trim()}` : lastOrigin;
+    const client = new XClient(cfg.keys);
+    xPost = (text, to) => client.reply(text, to);
     return startX({
       store, feeBps, now, burst: new XBurst(),
       tripped: (why) => void alertOwner("x-halt", why, now()).catch(() => undefined),
       stamp: (u, had, bps) => ops.stampFees(u, had, bps),
-      ask: async (u, text) => {
+      ask: async (u, text, tweetId) => {
         const urls: string[] = [];
         const emit = (e: { type: string; card?: Record<string, unknown>; label?: string; state?: string }) => { if (e.type === "step" && e.state !== "done") console.log(`[x] ${e.label}${e.state === "failed" ? " (failed)" : "…"}`); const url = e.type === "card" ? e.card?.["url"] : undefined; if (typeof url === "string") urls.push(url); };
-        const final = await runTurn({ llm, model, auditor, u, text, ops, svc: d.svc, ctx: { origin, channel: "x" }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : "", hasPasskey(u) && needsPasskey(u, "x")), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
+        const final = await runTurn({ llm, model, auditor, u, text, ops, svc: d.svc, ctx: { origin, channel: "x", ...(tweetId ? { tweet: tweetId } : {}) }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : "", hasPasskey(u) && needsPasskey(u, "x")), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
         if (SILENT.test(final)) u.chat.splice(-2, 2); // nothing was said, so nothing goes in the chat history
         store.save();
         return { text: final, urls };
       },
-    }, cfg, Number(process.env["X_POLL_SECONDS"]) || 5);
+    }, cfg, Number(process.env["X_POLL_SECONDS"]) || 5, client);
   };
   return { handle, startWorker, startX: startXAgent, ops, store, tick: () => tick(ops, store, lastOrigin, now()) };
 }

@@ -194,6 +194,8 @@ Other controls:
 - **X gets tighter limits.** A payment started from X to a new recipient always needs approval in the app, and so does anything above $10 (`MOOPAY_X_AUTO_USD`).
 - **Passkeys.** `/passkey` adds a fingerprint, face or device PIN (WebAuthn, discoverable credential, user verification required, no password or sign-up). Payments that need an OK then ask for it, on the web app (`/biometrics-web`) and on X (`/biometrics-x`); turning either on or off needs the passkey itself. Challenges are one-use and tied to one payment. Origin and site id are checked, and a counter that does not go up is refused, which catches a cloned key. Code: `src/security/passkeys.ts`.
 - **No "reply confirm" step on X.** With biometrics on, the passkey is the confirmation, so the agent starts the payment straight away. Without a passkey it still asks the user to reply "confirm".
+- **Short answer on X.** After you approve a payment started on X, the bot replies on that post with just "Transaction successful: $5" (the amount, nothing else).
+- **Your wallet key is behind biometrics.** `/export` asks for your fingerprint, face or PIN before it shows the key. With no passkey set up it tells you to add one first.
 - **One tap from X.** When a payment started on X needs an OK and the user has a passkey, the reply carries a link (`/ok/<id>`). It opens a signing sheet that asks for the passkey on load. Without a passkey the user approves in the app.
 - **Drain check.** `src/security/risk.ts` forces a passkey, even with the toggles off, when a payment is 85% or more of the wallet or more than 3 go out in a minute.
 - **Lock from X.** The linked account can post `@moopaybot lock` to freeze the wallet at once. Unlocking needs the recovery code and the passkey.

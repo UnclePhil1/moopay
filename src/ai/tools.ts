@@ -83,6 +83,7 @@ export async function runTool(name: string, input: unknown, u: UserRec, ops: Age
   // From X, an approval has no button to press: a user with a passkey gets a link that opens the signing sheet and asks for their fingerprint, face or PIN.
   if (ctx.channel === "x" && out.card?.["kind"] === "approval" && u.passkeys?.length) {
     out.card["url"] = `${ctx.origin}/ok/${String(out.card["id"])}`;
+    const ap = u.approvals.find((x) => x.id === out.card!["id"]); if (ap && ctx.tweet) ap.tweet = ctx.tweet;
     out.result["note"] = "A link was added to your reply. Tell the user to tap it and confirm with their fingerprint, face or PIN.";
   }
   return out;

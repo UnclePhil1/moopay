@@ -21,7 +21,7 @@ import { hashKey } from "./store.js";
 /* What the agent can do. Every money move goes through decide() first; the language model cannot skip it. */
 
 export interface Out { result: Record<string, unknown>; card?: Record<string, unknown> }
-export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x" }
+export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x"; /** the post that started it, so the result can be answered there */ tweet?: string }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
 export interface Who { ak?: AgentKey | undefined; /** a payment the user already approved when they set up the schedule */ sched?: boolean }
 export interface SendParams {

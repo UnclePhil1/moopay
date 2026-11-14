@@ -56,7 +56,7 @@ export interface XDeps {
   feeBps: number;
   now(): number;
   /** the assistant's answer to this user, plus any Confirm links it produced */
-  ask(u: UserRec, text: string): Promise<{ text: string; urls: string[] }>;
+  ask(u: UserRec, text: string, tweetId?: string): Promise<{ text: string; urls: string[] }>;
   /** marks the payments made in this turn with the fee rate they owe; the worker takes the fee once they land */
   stamp(u: UserRec, had: Set<string>, bps: number): void;
   reply(text: string, to: string, exclude?: string[]): Promise<void>;
@@ -126,15 +126,15 @@ export async function handleMention(d: XDeps, t: Mention): Promise<void> {
 
   // a handle that someone linked stands for their wallet
   const text = clean.replace(/@(\w{1,15})/g, (m, h: string) => d.store.byHandle(h)?.accountId ?? m);
-  await run(d, u, text, say);
+  await run(d, u, text, say, t.id);
 }
 
 /** Asks the assistant, then posts its answer and takes the service fee for any payment this message started. */
-async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: string[]) => Promise<unknown>): Promise<void> {
+async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: string[]) => Promise<unknown>, tweetId?: string): Promise<void> {
   const had = new Set(u.payments.map((p) => p.id));
   let out: { text: string; urls: string[] };
   console.log(`[x] thinking for ${u.x?.handle ?? u.id}…`);
-  try { out = await d.ask(u, text); } catch (e) { console.log(`[x] the assistant failed: ${e instanceof Error ? e.message : e}`); 
+  try { out = await d.ask(u, text, tweetId); } catch (e) { console.log(`[x] the assistant failed: ${e instanceof Error ? e.message : e}`); 
     // keep the request in the conversation, so a "yes" to the question below knows what to try again
     const said = "Something went wrong on my side and nothing was sent. Want me to try again? Reply yes and I will.";
     u.chat.push({ id: randomBytes(8).toString("hex"), at: d.now(), role: "user", content: text }, { id: randomBytes(8).toString("hex"), at: d.now(), role: "assistant", content: said }); d.store.save();

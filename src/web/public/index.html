@@ -479,9 +479,18 @@ function paletteFor(v) {
   pal.querySelector(".cmd.sel")?.scrollIntoView({ block: "nearest" });
 }
 async function exportKey() {
+  try {
+    const st = await (await api("passkey/status")).json();
+    if (!st.count) {
+      clearEmpty(); const b = agent();
+      await say(b, "To show your wallet key you need to set up biometrics first. It makes sure only you can see it.");
+      b.append(h("button", { class: "chip", type: "button", onclick: () => void addPasskey() }, "Set up biometrics")); down(); return;
+    }
+  } catch {}
   if (!(await ask({ title: "Show your wallet key?", text: "Anyone who sees this key can take the money in your agent wallet. Only show it when nobody is watching.", confirm: "Show key", danger: true }))) return;
   try {
-    const r = await (await api("export", { method: "POST" })).json(); if (r.code) throw new Error(r.message);
+    const assertion = await strong("export");
+    const r = await (await api("export", { method: "POST", body: JSON.stringify(assertion ? { assertion } : {}) })).json(); if (r.code) throw new Error(r.message);
     await ask({ title: "Your wallet key", text: "Copy it and keep it somewhere safe. It opens the wallet " + short(r.accountId) + " in any NEAR wallet.", reveal: r.secretKey, confirm: "Done" });
   } catch (e) { clearEmpty(); await say(agent(), e.message || "I couldn't get the key."); }
 }
