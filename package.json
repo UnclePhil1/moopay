@@ -45,7 +45,7 @@
     "buffer": "6.0.3",
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "util": "0.12.5"
   }
 }
