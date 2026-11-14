@@ -43,8 +43,6 @@ export class XClient {
   }
   /** The account the access token belongs to. */
   async me(): Promise<{ id: string; username: string }> { return (await this.call<{ data: { id: string; username: string } }>("GET", "https://api.x.com/2/users/me")).data; }
-  /** A private message. It only reaches people who accept messages from the bot, and the app needs the "Direct message" permission. */
-  async dm(userId: string, text: string): Promise<void> { await this.call("POST", `https://api.x.com/2/dm_conversations/with/${userId}/messages`, {}, { text }); }
   /** X puts the replied-to person at the front itself. `exclude` keeps everyone else tagged in that post from being pulled into the reply. */
   async reply(text: string, to: string, exclude: string[] = []): Promise<void> { await this.call("POST", "https://api.x.com/2/tweets", {}, { text, reply: { in_reply_to_tweet_id: to, ...(exclude.length ? { exclude_reply_user_ids: exclude.slice(0, 50) } : {}) } }); }
 }
@@ -62,8 +60,6 @@ export interface XDeps {
   /** marks the payments made in this turn with the fee rate they owe; the worker takes the fee once they land */
   stamp(u: UserRec, had: Set<string>, bps: number): void;
   reply(text: string, to: string, exclude?: string[]): Promise<void>;
-  /** a private message to the user, for the approval link; when it is missing or fails, the link goes in the public reply */
-  dm?(userId: string, text: string): Promise<void>;
   /** the kill switch and the spike detector; left out in tests that do not need them */
   burst?: XBurst;
   /** called when a spike pauses X payments, so the owner hears about it */
@@ -130,11 +126,11 @@ export async function handleMention(d: XDeps, t: Mention): Promise<void> {
 
   // a handle that someone linked stands for their wallet
   const text = clean.replace(/@(\w{1,15})/g, (m, h: string) => d.store.byHandle(h)?.accountId ?? m);
-  await run(d, u, text, say, t.author_id);
+  await run(d, u, text, say);
 }
 
 /** Asks the assistant, then posts its answer and takes the service fee for any payment this message started. */
-async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: string[]) => Promise<unknown>, authorId?: string): Promise<void> {
+async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: string[]) => Promise<unknown>): Promise<void> {
   const had = new Set(u.payments.map((p) => p.id));
   let out: { text: string; urls: string[] };
   console.log(`[x] thinking for ${u.x?.handle ?? u.id}…`);
@@ -146,14 +142,6 @@ async function run(d: XDeps, u: UserRec, text: string, say: (s: string, urls?: s
 
   if (SILENT.test(out.text)) return void console.log("[x] assistant judged it not a request, no reply");
   if (d.feeBps > 0) d.stamp(u, had, d.feeBps);
-  // An approval link goes to the user's private messages, with the details. The public reply says only that something is waiting, so the
-  // amount and receiver are not posted for everyone to read. If a private message cannot be sent, the link goes in the reply instead.
-  const link = out.urls.find((x) => /\/ok\/[\w-]+$/.test(x));
-  if (link && authorId && d.dm) {
-    const sent = await d.dm(authorId, fit(`${out.text}\nApprove with your fingerprint, face or PIN:`, [link])).then(() => true, (e: unknown) => { console.log(`[x] could not send the private link: ${e instanceof Error ? e.message : e}`); return false; });
-    if (sent) { console.log("[x] approval link sent privately"); return void (await say("Needs your biometric OK. I sent you a private link in your messages.")); }
-    return void (await say("Needs your biometric OK. Open the link to approve it.", [link]));
-  }
   console.log(`[x] replying: ${out.text.slice(0, 160)}`);
   await say(out.text, out.urls);
 }
@@ -166,7 +154,7 @@ export function xFromEnv(env: NodeJS.ProcessEnv = process.env): { keys: XKeys; u
 
 /** Checks for new mentions every `everySeconds` and answers each in turn. The first run only notes where things stand, so old mentions are never replayed. */
 export function startX(d: Omit<XDeps, "reply" | "botHandle">, cfg: NonNullable<ReturnType<typeof xFromEnv>>, everySeconds = 5, client = new XClient(cfg.keys)): NodeJS.Timeout {
-  const deps: XDeps = { ...d, botHandle: cfg.handle, reply: (text, to, exclude) => client.reply(text, to, exclude), dm: (to, text) => client.dm(to, text) };
+  const deps: XDeps = { ...d, botHandle: cfg.handle, reply: (text, to, exclude) => client.reply(text, to, exclude) };
   let busy = false, lastErr = "", verified = false;
   console.log(`[x] X agent on as @${cfg.handle}, checking every ${everySeconds}s`);
   const tick = async () => {
