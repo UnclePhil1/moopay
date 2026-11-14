@@ -239,6 +239,8 @@ The AI is treated as an untrusted translator. It turns a sentence into a typed r
 
 The last row is the main open risk. Moving key custody into a hardware-isolated TEE with the passkey checked inside it, and enforcing limits on chain with `contracts/guard`, is the next step. Until then, keep only what you need in the agent wallet (the float rule sweeps the rest to your own wallet).
 
+**Status of that work (not live yet).** Today wallet keys are still derived on the MooPay server. The replacement is a signer that runs in a Phala Cloud TEE (Intel TDX) with Phala's on-chain key service on Base, so the enclave only receives its key when its code hash has been approved on chain. What has been tested so far on a throwaway app: the enclave derives a key under on-chain approval, and the key stayed the same across two approved code updates. What has not been tested: that unapproved code is refused a key, the signer itself, and moving existing wallets. Nothing in the live app uses the enclave yet.
+
 ### Trust boundaries
 
 This is experimental and unaudited. What you are trusting:

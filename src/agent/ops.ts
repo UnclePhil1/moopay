@@ -663,7 +663,7 @@ export class AgentOps {
     this.named = this.named.filter((t) => this.now() - t < day);
     if (this.named.length >= cap) { void alertOwner("names-daily", `the daily limit of ${cap} new wallet names was reached.`, this.now()); throw new MoopayError("UPSTREAM_TIMEOUT", "New names are paused for today. Try again tomorrow."); }
     const k = this.store.keyOf(u), name = raw.trim().toLowerCase();
-    try { await this.near.createAccount({ parentId: this.names!.accountId, parentKey: this.names!.secretKey, newId: c.id!, forSecretKey: k.secretKey, deposit: NAME_DEPOSIT }); }
+    try { await this.near.createAccount({ parentId: this.names!.accountId, parentKey: this.names!.secretKey, newId: c.id!, forPublicKey: k.publicKey, deposit: NAME_DEPOSIT }); }
     catch { throw new MoopayError("UPSTREAM_TIMEOUT", "I couldn't create that name right now. Try again in a moment, or pick another."); }
     try { // best effort: a registered account can receive USDC from any wallet
       const usdc = await this.svc.usdcAsset();

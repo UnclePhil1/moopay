@@ -77,6 +77,8 @@ export interface NoteAccount {
   accountId: string;
   /** near-api-js KeyPairString: "ed25519:" + base58(seed || publicKey). */
   secretKey: string;
+  /** near-api-js public key string: "ed25519:" + base58(pub). Safe to share; lets callers add the key to an account without the secret. */
+  publicKey: string;
 }
 
 export function deriveNoteAccount(secret: Buffer): NoteAccount {
@@ -85,5 +87,6 @@ export function deriveNoteAccount(secret: Buffer): NoteAccount {
   return {
     accountId: Buffer.from(pub).toString("hex"),
     secretKey: "ed25519:" + baseEncode(Buffer.concat([seed, pub])),
+    publicKey: "ed25519:" + baseEncode(pub),
   };
 }
