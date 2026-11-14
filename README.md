@@ -27,6 +27,57 @@ Paying someone on another chain today means picking a bridge, holding gas on a c
 - **Two ways to pay.** A small pre-funded agent wallet for fast, rule-bound payments, or your own wallet signing in a pay window when you do not want to deposit anything.
 - **Outside agents get a leash.** Third-party AI agents use scoped `mpk_` keys with per-payment, daily and total budgets, an allow-list and an expiry.
 
+## Biometric verification: why an AI money agent needs it
+
+### The problem without it
+
+An AI agent that can spend money is only as safe as whoever can talk to it. With no check that the owner is really there, every route into the agent is a route to the money:
+
+- **A hijacked X account.** Anyone who gets into the linked X account can post "send everything to this address" and the agent obeys.
+- **A stolen or borrowed browser session.** A friend, a coworker or a piece of malware on an open laptop can approve a payment with one click.
+- **Prompt injection.** A web page, a message or an address book entry that the agent reads can carry hidden instructions. The model may follow them, and nothing stops the payment but the model's own judgment.
+- **A clicked approval is not proof.** A button on a screen can be clicked by a script, a stolen cookie or a rushed user. It proves nothing about who is there.
+- **Passwords leak.** A password or a one-time code can be phished and replayed from anywhere.
+
+A payment that matters has to be confirmed by something the attacker cannot copy from a distance: the owner's own device, unlocked by their own fingerprint, face or PIN.
+
+### What MooPay does
+
+MooPay uses **passkeys (WebAuthn)**. The private key lives in the owner's phone or computer, never leaves it, and signs only after the device checks a fingerprint, face or PIN. No password and no sign-up.
+
+- **Payments that need your OK need your biometrics.** Anything above the auto-approve limit (new accounts start at **$0.10**), a first payment to a new address from X, and any large or fast drain of the wallet produces an approval card. Approving it asks the device for a fingerprint, face or PIN.
+- **One signature, one payment.** The challenge is random, used once and tied to that payment. A signature cannot be replayed or reused on another payment.
+- **Look-alike sites fail.** The browser signs only for `moopay.cash`, so a phishing page gets nothing usable.
+- **Cloned keys are caught.** The signature counter must go up. A counter that does not is refused.
+- **Works on X too.** When a payment started on X needs approval, the bot's reply carries a one-tap link (`/ok/<id>`). It opens a sheet that asks for the passkey straight away. A hijacked X account can start a request but cannot approve it.
+- **The agent nags until it is set up.** Opening the chat without a passkey shows a message and a **Set up biometrics** button.
+
+### How to use it
+
+1. Open the chat at `/agent` on the device you want to use, ideally your phone.
+2. Type `/passkey` (or tap **Set up biometrics**) and confirm with your fingerprint, face or PIN. This turns protection on for both the app and X.
+3. Send a payment above your auto-approve limit. It shows an approval card, and approving it asks for your biometrics.
+4. For payments started on X, tap the link in the bot's reply and confirm.
+
+| Command | What it does |
+| --- | --- |
+| `/passkey` | Adds a passkey on this device. |
+| `/biometrics-web` | Turns biometric approval on or off for the web app. |
+| `/biometrics-x` | Turns biometric approval on or off for X. |
+| `/backup` | Downloads an offline backup of your wallet key, sealed with your recovery code. |
+
+**Turning it on or off needs the owner.** Changing either toggle first asks for the passkey, so someone at an unlocked screen or in a hijacked session cannot switch protection off, and cannot quietly switch it back on with a different setup. Unfreezing the account also needs the passkey.
+
+**Limits that stay on even if you switch it off.** A drain of 85% or more of the wallet (amounts under $20 are ignored) and more than 3 payments in a minute still require the passkey. The hard per-payment ceiling, the typed-address check and the X kill switch do not depend on it.
+
+**Good to know.**
+- A passkey is tied to the site. One made on `localhost` does not work on `moopay.cash`.
+- A computer with no fingerprint reader or camera offers a QR code to scan with your phone, or a security key.
+- Lose the device and you still have your recovery code to get back in, then add a new passkey.
+- The tests sign with a software authenticator (real P-256 signatures). A passkey on a real phone and in X's in-app browser still needs a manual check. If X's browser shows nothing, open the link in the phone's own browser.
+
+Code: [`src/security/passkeys.ts`](src/security/passkeys.ts), [`src/security/risk.ts`](src/security/risk.ts), [`src/web/src/approve.ts`](src/web/src/approve.ts), tests in [`tests/unit/passkeys.test.ts`](tests/unit/passkeys.test.ts).
+
 ## Capabilities
 
 Each row names where it lives in the code.
@@ -138,7 +189,7 @@ Other controls:
 - **A second model checks the first.** A separate call with no tools must agree the action matches what the user asked. Anything unclear counts as a no. `MOOPAY_AUDITOR=off` turns it off.
 - **Hard ceiling.** One payment from the agent wallet is at most $3,000 (`MOOPAY_TX_CEILING_USD`). Above that the user pays from their own wallet.
 - **X gets tighter limits.** A payment started from X to a new recipient always needs approval in the app, and so does anything above $10 (`MOOPAY_X_AUTO_USD`).
-- **Passkeys.** `/passkey` adds a fingerprint, face or device PIN (WebAuthn, discoverable credential, user verification required, no password or sign-up). Payments that need an OK then ask for it, on the web app (`/biometrics-web`) and on X (`/biometrics-x`); turning either off needs the passkey itself. Challenges are one-use and tied to one payment. Origin and site id are checked, and a counter that does not go up is refused, which catches a cloned key. Code: `src/security/passkeys.ts`.
+- **Passkeys.** `/passkey` adds a fingerprint, face or device PIN (WebAuthn, discoverable credential, user verification required, no password or sign-up). Payments that need an OK then ask for it, on the web app (`/biometrics-web`) and on X (`/biometrics-x`); turning either on or off needs the passkey itself. Challenges are one-use and tied to one payment. Origin and site id are checked, and a counter that does not go up is refused, which catches a cloned key. Code: `src/security/passkeys.ts`.
 - **One tap from X.** When a payment started on X needs an OK and the user has a passkey, the reply carries a link (`/ok/<id>`). It opens a signing sheet that asks for the passkey on load. Without a passkey the user approves in the app.
 - **Drain check.** `src/security/risk.ts` forces a passkey, even with the toggles off, when a payment is 85% or more of the wallet or more than 3 go out in a minute.
 - **Lock from X.** The linked account can post `@moopaybot lock` to freeze the wallet at once. Unlocking needs the recovery code and the passkey.

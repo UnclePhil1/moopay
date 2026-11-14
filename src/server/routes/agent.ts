@@ -198,7 +198,7 @@ export async function makeAgent(d: AgentDeps) {
         const b = await bodyOf(req), want = { web: b["web"] === undefined ? undefined : b["web"] !== false, x: b["x"] === undefined ? undefined : b["x"] !== false };
         if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Add a passkey first. Type /passkey.");
         const cur = u.bio ?? { web: true, x: true };
-        if ((want.web === false && cur.web) || (want.x === false && cur.x)) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "toggle"); } // turning protection off needs the passkey itself
+        if ((want.web !== undefined && want.web !== cur.web) || (want.x !== undefined && want.x !== cur.x)) { await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "toggle"); } // any change, on or off, needs the passkey itself
         u.bio = { web: want.web ?? cur.web, x: want.x ?? cur.x };
         security.add("passkey_toggle", { user: u.id.slice(0, 8), web: u.bio.web, x: u.bio.x }, now()); store.save();
         json(res, 200, { bio: u.bio }); return true;

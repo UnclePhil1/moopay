@@ -524,9 +524,9 @@ async function toggleBio(door) {
     const st = await (await api("passkey/status")).json();
     if (!st.count) return void (clearEmpty(), await say(agent(), "Add a passkey first. Type /passkey."));
     const next = !st.bio[door], name = door === "x" ? "X" : "this app";
-    const assertion = next ? undefined : await strong("toggle");
+    const assertion = await strong("toggle");
     await post("passkey/toggle", { [door]: next, ...(assertion ? { assertion } : {}) });
-    clearEmpty(); await say(agent(), next ? `Passkey approval is on for ${name}.` : `Passkey approval is off for ${name}. Payments that look unusual still ask for it.`);
+    clearEmpty(); await say(agent(), next ? `Passkey approval is on for ${name}.` : `Passkey approval is off for ${name}. Payments that look unusual still ask for it. Type /biometrics-${door} to turn it back on.`);
   } catch (e) { await fail(e, "I couldn't change that."); }
 }
 /** An offline copy of the wallet, locked with the recovery code. If MooPay is ever gone, /recover opens it with no server. */
