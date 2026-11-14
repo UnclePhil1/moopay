@@ -14,5 +14,13 @@ async function hints(): Promise<("client-device" | "hybrid" | "security-key")[]>
 
 (window as unknown as { moopayPasskey: unknown }).moopayPasskey = {
   register: async (optionsJSON: Reg) => startRegistration({ optionsJSON: { ...optionsJSON, hints: await hints() } }),
-  assert: async (optionsJSON: Auth) => startAuthentication({ optionsJSON: { ...optionsJSON, hints: await hints() } }),
+  assert: async (optionsJSON: Auth) => {
+    const hint = await hints();
+    // Some phones fail with an "unknown error" when asked for one named key; asking again with no name lets them offer the MooPay passkey they hold.
+    return startAuthentication({ optionsJSON: { ...optionsJSON, hints: hint } }).catch((e: unknown) => {
+      if (!(e instanceof Error) || e.name === "NotAllowedError" || e.name === "AbortError") throw e;
+      const { allowCredentials: _drop, ...open } = optionsJSON as unknown as Record<string, unknown>;
+      return startAuthentication({ optionsJSON: { ...(open as unknown as Auth), hints: hint } });
+    });
+  },
 };

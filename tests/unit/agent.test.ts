@@ -1621,3 +1621,17 @@ test("biometrics on: claims, group payouts, staking, withdrawals and schedules a
   const s = await a.ops.send(a.u, { amountUsd: "1", chain: "near", recipient: BOB }, false, { sched: true });
   assert.equal(s.result["status"], "sent", "a scheduled run was approved when it was set up");
 });
+
+test("X: the approval link goes by private message, the public reply holds no details, and a failed DM falls back to the link", async () => {
+  const a = await agent(); a.u.x = { id: "42", handle: "me" };
+  const link = "https://moopay.cash/ok/abc123def456";
+  const out = { text: "Send $5 to bob.near on NEAR. Fee $0.10.", urls: [link] };
+  const mk = (dm?: (to: string, t: string) => Promise<void>) => { const said: string[] = [], dms: string[] = []; return { said, dms, deps: { store: a.store, botHandle: "moopaybot", feeBps: 0, now: () => 1_800_000_000_000, ask: async () => out, stamp: () => undefined, reply: async (t: string) => { said.push(t); }, ...(dm ? { dm: async (to: string, t: string) => { dms.push(to + "|" + t); return dm(to, t); } } : {}) } as XDeps }; };
+  const ok = mk(async () => undefined);
+  await handleMention(ok.deps, { id: "1", text: "@moopaybot send $5 to bob.near", author_id: "42" });
+  assert.equal(ok.dms.length, 1); assert.match(ok.dms[0]!, /^42\|Send \$5 to bob\.near[\s\S]*\/ok\/abc123def456$/);
+  assert.doesNotMatch(ok.said[0]!, /bob|\$5|\/ok\//, "nothing about the payment is posted");
+  const bad = mk(async () => { throw new Error("X answered 403"); });
+  await handleMention(bad.deps, { id: "2", text: "@moopaybot send $5 to bob.near", author_id: "42" });
+  assert.match(bad.said[0]!, /\/ok\/abc123def456$/); assert.doesNotMatch(bad.said[0]!, /bob|\$5/);
+});

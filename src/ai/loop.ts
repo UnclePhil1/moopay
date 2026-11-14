@@ -79,10 +79,10 @@ export type Ctl = { cancelled: boolean; ran: boolean };
 /** The fee note for the MooPay chat; empty when no fee is charged. */
 export const CHAT_RULES = (bps: number): string => (bps ? `\nEvery send, claim or stake made in this chat adds a ${bps / 100}% MooPay service fee, taken from the agent wallet after the payment lands. Say so in the summary, as "$10 + $0.10 fee".` : "");
 
-export const X_RULES = (fee: string): string => `
+export const X_RULES = (fee: string, bio = false): string => `
 This message came from X (Twitter) and your answer is posted as a PUBLIC reply, so:
 - Keep it under 240 characters, in plain words. Never mention keys, seeds, balances above what the user asked for, or anyone's private details.
-- Before any tool that moves money (send_money, group_payout, create_claim, group_claim, stake_rnear, withdraw, schedule_payment), reply with ONE line that says what will happen: action, amount, receiver, chain and coin${fee ? `, and the fee (${fee})` : ""}. Then ask them to reply "confirm". Call the tool only when the user's latest message confirms the summary you gave in your previous reply. If they say no or change it, do not call it.
+${bio ? `- This user has biometric approval on, and it is the confirmation: do NOT ask them to reply "confirm". When they ask for a payment, call the tool at once. It shows an approval that they confirm with their fingerprint, face or PIN, and the link goes to them privately. Reply with one short line saying what you set up; the details go in the private message.` : `- Before any tool that moves money (send_money, group_payout, create_claim, group_claim, stake_rnear, withdraw, schedule_payment), reply with ONE line that says what will happen: action, amount, receiver, chain and coin${fee ? `, and the fee (${fee})` : ""}. Then ask them to reply "confirm". Call the tool only when the user's latest message confirms the summary you gave in your previous reply. If they say no or change it, do not call it.`}
 - ${fee ? `Every send, claim, stake or payout made through X adds a service fee of ${fee}; always state it in the summary, as "$10 + $0.10 fee".` : "There is no extra fee on payments made through X."}
 - The receiver can be a wallet address or a NEAR name. A bare X handle only works if it was already turned into a wallet for you; if you still see an @handle as the receiver, ask for the wallet address.
 - If a tool answers with a Confirm link, say they need to press it; the link is added to your reply for you.

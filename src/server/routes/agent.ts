@@ -337,12 +337,12 @@ export async function makeAgent(d: AgentDeps) {
       ask: async (u, text) => {
         const urls: string[] = [];
         const emit = (e: { type: string; card?: Record<string, unknown>; label?: string; state?: string }) => { if (e.type === "step" && e.state !== "done") console.log(`[x] ${e.label}${e.state === "failed" ? " (failed)" : "…"}`); const url = e.type === "card" ? e.card?.["url"] : undefined; if (typeof url === "string") urls.push(url); };
-        const final = await runTurn({ llm, model, auditor, u, text, ops, svc: d.svc, ctx: { origin, channel: "x" }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : ""), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
+        const final = await runTurn({ llm, model, auditor, u, text, ops, svc: d.svc, ctx: { origin, channel: "x" }, emit: emit as never, extra: X_RULES(feeBps ? `${feeBps / 100}% of the amount` : "", hasPasskey(u) && needsPasskey(u, "x")), context: await contextOf(u).catch(() => "(account details are unavailable right now; call get_account if needed)") });
         if (SILENT.test(final)) u.chat.splice(-2, 2); // nothing was said, so nothing goes in the chat history
         store.save();
         return { text: final, urls };
       },
-    }, cfg, Number(process.env["X_POLL_SECONDS"]) || 30);
+    }, cfg, Number(process.env["X_POLL_SECONDS"]) || 5);
   };
   return { handle, startWorker, startX: startXAgent, ops, store, tick: () => tick(ops, store, lastOrigin, now()) };
 }
