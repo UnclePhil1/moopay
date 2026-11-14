@@ -24,11 +24,15 @@ const MSGS_PER_MINUTE = 12;
 export interface AgentDeps { svc: MooPayService; stateFile: string; llm?: Llm | undefined; model?: string | undefined; ai?: { name: string; tier: string } | undefined; now?: () => number; sponsor?: Sponsor | undefined; names?: NameParent | undefined; private?: OutLayer | undefined;
   /** AI messages allowed per day: per user, per IP, and across the whole server (a ceiling on what the AI can cost) */
   aiDaily?: { user: number; ip: number; total: number };
-  vault?: Vault | undefined }
+  vault?: Vault | undefined;
+  /** The TEE signer. With it, new accounts get their wallet from the signer and this server never holds their key. Defaults to SIGNER_URL and SIGNER_TOKEN. */
+  signer?: { url: string; token: string } | undefined }
 
 export async function makeAgent(d: AgentDeps) {
   const now = d.now ?? Date.now;
   const store = await AgentStore.open(`${d.stateFile}.agent.json`, d.vault);
+  const sig = d.signer ?? (process.env["SIGNER_URL"] && process.env["SIGNER_TOKEN"] ? { url: process.env["SIGNER_URL"], token: process.env["SIGNER_TOKEN"] } : undefined);
+  store.useSigner(sig);
   useSecurityLog(`${d.stateFile}.security.log`);
   const turns = new Map<string, Ctl>();
   const apiLimit = rateLimiter(240, 60_000, now), strictLimit = rateLimiter(12, 60_000, now), chatLimit = rateLimiter(40, 60_000, now);
@@ -158,6 +162,7 @@ export async function makeAgent(d: AgentDeps) {
     try {
       const op = p.slice("/agent/api/".length);
       if (op.startsWith("delegate/")) { await delegate(req, res, op.slice(9), ctx); return true; }
+      await store.prepare(tokenOf(req)); // a brand-new account gets its address from the signer first
       const { u, master } = authOf(req);
       const needMaster = (what: string) => { if (!master) throw new MoopayError("INVALID_INPUT", `${what} needs your recovery code. Type /restore, paste it, and choose "My device".`); };
       if (op === "state" && req.method === "GET") {
@@ -180,7 +185,7 @@ export async function makeAgent(d: AgentDeps) {
         if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Set up biometrics first. Type /passkey, then ask for your key again.");
         await passkeys.verify(u, origin, (await bodyOf(req))["assertion"] as AuthenticationResponseJSON | undefined, "export"); store.save();
         security.add("key_exported", { user: u.id.slice(0, 8) }, now());
-        const k = store.keyOf(u);
+        const k = store.rawKeyOf(u);
         json(res, 200, { accountId: k.accountId, secretKey: k.secretKey });
         return true;
       }
@@ -216,7 +221,7 @@ export async function makeAgent(d: AgentDeps) {
       if (op === "backup" && req.method === "POST") {
         needMaster("A backup");
         if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
-        const k = store.keyOf(u), code = String(req.headers["x-moopay-device"] ?? "");
+        const k = store.rawKeyOf(u), code = String(req.headers["x-moopay-device"] ?? "");
         security.add("backup_made", { user: u.id.slice(0, 8) }, now());
         json(res, 200, sealBackup({ accountId: k.accountId, secretKey: k.secretKey }, code));
         return true;

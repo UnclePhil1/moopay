@@ -21,6 +21,7 @@ async function post(url: string, token: string, path: string, body: unknown): Pr
 /** Talks to the signer for the account calls the app makes: nonces, passkeys, strict mode, lock. */
 export class SignerApi {
   constructor(private readonly url: string, private readonly token: string) {}
+  pubkey = async (userId: string) => (await post(this.url, this.token, "/v1/pubkey", { userId })) as { accountId: string; publicKey: string };
   status = async (userId: string) => (await post(this.url, this.token, "/v1/status", { userId })) as unknown as SignerStatus;
   nonce = async (userId: string) => String((await post(this.url, this.token, "/v1/nonce", { userId }))["nonce"]);
   registerOptions = (userId: string) => post(this.url, this.token, "/v1/passkey/register-options", { userId });
@@ -42,6 +43,9 @@ export class RemoteSigner extends Signer {
     const r = await post(url, token, "/v1/pubkey", { userId });
     return new RemoteSigner(url, token, userId, PublicKey.from(String(r["publicKey"])), String(r["accountId"]));
   }
+
+  /** A signer for a user whose account and key are already known, so no call is needed just to build it. */
+  static known(url: string, token: string, userId: string, accountId: string, publicKey: string): RemoteSigner { return new RemoteSigner(url, token, userId, PublicKey.from(publicKey), accountId); }
 
   approved(proof: ApprovalProof): RemoteSigner { return new RemoteSigner(this.url, this.token, this.userId, this.key, this.accountId, proof); }
 

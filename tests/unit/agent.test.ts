@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { alertOwner, resetAlerts } from "../../src/util/alert.js";
 import { handlePages } from "../../src/server/routes/pages.js";
@@ -21,6 +22,10 @@ import { Stats } from "../../src/storage/stats.js";
 import type { OneClick } from "../../src/agent/intents/oneclick.js";
 import { ETH_ADDR, FakeNear, FakeOneClick, FakeOutLayer, TOKENS, USDC } from "../fakes/helpers.js";
 import type { OutLayer } from "../../src/agent/outlayer.js";
+import { FixedKeySource } from "../../src/signer/keys.js";
+import { signerServer, WalletSigner } from "../../src/signer/service.js";
+import { SignerPasskeys } from "../../src/signer/passkeys.js";
+import { MemoryStateStore } from "../../src/signer/state.js";
 
 const BOB = "bob.near";
 const TOKEN = "t".repeat(43);
@@ -1653,4 +1658,23 @@ test("X cannot change rules, mint agent keys or link accounts; the app can; rule
   const r = await a.ops.rules(a.u, { dailyCapUsd: 100000 });
   assert.equal(r.result["status"], "needs_approval");
   assert.equal(a.u.approvals.at(-1)!.strong, true, "loosening a limit needs the passkey");
+});
+
+test("signer: a new account opened through the real routes lives in the signer, and its key can never be shown or backed up", async () => {
+  const a = await agent();
+  const wallet = new WalletSigner(new FixedKeySource("routes"), { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n } }, unattended: {} }, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  try {
+    const fresh = "z".repeat(43);
+    const st = await call("state", fresh);
+    assert.equal(st.status, 200);
+    assert.equal(st.body["address"] ?? (st.body as Record<string, any>)["account"]?.["address"], (await wallet.pubkey(createHash("sha256").update("moopay.device|" + fresh).digest("hex"))).accountId, "the address is the one the signer derived");
+    for (const op of ["export", "backup"]) {
+      const r = await call(op, fresh, {});
+      assert.equal(r.status, 400, op);
+      assert.match(String(r.body["message"]), /secure enclave|biometrics|passkey/i, op);
+    }
+  } finally { close(); sig.close(); }
 });

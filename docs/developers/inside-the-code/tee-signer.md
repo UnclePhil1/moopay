@@ -70,9 +70,12 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 1. Map every place the server uses `secretKey` (done: `keyOf` plus `near.ts` call sites).
 2. Add a `Signer` interface to `NearOps` so write calls take a key reference instead of a raw secret.
 3. Build the signer service and its tests with a local stand-in for the dstack socket. (Done: `src/signer/`, with tests in `tests/unit/signer.test.ts`. Not deployed.)
-4. Passkey verification, strict mode, lock and the unattended allowance inside the signer. (Done, with tests. State is in memory until step 5.)
+4. Passkey verification, strict mode, lock and the unattended allowance inside the signer. (Done, with tests. State is on chain since step 5.)
 5. Anchor passkeys and limits on chain. (Done: `contracts/signer-state` and `src/signer/state.ts`, tested against an in-memory store and a fake reader. Not deployed, so the real write path has not run against a chain.)
-6. Build the image in CI and pin it by digest. Deploy with on-chain KMS.
-7. Prove unapproved code gets no key.
-8. Migrate existing wallets.
-9. Move contract ownership to a Safe.
+6. Wire the MooPay server to the signer. Done in part, behind `SIGNER_URL` and `SIGNER_TOKEN` (off by default):
+   - Done: new accounts get their address and key from the signer; the server keeps only the public key (`UserRec.tee`). `Store.keyOf` returns a signer object for them, so every payment path signs through the signer without changes. Key export and backup are refused for them. If the signer is set but unreachable, no account is created on a server key.
+   - Not done: the passkey flows (approve, toggle, unlock, export, add a passkey, and the approval page) still use the server's own passkey records. Until they call the signer, a signer account can only send within the signer's small free allowance, and larger payments are refused with "add a passkey". Cross-chain payments, whose NEAR-side recipient is a swap deposit address chosen at run time, need a design for what the passkey signature covers. Existing accounts stay on the server key until moved.
+7. Build the image in CI and pin it by digest. Deploy with on-chain KMS.
+8. Prove unapproved code gets no key.
+9. Migrate existing wallets.
+10. Move contract ownership to a Safe.

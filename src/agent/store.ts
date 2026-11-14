@@ -7,6 +7,9 @@ import { loadSeed } from "../storage/seed.js";
 import { recipientKey } from "./policy.js";
 import { Reporter, REPORT_KINDS, type Row } from "./report.js";
 import type { Preflight } from "./preflight.js";
+import type { Signer } from "near-api-js";
+import { RemoteSigner, SignerApi } from "../signer/client.js";
+import { MoopayError } from "../util/errors.js";
 
 /*
  * One record per anonymous user. The browser keeps a random device token (the recovery code); only its hash is stored here.
@@ -68,6 +71,8 @@ export interface UserRec {
   x?: { id: string; handle: string };
   /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
   outlayer?: { key: string; account: string };
+  /** Set when this wallet's key lives in the TEE signer, not on this server. Only the public key is kept here. */
+  tee?: { publicKey: string };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
   points?: number;
   /** the name the user chose; their wallet address is then <name>.<parent account> */
@@ -125,8 +130,42 @@ export class AgentStore {
   }
 
   private wallet(id: string) { return deriveNoteAccount(createHmac("sha256", this.seed).update("moopay.agent|" + id).digest()); }
-  /** The key never changes; a named account is just another account controlled by the same key. */
-  keyOf(u: UserRec) { const w = this.wallet(u.id); return u.name ? { ...w, accountId: u.accountId } : w; }
+
+  /*
+   * Custody. With a signer configured, NEW accounts get their wallet from the TEE signer: this server keeps only the public key and
+   * can ask the signer to sign, but never holds the key. Accounts made before that keep their server-derived key until they are moved.
+   */
+  private signerCfg: { url: string; token: string } | undefined;
+  private pendingTee = new Map<string, { accountId: string; publicKey: string }>();
+  useSigner(cfg: { url: string; token: string } | undefined): void { this.signerCfg = cfg; }
+  get usesSigner(): boolean { return !!this.signerCfg; }
+
+  /** Before a brand-new account is made, ask the signer for its address. Does nothing for known accounts or when no signer is set. */
+  async prepare(token: string): Promise<void> {
+    if (!this.signerCfg || !MASTER_RE.test(token)) return;
+    const hash = userIdOf(token);
+    if (this.byMaster.has(hash) || this.users.has(hash) || this.pendingTee.has(hash)) return;
+    try { this.pendingTee.set(hash, await new SignerApi(this.signerCfg.url, this.signerCfg.token).pubkey(hash)); }
+    catch { throw new MoopayError("UPSTREAM_TIMEOUT", "The secure signer isn't answering, so I can't open a new account right now. Try again in a minute."); }
+  }
+
+  /**
+   * What signs for this user: a key string for an account whose key this server holds, or a signer object for one held in the TEE.
+   * Pass it straight to the NEAR calls. Code that needs the actual key must use `rawKeyOf`, which refuses for TEE accounts.
+   */
+  keyOf(u: UserRec): { accountId: string; secretKey: string | Signer; publicKey: string } {
+    if (u.tee) {
+      if (!this.signerCfg) throw new MoopayError("INTERNAL", "This account's key is held by the secure signer, which isn't configured on this server.");
+      return { accountId: u.accountId, secretKey: RemoteSigner.known(this.signerCfg.url, this.signerCfg.token, u.id, u.accountId, u.tee.publicKey), publicKey: u.tee.publicKey };
+    }
+    // The key never changes; a named account is just another account controlled by the same key.
+    const w = this.wallet(u.id); return u.name ? { ...w, accountId: u.accountId } : w;
+  }
+  /** The actual key text, for the few places that must show or seal it. A TEE account has none to give. */
+  rawKeyOf(u: UserRec): { accountId: string; secretKey: string } {
+    if (u.tee) throw new MoopayError("INVALID_INPUT", "This wallet's key is held in a secure enclave and is never shown, not even to you. Your recovery code opens your account on any device.");
+    const k = this.keyOf(u); return { accountId: k.accountId, secretKey: k.secretKey as string };
+  }
   nameTaken(name: string): boolean { for (const u of this.users.values()) if (u.name === name) return true; return false; }
   setName(u: UserRec, name: string, accountId: string): void { u.name = name; u.accountId = accountId; this.save(); }
 
@@ -144,8 +183,12 @@ export class AgentStore {
     let u = this.byMaster.get(hash);
     if (!u) {
       if (this.users.has(hash)) throw new Error("That recovery code was reset and no longer works. Use the new one.");
+      const tee = this.signerCfg ? this.pendingTee.get(hash) : undefined;
+      // With a signer set, an account is never created on a server key by accident: call `prepare` first.
+      if (this.signerCfg && !tee) throw new MoopayError("UPSTREAM_TIMEOUT", "The secure signer isn't ready, so I can't open a new account right now. Try again in a minute.");
+      this.pendingTee.delete(hash);
       u = {
-        id: hash, masterHash: hash, sessions: [], accountId: this.wallet(hash).accountId, createdAt: now, rules: { ...DEFAULT_RULES }, spent: { day: "", usd: 0 }, known: [],
+        id: hash, masterHash: hash, sessions: [], accountId: tee ? tee.accountId : this.wallet(hash).accountId, ...(tee ? { tee: { publicKey: tee.publicKey } } : {}), createdAt: now, rules: { ...DEFAULT_RULES }, spent: { day: "", usd: 0 }, known: [],
         payments: [], approvals: [], tasks: [], agents: [], events: [], nextEventId: 1, chat: [], seen: { usdc: "0", near: "0" }, msgTimes: [],
       };
       this.add(u); this.save();
