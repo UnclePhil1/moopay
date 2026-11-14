@@ -1,0 +1,21 @@
+# The TEE signer image (src/signer). Built in CI and pinned by digest in the Phala compose file, so the code hash the on-chain
+# key service approves is exactly this build. The base image is pinned by digest too.
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS build
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --ignore-scripts
+COPY config ./config
+COPY src ./src
+RUN npx tsc -p tsconfig.json
+
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json ./
+# only what the signer runs on; the dstack client is loaded at run time (keys.ts) and pinned here
+RUN npm ci --omit=dev --ignore-scripts && npm install --no-save --ignore-scripts @phala/dstack-sdk@0.5.8 && npm cache clean --force
+COPY --from=build /app/dist ./dist
+USER node
+EXPOSE 3000
+# needs /var/run/dstack.sock mounted by the compose file
+CMD ["node", "dist/src/signer/index.js"]

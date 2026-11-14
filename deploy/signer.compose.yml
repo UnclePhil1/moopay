@@ -1,0 +1,17 @@
+# Phala (dstack) compose for the signer. Replace IMAGE_DIGEST with the digest the "Signer image" workflow prints (the digest, never a tag).
+# The compose hash the on-chain key service approves covers this file, so changing anything here needs a new approval.
+services:
+  signer:
+    image: ghcr.io/unclephil1/moopay-signer@sha256:IMAGE_DIGEST
+    restart: always
+    ports: ["3000:3000"]
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      SIGNER_TOKEN: ${SIGNER_TOKEN}
+      SIGNER_STATE_CONTRACT: ${SIGNER_STATE_CONTRACT}
+      SIGNER_CAPS: ${SIGNER_CAPS}
+      SIGNER_UNATTENDED: ${SIGNER_UNATTENDED}
+      SIGNER_FEE_ACCOUNT: ${SIGNER_FEE_ACCOUNT:-}
+      SIGNER_FEE_CAPS: ${SIGNER_FEE_CAPS:-}
+      NEAR_RPC_URL: ${NEAR_RPC_URL}

@@ -81,3 +81,7 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 8. Prove unapproved code gets no key.
 9. Migrate existing wallets.
 10. Move contract ownership to a Safe.
+
+## Building and deploying the image
+
+`Dockerfile.signer` builds only the signer, on a digest-pinned base. The `Signer image` workflow builds it on pushes that touch the signer and publishes `ghcr.io/<owner>/moopay-signer`, printing the image digest in the run summary. `deploy/signer.compose.yml` takes that digest. The compose file's hash is what the on-chain key service approves. The image has not been built yet (no Docker on the dev machine): the first CI run is its first build. Note that the secrets in the compose environment (`SIGNER_TOKEN`) are passed to the CVM encrypted at deploy time, not stored in the file.
