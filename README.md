@@ -268,7 +268,7 @@ This is experimental and unaudited. What you are trusting:
 
 [Watch the full demo video](https://x.com/moopaydotcash/status/2121242873270071778)
 
-Short clips already in the repository: `moopay-landing-demo.mp4`, `moopay-stake-x.mp4`, `moopay-reel-1.mp4`, `moopay-reel-2.mp4`, `moopay-stake-recut.mp4`.
+Short clips already in the repository, in the `media/` folder (`moopay-landing-demo.mp4`, `moopay-stake-x.mp4`, `moopay-reel-1.mp4`, `moopay-reel-2.mp4`, `moopay-stake-recut.mp4`).
 
 ## Run it locally
 

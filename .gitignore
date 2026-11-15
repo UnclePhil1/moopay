@@ -13,3 +13,11 @@ moopay-state.json*
 src/web/public/dist
 .outlayer-probe.json
 PROMPT.md
+
+# local-only leftovers: never published
+local-assets/
+.claude/
+*.log
+*.bak
+.DS_Store
+.outlayer-probe.json
