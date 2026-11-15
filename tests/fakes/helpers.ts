@@ -76,6 +76,8 @@ export class FakeNear {
     this.nearBalances.set(p.newId, p.deposit);
     return { txHash: `create-${this.created.length}` };
   }
+  addedKeys: { accountId: string; newKey: string }[] = [];
+  async addFullAccessKey(p: { accountId: string; newKey: string }) { this.addedKeys.push({ accountId: p.accountId, newKey: p.newKey }); return { txHash: `key-${this.addedKeys.length}` }; }
   async sendNear(p: { accountId: string; to: string; amount: bigint }) {
     this.transfers.push({ ...p, secretKey: "", tokenContract: "NEAR" });
     return { txHash: `tx-${this.transfers.length}` };

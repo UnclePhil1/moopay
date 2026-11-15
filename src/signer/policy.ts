@@ -1,4 +1,4 @@
-import { decodeTransaction } from "near-api-js";
+import { baseEncode, decodeTransaction } from "near-api-js";
 
 /** A cap on one asset: native NEAR is "NEAR", a token is its contract id. Amounts are in the asset's smallest unit. */
 export interface Cap { perTx: bigint; daily: bigint }
@@ -41,11 +41,11 @@ export class Refused extends Error {
 }
 
 /** Reads an unsigned transaction and lists every outflow, or refuses it. */
-export function inspect(bytes: Uint8Array): { signerId: string; publicKey: string; outflows: Outflow[] } {
+export function inspect(bytes: Uint8Array): { signerId: string; receiverId: string; publicKey: string; outflows: Outflow[]; addKeys: { key: string; full: boolean }[] } {
   let tx: ReturnType<typeof decodeTransaction>;
   try { tx = decodeTransaction(bytes); } catch { throw new Refused("bad_transaction", "that is not a NEAR transaction"); }
   if (!tx.actions.length) throw new Refused("bad_transaction", "a transaction with no actions");
-  const outflows: Outflow[] = [];
+  const outflows: Outflow[] = [], addKeys: { key: string; full: boolean }[] = [];
   for (const a of tx.actions as unknown as Record<string, any>[]) { // eslint-disable-line @typescript-eslint/no-explicit-any
     if (a["transfer"]) {
       const amount = big(a["transfer"].deposit);
@@ -70,11 +70,16 @@ export function inspect(bytes: Uint8Array): { signerId: string; publicKey: strin
       }
       // Whatever NEAR is attached to the call leaves the wallet too (wrapping, staking, storage fees).
       if (deposit > 0n && method !== "ft_transfer" && method !== "near_withdraw") outflows.push({ asset: "NEAR", amount: deposit, to: tx.receiverId, method });
+    } else if (a["addKey"]) {
+      // Only ever signed for a key the owner's passkey approved by name (see WalletSigner.recoveryKey); the caller checks that.
+      const k = a["addKey"].publicKey?.ed25519Key?.data;
+      if (!k || k.length !== 32) throw new Refused("bad_transaction", "that key is not an ed25519 key");
+      addKeys.push({ key: "ed25519:" + baseEncode(Uint8Array.from(k)), full: !!a["addKey"].accessKey?.permission?.fullAccess });
     } else {
       throw new Refused("forbidden_action", "only transfers and approved contract calls can be signed");
     }
   }
-  return { signerId: tx.signerId, publicKey: tx.publicKey.toString(), outflows };
+  return { signerId: tx.signerId, receiverId: tx.receiverId, publicKey: tx.publicKey.toString(), outflows, addKeys };
 }
 
 /** A day's running totals for one user, as stored on chain. It starts again when the UTC day changes. */

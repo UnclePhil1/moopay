@@ -13,6 +13,7 @@ export const BUNDLES: Record<string, string> = {
   "recover.js": "text/javascript; charset=utf-8",
   "passkey.js": "text/javascript; charset=utf-8",
   "approve.js": "text/javascript; charset=utf-8",
+  "recovery.js": "text/javascript; charset=utf-8",
   "modal-ui.css": "text/css; charset=utf-8",
   "moopay-logo.png": "image/png",
   "favicon.png": "image/png",

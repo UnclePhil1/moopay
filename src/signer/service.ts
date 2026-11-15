@@ -71,7 +71,7 @@ export class WalletSigner {
   /** Where the user stands: what the app needs to know to ask for a passkey or explain a refusal. */
   async status(userId: string) {
     await this.wallet(userId);
-    return this.open(userId, async ({ state: s }) => ({ passkeys: this.passkeys.list(s), active: this.passkeys.active(s), pending: this.passkeys.pending(s), activeAt: s.activeAt, strict: s.strict, locked: s.locked }));
+    return this.open(userId, async ({ state: s }) => ({ passkeys: this.passkeys.list(s), active: this.passkeys.active(s), pending: this.passkeys.pending(s), activeAt: s.activeAt, strict: s.strict, locked: s.locked, recovery: { approved: s.recovery?.approved ?? [], added: s.recovery?.added ?? [] } }));
   }
 
   nonce(userId: string): string { return this.passkeys.nonce(userId); }
@@ -81,6 +81,7 @@ export class WalletSigner {
     const w = await this.wallet(userId);
     const seen = inspect(unsigned);
     if (seen.publicKey !== w.publicKey) throw new Refused("bad_transaction", "that transaction names a different key");
+    if (seen.addKeys.length) return this.signRecoveryKey(userId, w, unsigned, seen);
     return this.open(userId, async ({ state: st, save }) => {
       if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
       const now = this.now();
@@ -117,6 +118,41 @@ export class WalletSigner {
       await save(); // on record before it is signed
       const out = await KeyPairSigner.fromSecretKey(w.secretKey as never).signTransaction(decodeTransaction(unsigned));
       return { signed: encodeTransaction(out.signedTransaction), txHash: baseEncode(out.txHash) };
+    });
+  }
+
+  /** Signs the one transaction that adds a recovery key, and only for a key the owner's passkey approved by name. Anything else with an AddKey in it is refused. */
+  private async signRecoveryKey(userId: string, w: { accountId: string; secretKey: string }, unsigned: Uint8Array, seen: ReturnType<typeof inspect>): Promise<{ signed: Uint8Array; txHash: string }> {
+    const one = seen.addKeys.length === 1 && seen.outflows.length === 0 ? seen.addKeys[0]! : undefined;
+    if (!one || !one.full || seen.receiverId !== w.accountId) throw new Refused("forbidden_action", "the only key that can be added is one full-access recovery key, to this same account");
+    return this.open(userId, async ({ state: st, save }) => {
+      if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
+      const r = st.recovery;
+      if (!r || !r.approved.includes(one.key)) throw new Refused("passkey_required", "That recovery key was not approved with your fingerprint, face or PIN.");
+      st.recovery = { approved: r.approved.filter((k) => k !== one.key), added: [...r.added, one.key] };
+      await save(); // on record before it is signed
+      const out = await KeyPairSigner.fromSecretKey(w.secretKey as never).signTransaction(decodeTransaction(unsigned));
+      return { signed: encodeTransaction(out.signedTransaction), txHash: baseEncode(out.txHash) };
+    });
+  }
+
+  /**
+   * The owner's passkey names one public key to be added to the account as a recovery key. The owner makes the key in their own browser
+   * and keeps it; MooPay and this signer never see the secret half. With it the owner can move their funds with any NEAR wallet even if
+   * this signer is down or every passkey is lost. It bypasses the caps, which is why only a passkey can approve it, one key at a time.
+   */
+  async recoveryKey(userId: string, publicKey: string, a: Approval): Promise<void> {
+    await this.wallet(userId);
+    if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(publicKey)) throw new Refused("bad_transaction", "that is not an ed25519 public key");
+    await this.open(userId, async ({ state, save }) => {
+      if (state.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
+      if (!this.passkeys.active(state)) throw new Refused("passkey_required", "Add a passkey first.");
+      const r = state.recovery ?? { approved: [], added: [] };
+      if (r.approved.length + r.added.length >= 3) throw new Refused("over_limit", "A wallet can have up to 3 recovery keys.");
+      await this.passkeys.verifyAction(state, userId, a.nonce, `recoverykey:${publicKey}`, a.assertion);
+      if (!r.approved.includes(publicKey) && !r.added.includes(publicKey)) r.approved.push(publicKey);
+      state.recovery = r;
+      await save();
     });
   }
 
@@ -190,7 +226,7 @@ const same = (a: string, b: string): boolean => { const x = Buffer.from(a), y = 
 /** A small HTTP front for the signer. The bearer token only keeps strangers out; the policy and the passkey are the real checks. */
 export function signerServer(signer: WalletSigner, token: string, log: (m: string) => void = () => undefined, info: { writer?: string } = {}): Server {
   if (token.length < 32) throw new Error("SIGNER_TOKEN must be at least 32 characters");
-  type Body = { userId?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
+  type Body = { userId?: string; publicKey?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
   return createServer((req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "GET" && req.url === "/health") return send(200, { ok: true });
@@ -218,6 +254,7 @@ export function signerServer(signer: WalletSigner, token: string, log: (m: strin
               const flows = (Array.isArray(b.flows) ? b.flows : []).map((f) => ({ asset: String(f.asset), to: String(f.to), amount: BigInt(String(f.amount)) }));
               return send(200, await signer.mandate(id, flows, approval()));
             }
+            case "/v1/recovery": await signer.recoveryKey(id, String(b.publicKey ?? ""), approval()); return send(200, { ok: true });
             case "/v1/lock": await signer.lock(id); return send(200, { ok: true });
             case "/v1/unlock": await signer.unlock(id, approval()); return send(200, { ok: true });
             case "/v1/strict": await signer.setStrict(id, b.on === true, approval()); return send(200, { ok: true });

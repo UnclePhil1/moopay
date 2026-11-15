@@ -15,7 +15,7 @@ import type { UserState } from "./state.js";
  * What this does not cover: if the page the user is looking at is itself altered by an attacker who controls the MooPay
  * server, it can show one payment and sign another. A passkey proves "the owner's device approved this", not "the owner read it".
  */
-export type Action = "addkey" | "strict:on" | "strict:off" | "unlock";
+export type Action = "addkey" | "strict:on" | "strict:off" | "unlock" | `recoverykey:${string}`;
 
 const TTL = 5 * 60_000;
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64url");

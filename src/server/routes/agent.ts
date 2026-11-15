@@ -200,7 +200,7 @@ export async function makeAgent(d: AgentDeps) {
         return true;
       }
       if (op === "passkey/status" && req.method === "GET") {
-        if (u.tee) { const st = await tee.refresh(u); json(res, 200, { count: st.passkeys.length, active: st.active, pending: st.pending, activeAt: st.activeAt, bio: { web: st.strict, x: st.strict }, strict: st.strict, secure: true }); return true; }
+        if (u.tee) { const st = await tee.refresh(u); json(res, 200, { count: st.passkeys.length, active: st.active, pending: st.pending, activeAt: st.activeAt, bio: { web: st.strict, x: st.strict }, strict: st.strict, secure: true, recovery: st.recovery ?? { approved: [], added: [] } }); return true; }
         json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true;
       }
       if (op === "passkey/register-options" && req.method === "POST") {
@@ -215,7 +215,7 @@ export async function makeAgent(d: AgentDeps) {
         if (u.tee) {
           const b = await bodyOf(req), r = await tee.api().register(u.id, b["response"] as RegistrationResponseJSON, tee.proofOf(b["assertion"]));
           const st = await tee.refresh(u);
-          security.add("passkey_added", { user: u.id.slice(0, 8), signer: true }, now()); store.event(u, "A passkey was added. It counts after a waiting period of " + Math.max(1, Math.round((r.activeAt - now()) / 3_600_000)) + " hours; until then only small payments can go."); store.save();
+          security.add("passkey_added", { user: u.id.slice(0, 8), signer: true }, now()); store.event(u, r.activeAt <= now() ? "A passkey was added. Every payment from this wallet now needs it." : "A passkey was added. It counts after a waiting period of " + Math.max(1, Math.round((r.activeAt - now()) / 3_600_000)) + " hours."); store.save();
           json(res, 200, { ok: true, count: st.passkeys.length, activeAt: r.activeAt }); return true;
         }
         await passkeys.register(u, origin, (await bodyOf(req))["response"] as RegistrationResponseJSON);
@@ -232,12 +232,30 @@ export async function makeAgent(d: AgentDeps) {
             const needs = !!ap && ap.status === "pending" && !!ap.flows?.length && st.active;
             json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "mandate", flows: ap!.flows! }) } : { required: false }); return true;
           }
+          if (purpose === "recoverykey") {
+            const pub = String(b["publicKey"] ?? "");
+            if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pub)) throw new MoopayError("INVALID_INPUT", "That is not a recovery key the app made.");
+            json(res, 200, st.active ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: `recoverykey:${pub}` }) } : { required: false }); return true;
+          }
           const action = purpose === "toggle" ? (b["on"] === false ? "strict:off" : "strict:on") : purpose === "unlock" ? "unlock" : purpose === "addkey" ? "addkey" : undefined;
           const needs = !!action && (action === "addkey" ? st.passkeys.length > 0 : st.active);
           json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: action! }) } : { required: false }); return true;
         }
         const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
+      }
+      // A recovery key: the page makes the key and keeps the secret half. The passkey names the public half; only then does the signer sign the AddKey.
+      if (op === "recovery/add" && req.method === "POST") {
+        needMaster("Adding a recovery key");
+        if (!u.tee) throw new MoopayError("INVALID_INPUT", "Only a wallet held by the secure signer needs a recovery key.");
+        const b = await bodyOf(req), pub = String(b["publicKey"] ?? "");
+        if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pub)) throw new MoopayError("INVALID_INPUT", "That is not a recovery key the app made.");
+        const st = await tee.refresh(u);
+        if (st.recovery?.added.includes(pub)) { json(res, 200, { ok: true, already: true }); return true; }
+        if (!st.recovery?.approved.includes(pub)) await tee.api().recoveryKey(u.id, pub, tee.proofOf(b["assertion"]) ?? (() => { throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first."); })());
+        const r = await ops.addRecoveryKey(u, pub);
+        security.add("recovery_key_added", { user: u.id.slice(0, 8) }, now());
+        json(res, 200, { ok: true, txHash: r.txHash }); return true;
       }
       if (op === "passkey/toggle" && req.method === "POST") {
         if (u.tee) {

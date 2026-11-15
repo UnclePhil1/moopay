@@ -1,4 +1,4 @@
-import { Account, FailoverRpcProvider, JsonRpcProvider, KeyPair, Signer } from "near-api-js";
+import { Account, FailoverRpcProvider, JsonRpcProvider, KeyPair, PublicKey, Signer, actions } from "near-api-js";
 
 /** What signs for a wallet: a raw key string (today, derived on this server) or a Signer object (a remote signer such as the TEE, which never shows its key). */
 export type WalletSigner = string | Signer;
@@ -33,6 +33,8 @@ export interface NearOps {
   createAccount(p: { parentId: string; parentKey: string; newId: string; forSecretKey?: string; forPublicKey?: string; deposit: bigint }): Promise<{ txHash: string }>;
   /** Native NEAR transfer from the note account, signed with the note key. */
   sendNear(p: { accountId: string; secretKey: WalletSigner; to: string; amount: bigint }): Promise<{ txHash: string }>;
+  /** Adds a full-access key to the account (a recovery key the owner made and keeps). */
+  addFullAccessKey(p: { accountId: string; secretKey: WalletSigner; newKey: string }): Promise<{ txHash: string }>;
   /** Wraps native NEAR into wNEAR (wrap.near near_deposit) so it can be swapped like any token. */
   wrapNear(p: { accountId: string; secretKey: WalletSigner; wrapContract: string; amount: bigint }): Promise<{ txHash: string }>;
   /** Any contract call signed by the note account (used for rNEAR staking and unwrapping wNEAR). */
@@ -148,6 +150,16 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       }
     },
 
+    async addFullAccessKey({ accountId, secretKey, newKey }) {
+      try {
+        const out = await new Account(accountId, provider, secretKey as never).signAndSendTransaction({ receiverId: accountId, actions: [actions.addFullAccessKey(PublicKey.from(newKey))] });
+        return { txHash: (out as unknown as { transaction: { hash: string } }).transaction.hash };
+      } catch (e) {
+        if (refusal(e)) throw e;
+        throw new MoopayError("DEPOSIT_FAILED", "The recovery key couldn't be added on the NEAR network. Nothing was changed. Try again.");
+      }
+    },
+
     async call({ accountId, secretKey, contractId, method, args, deposit, gas }) {
       try {
         const out = await new Account(accountId, provider, secretKey as never).callFunctionRaw({ contractId, methodName: method, args, deposit, gas });
@@ -225,7 +237,7 @@ export function makeNearOps(cfg: Pick<Config, "nearRpcUrl">): NearOps {
       }
     },
   };
-  for (const name of ["createAccount", "sendNear", "call", "wrapNear", "transferFromNote"] as const) {
+  for (const name of ["createAccount", "sendNear", "addFullAccessKey", "call", "wrapNear", "transferFromNote"] as const) {
     const write = ops[name] as (p: never) => Promise<unknown>;
     (ops as unknown as Record<string, unknown>)[name] = async (p: never) => { seen.clear(); try { return await write.call(ops, p); } finally { seen.clear(); } };
   }

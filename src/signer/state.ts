@@ -22,6 +22,8 @@ export interface UserState {
   moved?: boolean;
   /** What the owner's last passkey signature allows, for a few minutes. */
   mandate?: Mandate;
+  /** Recovery keys: keys the owner (by passkey) allowed to be added to the account, and keys already added. The owner holds them, so they still work if this signer is gone. */
+  recovery?: { approved: string[]; added: string[] };
 }
 
 export const newUser = (): UserState => ({ credentials: [], activeAt: 0, strict: false, locked: false, total: emptyTally(), free: emptyTally() });

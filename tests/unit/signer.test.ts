@@ -58,7 +58,7 @@ test("signer: reads transfers and token transfers, and refuses everything else",
   assert.deepEqual(ok.outflows.map((o) => [o.asset, o.amount, o.to]), [[USDC, 5_000_000n, "bob.near"]]);
   const near = inspect(encodeTransaction(mk(me.accountId, me.publicKey, "bob.near", [actions.transfer(10n ** 24n)])));
   assert.deepEqual(near.outflows.map((o) => [o.asset, o.amount]), [["NEAR", 10n ** 24n]]);
-  for (const bad of [actions.addFullAccessKey(PublicKey.from(me.publicKey)), actions.deleteAccount("x.near"), actions.deployContract(new Uint8Array([0])), actions.functionCall("anything_else", {}, 1n, 0n)]) {
+  for (const bad of [actions.deleteAccount("x.near"), actions.deployContract(new Uint8Array([0])), actions.functionCall("anything_else", {}, 1n, 0n)]) {
     assert.throws(() => inspect(encodeTransaction(mk(me.accountId, me.publicKey, "bob.near", [bad]))), code("forbidden_action"));
   }
   assert.throws(() => inspect(new Uint8Array([1, 2, 3])), code("bad_transaction"));
@@ -226,7 +226,7 @@ test("signer: over HTTP, through the remote signer and the passkey calls", async
     const small1 = pay(direct, "bob.near", "1000000");
     const signed = (await remote.signTransaction(small1)) as unknown as { txHash: Uint8Array; signedTransaction: { signature: { ed25519Signature: { data: Uint8Array } } } };
     assert.ok(PublicKey.from(direct.publicKey).verify(signed.txHash, Uint8Array.from(signed.signedTransaction.signature.ed25519Signature.data)), "the signature checks out against the wallet's public key");
-    await assert.rejects(remote.signTransaction(mk(remote.accountId, direct.publicKey, "x.near", [actions.addFullAccessKey(PublicKey.from(direct.publicKey))])), /not allowed|only transfers/i);
+    await assert.rejects(remote.signTransaction(mk(remote.accountId, direct.publicKey, "x.near", [actions.addFullAccessKey(PublicKey.from(direct.publicKey))])), /recovery key|fingerprint|approved|only key/i);
 
     const ph = phone(), big = pay(direct, "bob.near", "20000000");
     await assert.rejects(remote.signTransaction(big), (e) => (e as { details?: { reason?: string } }).details?.reason === "passkey_required", "the app is told to ask for a passkey");
@@ -428,4 +428,45 @@ test("no free allowance: with nothing unattended, every payment needs the passke
   const ph = await enrol(signer, "alice");
   await assert.rejects(signer.sign("alice", encodeTransaction(tx)), code("passkey_required"), "a registered passkey still has to approve");
   await signer.sign("alice", encodeTransaction(tx), await approve(signer, "alice", ph, tx));
+});
+
+import { KeyPair } from "near-api-js";
+const addKeyTx = (me: { accountId: string; publicKey: string }, key: string, over: { receiver?: string; fn?: boolean; extra?: boolean } = {}) =>
+  mk(me.accountId, me.publicKey, over.receiver ?? me.accountId, [
+    over.fn ? actions.addFunctionCallAccessKey(PublicKey.from(key), "x.near", [], 0n) : actions.addFullAccessKey(PublicKey.from(key)),
+    ...(over.extra ? [actions.transfer(1n)] : []),
+  ]);
+
+test("recovery key: a key the passkey approved by name can be added once, and nothing else can", async () => {
+  const signer = setup(none), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  const mine = KeyPair.fromRandom("ed25519").getPublicKey().toString(), other = KeyPair.fromRandom("ed25519").getPublicKey().toString();
+  const sign = (tx: Transaction) => signer.sign("alice", encodeTransaction(tx));
+
+  await assert.rejects(sign(addKeyTx(me, mine)), code("passkey_required"), "not approved yet");
+  await assert.rejects(signer.recoveryKey("alice", mine, await approveAction(signer, "alice", phone(), `recoverykey:${mine}`)), code("bad_assertion"), "a thief's own device cannot approve it");
+  await assert.rejects(signer.recoveryKey("alice", mine, await approveAction(signer, "alice", ph, `recoverykey:${other}`)), code("bad_assertion"), "the signature names a different key");
+  await signer.recoveryKey("alice", mine, await approveAction(signer, "alice", ph, `recoverykey:${mine}`));
+  assert.deepEqual((await signer.status("alice")).recovery, { approved: [mine], added: [] });
+
+  await assert.rejects(sign(addKeyTx(me, other)), code("passkey_required"), "only the key that was named");
+  await assert.rejects(sign(addKeyTx(me, mine, { fn: true })), code("forbidden_action"), "full access only");
+  await assert.rejects(sign(addKeyTx(me, mine, { receiver: "mallory.near" })), code("forbidden_action"), "only this same account");
+  await assert.rejects(sign(addKeyTx(me, mine, { extra: true })), code("forbidden_action"), "never mixed with a payment");
+  assert.ok((await sign(addKeyTx(me, mine))).signed.length > 0, "the approved key is signed");
+  assert.deepEqual((await signer.status("alice")).recovery, { approved: [], added: [mine] });
+  await assert.rejects(sign(addKeyTx(me, mine)), code("passkey_required"), "one use per approval");
+});
+
+test("recovery key: needs a passkey, is limited to three, and a locked wallet adds nothing", async () => {
+  const signer = setup(none), me = await signer.pubkey("alice");
+  const k = () => KeyPair.fromRandom("ed25519").getPublicKey().toString();
+  await assert.rejects(signer.recoveryKey("alice", k(), { nonce: signer.nonce("alice"), assertion: {} as never }), code("passkey_required"), "no passkey, no recovery key");
+  const ph = await enrol(signer, "alice");
+  await assert.rejects(signer.recoveryKey("alice", "not-a-key", await approveAction(signer, "alice", ph, "recoverykey:not-a-key")), code("bad_transaction"));
+  for (let i = 0; i < 3; i++) { const key = k(); await signer.recoveryKey("alice", key, await approveAction(signer, "alice", ph, `recoverykey:${key}`)); }
+  const fourth = k();
+  await assert.rejects(signer.recoveryKey("alice", fourth, await approveAction(signer, "alice", ph, `recoverykey:${fourth}`)), code("over_limit"));
+  await signer.lock("alice");
+  const st = (await signer.status("alice")).recovery!;
+  await assert.rejects(signer.sign("alice", encodeTransaction(addKeyTx(me, st.approved[0]!))), code("locked"));
 });

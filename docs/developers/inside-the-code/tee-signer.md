@@ -89,3 +89,13 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 ## Status (15 Nov 2026)
 
 Live for new accounts: the signer runs on Phala with on-chain KMS on Base, the state contract is on NEAR mainnet at `contractmoopay.near` (governance `moopay-gov.near`, signer account set to the enclave's writer address), and the production server has `SIGNER_URL` and `SIGNER_TOKEN` set. Accounts made before this date keep their server-derived key. Open: a real-phone passkey test, the remaining payment kinds, wallet migration, a multisig and timelock for governance, and removing the contract account's full-access key.
+
+## Recovery key
+
+If the signer is down, or every passkey is lost, a signer-held wallet would otherwise be stuck. So an owner can add a recovery key: the page makes an ed25519 key in the browser and shows the secret once; the server and signer only ever see the public half.
+
+1. The passkey signs the action `recoverykey:<public key>`, so the key it names is the key that gets added.
+2. The signer records that key as approved (at most 3 per wallet) and signs one `AddKey` transaction for it: full access, to the wallet's own account, with no other action in it, once.
+3. The server sends that transaction. From then on the owner can import the key into any NEAR wallet and withdraw without MooPay.
+
+A recovery key skips the caps, because the signer is not involved when it is used. That is why only a passkey can approve one, and why it must be kept offline.

@@ -671,6 +671,17 @@ export class AgentOps {
     return { result: { status: "created", claimLink: link, paymentId: pay.id, rule: chain === "near" ? "Only the receiver's wallet can claim, within 24 hours; otherwise it comes back to the user's agent wallet." : `Only that ${chain.toUpperCase()} wallet can claim, by signing with it, within 24 hours; they receive USDC on ${chain.toUpperCase()} (a small swap fee comes out of the amount). Otherwise it comes back to the user's agent wallet.` }, card: { kind: "claim", id: pay.id, amountUsd: amt, receiver: p.receiver, chain, link, fees: chain === "near" ? "none added" : "a small swap fee comes out of the amount", total: usd(amt) } };
   }
 
+  /** Puts the owner's recovery key on the wallet's account. The passkey has already named this key to the signer, which signs nothing else like it. */
+  async addRecoveryKey(u: UserRec, publicKey: string): Promise<{ txHash: string }> {
+    this.active(u);
+    if (!u.tee) throw new MoopayError("INVALID_INPUT", "Only a wallet held by the secure signer needs a recovery key.");
+    const k = this.store.keyOf(u);
+    const r = await this.near.addFullAccessKey({ accountId: k.accountId, secretKey: k.secretKey, newKey: publicKey });
+    this.store.event(u, "A recovery key was added to your wallet.");
+    this.store.save();
+    return r;
+  }
+
   /* ---- wallet name ---- */
   private named: number[] = [];
   /** Whether names are switched on, and what the address will end with. */
