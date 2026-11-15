@@ -85,3 +85,7 @@ The signer's disk can be rolled back by the host operator, so rules and counters
 ## Building and deploying the image
 
 `Dockerfile.signer` builds only the signer, on a digest-pinned base. The `Signer image` workflow builds it on pushes that touch the signer and publishes `ghcr.io/<owner>/moopay-signer`, printing the image digest in the run summary. `deploy/signer.compose.yml` takes that digest. The compose file's hash is what the on-chain key service approves. The image has not been built yet (no Docker on the dev machine): the first CI run is its first build. Note that the secrets in the compose environment (`SIGNER_TOKEN`) are passed to the CVM encrypted at deploy time, not stored in the file.
+
+## Status (15 Nov 2026)
+
+Live for new accounts: the signer runs on Phala with on-chain KMS on Base, the state contract is on NEAR mainnet at `contractmoopay.near` (governance `moopay-gov.near`, signer account set to the enclave's writer address), and the production server has `SIGNER_URL` and `SIGNER_TOKEN` set. Accounts made before this date keep their server-derived key. Open: a real-phone passkey test, the remaining payment kinds, wallet migration, a multisig and timelock for governance, and removing the contract account's full-access key.
