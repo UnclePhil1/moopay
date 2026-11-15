@@ -119,6 +119,20 @@
   .cmd.sel,.cmd:hover { background:rgba(244,239,230,.08); } .cmd b { min-width:84px; font-weight:700; } .cmd span { color:var(--muted); font-size:13.5px; }
   .toast { position:fixed; left:50%; bottom:100px; transform:translateX(-50%); background:#f4efe6; color:#000; padding:10px 18px; border-radius:999px; font-weight:600; font-size:14px; z-index:30; }
   @media (max-width:640px) { .how .txt { display:none; } .how .ico { display:block; } header { padding:12px 14px; } .wrap { padding:16px 14px; } .composer { padding:8px 12px 12px; } .note { display:none; } }
+  /* Long words, addresses and keys wrap instead of pushing the page sideways. Flex children need min-width:0 or they refuse to shrink. */
+  #scroll { overflow-x:hidden; }
+  .wrap, .msg, .body, .card, .steps, .list, .li, .row > *, .step > *, .modal .box, .sheet .box { min-width:0; }
+  .msg { max-width:100%; }
+  .msg.me .bubble, .txt, .card, .card h3, .sub, .row span, .row b, .li, .li span, .step, .modal .box, .modal h3, .modal p, .cmd span, .note, .banner p, .toast, .tag { overflow-wrap:anywhere; word-break:normal; }
+  .msg.me .bubble { min-width:0; max-width:min(82%, 100%); }
+  .row { flex-wrap:wrap; } .row span:first-child { flex:0 1 auto; } .row b { flex:1 1 40%; min-width:0; word-break:normal; }
+  .xcode { white-space:normal; overflow-wrap:anywhere; max-width:100%; }
+  .code code { overflow-wrap:anywhere; }
+  .modal .box { max-height:calc(100dvh - 32px); overflow-y:auto; overflow-x:hidden; }
+  .toast { max-width:calc(100vw - 32px); text-align:center; white-space:normal; }
+  .track { flex-wrap:wrap; row-gap:8px; } .tn { min-width:0; flex:0 1 auto; text-align:center; }
+  .cmd { flex-wrap:wrap; gap:4px 14px; } .cmd b { min-width:0; }
+  @media (max-width:400px) { .row { gap:4px 10px; } .big { font-size:28px; } .card { padding:14px; } .modal .box { padding:18px; } .btns .btn { flex:1 1 auto; } }
   @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
 </style>
 </head>
