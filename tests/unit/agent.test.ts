@@ -1864,7 +1864,11 @@ test("signer: a recovery key is named by the passkey, then added to the account;
     assert.equal((await call("recovery/add", T, { publicKey: other, assertion: await page(o.body.signer) })).status, 400, "the signature names a different key");
     assert.equal(a.near.addedKeys.length, 0);
     const o2 = await call("passkey/options", T, { purpose: "recoverykey", publicKey: mine }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
-    const ok = await call("recovery/add", T, { publicKey: mine, assertion: await page(o2.body.signer) });
+    // Step one: the passkey names the key. Nothing is added yet, so the page can show the secret only after this succeeded.
+    const first = await call("recovery/add", T, { publicKey: mine, assertion: await page(o2.body.signer), approveOnly: true });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(a.near.addedKeys.length, 0, "approved, not added");
+    const ok = await call("recovery/add", T, { publicKey: mine });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.deepEqual(a.near.addedKeys, [{ accountId: u.accountId, newKey: mine }]);
     assert.deepEqual((await call("passkey/status", T)).body["recovery"], { approved: [mine], added: [] });
@@ -1874,5 +1878,27 @@ test("signer: a recovery key is named by the passkey, then added to the account;
     const addTx = (key: string) => createTransaction(u.accountId, pk, u.accountId, 1n, [actions.addFullAccessKey(PublicKey.from(key))], new Uint8Array(32));
     await assert.rejects(rs.signTransaction(addTx(other)), /approved|fingerprint|recovery/i);
     assert.ok(await rs.signTransaction(addTx(mine)));
+  } finally { close(); sig.close(); }
+});
+
+test("signer: the recovery code is shown only after the owner's passkey says yes", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n } }, unattended: {} };
+  const wallet = new WalletSigner(new FixedKeySource("code"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  const ph = phone(), T = "u".repeat(43);
+  const page = async (prompt: Parameters<typeof signerChallenge>[0]) => ({ ...(ph.get(await signerChallenge(prompt)) as object), moopayNonce: prompt.nonce });
+  try {
+    await call("state", T);
+    m.store.open(T);
+    assert.equal((await call("passkey/verify", T, { purpose: "showcode" })).status, 400, "no passkey yet");
+    const reg = await call("passkey/register-options", T, {});
+    assert.equal((await call("passkey/register", T, { response: ph.create(String(reg.body["challenge"])) })).status, 200);
+    assert.equal((await call("passkey/verify", T, { purpose: "showcode" })).status, 400, "no signature, no yes");
+    const o = await call("passkey/options", T, { purpose: "showcode" }) as unknown as { body: { required: boolean; signer: Parameters<typeof signerChallenge>[0] } };
+    assert.equal(o.body.required, true);
+    assert.equal((await call("passkey/verify", T, { purpose: "showcode", assertion: await page(o.body.signer) })).status, 200);
   } finally { close(); sig.close(); }
 });

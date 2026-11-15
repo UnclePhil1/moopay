@@ -454,7 +454,7 @@ const COMMANDS = [
   { name: "/restore", desc: "Get your account back on a new browser", restore: true },
   { name: "/export", desc: "Show your wallet key", exportKey: true },
   { name: "/passkey", desc: "Approve payments with your fingerprint, face or PIN", act: () => addPasskey() },
-  { name: "/recovery", desc: "Make a recovery key so you can always take your money out", act: () => addRecoveryKey() },
+  { name: "/recoverykey", desc: "Make a recovery key so you can always take your money out", act: () => addRecoveryKey() },
   { name: "/biometrics-web", desc: "Turn passkey approval on or off for this app", act: () => toggleBio("web") },
   { name: "/biometrics-x", desc: "Turn passkey approval on or off for X", act: () => toggleBio("x") },
   { name: "/backup", desc: "Download an offline copy of your wallet", backup: true },
@@ -529,10 +529,13 @@ async function addRecoveryKey() {
     if (!st.active) return void (clearEmpty(), await say(agent(), "Add a passkey first. Type /passkey."));
     if (!(await ask({ title: "Make a recovery key?", text: "It is a second key to your wallet that only you hold. With it you can take your money out with any NEAR wallet, even if MooPay is down or you lose your passkey. Anyone who gets it can take everything and no limit applies, so keep it offline and never share it.", confirm: "Make my key" }))) return;
     if (!window.moopayRecovery) await new Promise((ok, no) => { const s = document.createElement("script"), n = document.querySelector("script[nonce]"); s.src = "/a/recovery.js"; if (n) s.nonce = n.nonce; s.onload = ok; s.onerror = () => no(new Error("Couldn't load the key maker. Try again.")); document.head.append(s); });
-    const k = window.moopayRecovery.make(), acct = (await (await api("state")).json()).account?.address || "";
-    await ask({ title: "Save your recovery key", text: "Write it down or put it in a password manager. This is the only time it is shown, and MooPay never sees it. It opens the wallet " + acct + " in any NEAR wallet or the NEAR CLI.", reveal: k.secretKey, confirm: "I saved it" });
+    // The key is made here but not shown. Your fingerprint, face or PIN comes first, and only then does the secret appear.
+    const k = window.moopayRecovery.make();
     const assertion = await strong("recoverykey", { publicKey: k.publicKey });
-    await post("recovery/add", { publicKey: k.publicKey, assertion });
+    await post("recovery/add", { publicKey: k.publicKey, assertion, approveOnly: true });
+    const acct = (await (await api("state")).json()).account?.address || "";
+    await ask({ title: "Save your recovery key", text: "Write it down or put it in a password manager. This is the only time it is shown, and MooPay never sees it. It opens the wallet " + acct + " in any NEAR wallet or the NEAR CLI.", reveal: k.secretKey, confirm: "I saved it" });
+    await post("recovery/add", { publicKey: k.publicKey });
     clearEmpty(); await say(agent(), "Done. Your recovery key is on your wallet. If MooPay is ever down, import it into a NEAR wallet to take your money out.");
   } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't add the recovery key."); }
 }
@@ -573,6 +576,11 @@ async function showRecovery() {
   recoveryOpen = true;
   try {
     if (isTemp()) return void (await ask({ title: "Temporary session", text: "No recovery code is kept on this device. Use the one you saved on your own device.", confirm: "OK" }));
+    // Your fingerprint, face or PIN first. Without a passkey set up, the code is not shown.
+    const st = await (await api("passkey/status")).json();
+    if (!st.count) return void (clearEmpty(), await say(agent(), "Set up biometrics first (type /passkey). Your recovery code is only shown after your fingerprint, face or PIN."));
+    try { const assertion = await strong("showcode"); await post("passkey/verify", { purpose: "showcode", assertion }); }
+    catch (e) { return void (await fail({ message: passkeyWords(e) }, "I couldn't confirm it's you, so the recovery code stays hidden.")); }
     await recoveryDialog();
   } finally { recoveryOpen = false; }
 }

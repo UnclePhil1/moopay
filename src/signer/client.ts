@@ -28,6 +28,7 @@ export class SignerApi {
   register = async (userId: string, response: RegistrationResponseJSON, proof?: ApprovalProof) => (await post(this.url, this.token, "/v1/passkey/register", { userId, response, ...proof })) as { activeAt: number };
   mandate = async (userId: string, flows: { asset: string; to: string; amount: string }[], proof: ApprovalProof) => (await post(this.url, this.token, "/v1/mandate", { userId, flows, ...proof })) as { expiresAt: number };
   setStrict = async (userId: string, on: boolean, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/strict", { userId, on, ...proof }); };
+  verifyOwner = async (userId: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/verify", { userId, ...proof }); };
   recoveryKey = async (userId: string, publicKey: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/recovery", { userId, publicKey, ...proof }); };
   lock = async (userId: string) => { await post(this.url, this.token, "/v1/lock", { userId }); };
   unlock = async (userId: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/unlock", { userId, ...proof }); };

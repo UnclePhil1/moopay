@@ -180,6 +180,16 @@ export class WalletSigner {
     });
   }
 
+  /** Proves the owner is there (their passkey signed "showcode") without changing anything. The app asks for this before it shows a recovery code. */
+  async verifyOwner(userId: string, a: Approval): Promise<void> {
+    await this.wallet(userId);
+    await this.open(userId, async ({ state, save }) => {
+      if (!this.passkeys.active(state)) throw new Refused("passkey_required", "Add a passkey first.");
+      await this.passkeys.verifyAction(state, userId, a.nonce, "showcode", a.assertion);
+      await save(); // the passkey's counter moved
+    });
+  }
+
   /** Locking is always allowed (it can only make the wallet safer). Unlocking needs the passkey. */
   async lock(userId: string): Promise<void> {
     await this.wallet(userId);
@@ -254,6 +264,7 @@ export function signerServer(signer: WalletSigner, token: string, log: (m: strin
               const flows = (Array.isArray(b.flows) ? b.flows : []).map((f) => ({ asset: String(f.asset), to: String(f.to), amount: BigInt(String(f.amount)) }));
               return send(200, await signer.mandate(id, flows, approval()));
             }
+            case "/v1/verify": await signer.verifyOwner(id, approval()); return send(200, { ok: true });
             case "/v1/recovery": await signer.recoveryKey(id, String(b.publicKey ?? ""), approval()); return send(200, { ok: true });
             case "/v1/lock": await signer.lock(id); return send(200, { ok: true });
             case "/v1/unlock": await signer.unlock(id, approval()); return send(200, { ok: true });

@@ -470,3 +470,12 @@ test("recovery key: needs a passkey, is limited to three, and a locked wallet ad
   const st = (await signer.status("alice")).recovery!;
   await assert.rejects(signer.sign("alice", encodeTransaction(addKeyTx(me, st.approved[0]!))), code("locked"));
 });
+
+test("showcode: the owner's passkey can be checked without changing anything, and a thief's cannot", async () => {
+  const signer = setup(none), ph = await enrol(signer, "alice");
+  await assert.rejects(signer.verifyOwner("alice", await approveAction(signer, "alice", phone(), "showcode")), code("bad_assertion"));
+  await assert.rejects(signer.verifyOwner("alice", await approveAction(signer, "alice", ph, "strict:on")), code("bad_assertion"), "a signature for another action does not count");
+  await signer.verifyOwner("alice", await approveAction(signer, "alice", ph, "showcode"));
+  const fresh = setup(none);
+  await assert.rejects(fresh.verifyOwner("bob", { nonce: fresh.nonce("bob"), assertion: {} as never }), code("passkey_required"), "no passkey, nothing to check");
+});

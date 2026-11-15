@@ -237,11 +237,11 @@ export async function makeAgent(d: AgentDeps) {
             if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pub)) throw new MoopayError("INVALID_INPUT", "That is not a recovery key the app made.");
             json(res, 200, st.active ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: `recoverykey:${pub}` }) } : { required: false }); return true;
           }
-          const action = purpose === "toggle" ? (b["on"] === false ? "strict:off" : "strict:on") : purpose === "unlock" ? "unlock" : purpose === "addkey" ? "addkey" : undefined;
+          const action = purpose === "toggle" ? (b["on"] === false ? "strict:off" : "strict:on") : purpose === "unlock" ? "unlock" : purpose === "addkey" ? "addkey" : purpose === "showcode" ? "showcode" : undefined;
           const needs = !!action && (action === "addkey" ? st.passkeys.length > 0 : st.active);
           json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: action! }) } : { required: false }); return true;
         }
-        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey");
+        const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey" || purpose === "showcode");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
       }
       // A recovery key: the page makes the key and keeps the secret half. The passkey names the public half; only then does the signer sign the AddKey.
@@ -253,9 +253,25 @@ export async function makeAgent(d: AgentDeps) {
         const st = await tee.refresh(u);
         if (st.recovery?.added.includes(pub)) { json(res, 200, { ok: true, already: true }); return true; }
         if (!st.recovery?.approved.includes(pub)) await tee.api().recoveryKey(u.id, pub, tee.proofOf(b["assertion"]) ?? (() => { throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first."); })());
+        if (b["approveOnly"] === true) { json(res, 200, { ok: true, approved: true }); return true; } // the page shows the secret next, then asks to add it
         const r = await ops.addRecoveryKey(u, pub);
         security.add("recovery_key_added", { user: u.id.slice(0, 8) }, now());
         json(res, 200, { ok: true, txHash: r.txHash }); return true;
+      }
+      // Before the app shows the recovery code, the owner's passkey has to say yes. The page cannot show it on its own say-so, so a stolen session on a phone left open is not enough.
+      if (op === "passkey/verify" && req.method === "POST") {
+        const b = await bodyOf(req);
+        if (String(b["purpose"]) !== "showcode") throw new MoopayError("INVALID_INPUT", "Unknown request.");
+        if (u.tee) {
+          const proof = tee.proofOf(b["assertion"]);
+          if (!proof) throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first.");
+          await tee.api().verifyOwner(u.id, proof);
+        } else {
+          if (!hasPasskey(u)) throw new MoopayError("INVALID_INPUT", "Set up biometrics first. Type /passkey, then ask for your recovery code again.");
+          await passkeys.verify(u, origin, b["assertion"] as AuthenticationResponseJSON | undefined, "showcode"); store.save();
+        }
+        security.add("recovery_code_shown", { user: u.id.slice(0, 8) }, now());
+        json(res, 200, { ok: true }); return true;
       }
       if (op === "passkey/toggle" && req.method === "POST") {
         if (u.tee) {
