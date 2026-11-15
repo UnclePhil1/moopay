@@ -393,3 +393,15 @@ test("page: amounts are read from a table the page owns, so the server cannot ma
   assert.equal(page.describeFlow({ asset: "fake.near", to: "bob.near", amount: "5000000" }), "5000000 units of fake.near to bob.near", "an unknown token is never given a friendly name or decimals");
   assert.match(page.describeFlow({ asset: "NEAR", to: "bob.near", amount: "1e24" }), /units of NEAR/, "not a plain number: shown raw");
 });
+
+test("service: /v1/writer needs the token and returns only the state writer's address", async () => {
+  const wallet = new WalletSigner(new FixedKeySource("w"), { caps: {}, unattended: {} }, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const server = signerServer(wallet, "t".repeat(40), () => undefined, { writer: "abc123" });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1/writer`;
+  try {
+    assert.equal((await fetch(url, { method: "POST" })).status, 401);
+    const ok = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + "t".repeat(40) } });
+    assert.deepEqual([ok.status, await ok.json()], [200, { writer: "abc123" }]);
+  } finally { server.close(); }
+});

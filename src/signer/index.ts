@@ -41,7 +41,7 @@ async function main(): Promise<void> {
 
   // The operator funds this account with a little NEAR and sets it as the contract's signer, once.
   console.log(`[signer] state writer account: ${writer.accountId}`);
-  signerServer(signer, token, (m) => console.log(`[signer] ${m}`)).listen(port, "0.0.0.0", () => console.log(`[signer] up on ${port}`));
+  signerServer(signer, token, (m) => console.log(`[signer] ${m}`), { writer: writer.accountId }).listen(port, "0.0.0.0", () => console.log(`[signer] up on ${port}`));
 }
 
 main().catch((e) => { console.error("[signer] failed to start:", e instanceof Error ? e.message : e); process.exit(1); });

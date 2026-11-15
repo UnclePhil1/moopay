@@ -187,13 +187,14 @@ export class WalletSigner {
 const same = (a: string, b: string): boolean => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); };
 
 /** A small HTTP front for the signer. The bearer token only keeps strangers out; the policy and the passkey are the real checks. */
-export function signerServer(signer: WalletSigner, token: string, log: (m: string) => void = () => undefined): Server {
+export function signerServer(signer: WalletSigner, token: string, log: (m: string) => void = () => undefined, info: { writer?: string } = {}): Server {
   if (token.length < 32) throw new Error("SIGNER_TOKEN must be at least 32 characters");
   type Body = { userId?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
   return createServer((req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "GET" && req.url === "/health") return send(200, { ok: true });
     if (req.method !== "POST" || !same(req.headers["authorization"] ?? "", `Bearer ${token}`)) return send(401, { error: "unauthorized" });
+    if (req.url === "/v1/writer") return send(info.writer ? 200 : 404, { writer: info.writer }); // the account to fund and to name in set_signer; an address, no secret
     const chunks: Buffer[] = []; let size = 0;
     req.on("data", (c: Buffer) => { size += c.length; if (size > 64_000) req.destroy(); else chunks.push(c); });
     req.on("end", () => {
