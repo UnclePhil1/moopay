@@ -244,6 +244,20 @@ export async function makeAgent(d: AgentDeps) {
         const required = hasPasskey(u) && (purpose.startsWith("approve:") ? !!ap && ap.status === "pending" && (!!ap.strong || needsPasskey(u, "web")) : purpose === "toggle" || purpose === "unlock" || purpose === "export" || purpose === "addkey" || purpose === "showcode");
         json(res, 200, required ? { required, options: await passkeys.options(u, origin, purpose) } : { required: false }); return true;
       }
+      // Moving an old, server-held wallet into the secure signer: same address, and the old key is deleted on chain once the passkey is set.
+      if (op === "migrate/start" && req.method === "POST") {
+        needMaster("Securing your wallet");
+        if (u.frozen) throw new MoopayError("INVALID_INPUT", "Your account is frozen. Type /unfreeze first.");
+        const r = await ops.migrateStart(u);
+        security.add("migrate_started", { user: u.id.slice(0, 8) }, now());
+        json(res, 200, { ok: true, options: r.options }); return true;
+      }
+      if (op === "migrate/finish" && req.method === "POST") {
+        needMaster("Securing your wallet");
+        await ops.migrateFinish(u, (await bodyOf(req))["response"]);
+        security.add("migrate_done", { user: u.id.slice(0, 8) }, now());
+        json(res, 200, { ok: true }); return true;
+      }
       // A recovery key: the page makes the key and keeps the secret half. The passkey names the public half; only then does the signer sign the AddKey.
       if (op === "recovery/add" && req.method === "POST") {
         needMaster("Adding a recovery key");

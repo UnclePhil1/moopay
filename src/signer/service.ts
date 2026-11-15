@@ -124,7 +124,7 @@ export class WalletSigner {
   /** Signs the one transaction that adds a recovery key, and only for a key the owner's passkey approved by name. Anything else with an AddKey in it is refused. */
   private async signRecoveryKey(userId: string, w: { accountId: string; secretKey: string }, unsigned: Uint8Array, seen: ReturnType<typeof inspect>): Promise<{ signed: Uint8Array; txHash: string }> {
     const one = seen.addKeys.length === 1 && seen.outflows.length === 0 ? seen.addKeys[0]! : undefined;
-    if (!one || !one.full || seen.receiverId !== w.accountId) throw new Refused("forbidden_action", "the only key that can be added is one full-access recovery key, to this same account");
+    if (!one || !one.full || seen.receiverId !== seen.signerId) throw new Refused("forbidden_action", "the only key that can be added is one full-access recovery key, to this same account");
     return this.open(userId, async ({ state: st, save }) => {
       if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
       const r = st.recovery;

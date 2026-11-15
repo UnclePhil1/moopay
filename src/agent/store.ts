@@ -72,6 +72,8 @@ export interface UserRec {
   /** the user's own OutLayer wallet for the private route (beta); the key is kept in the encrypted state file */
   outlayer?: { key: string; account: string };
   /** Set when this wallet's key lives in the TEE signer, not on this server. Only the public key is kept here. */
+  /** Moving this server-held account into the signer: the signer's key is on the account, and the old key goes once the passkey is set. */
+  migrating?: { publicKey: string };
   tee?: { publicKey: string; /** mirrored from the signer: a passkey is in force */ passkey?: boolean; /** mirrored from the signer: strict mode */ strict?: boolean };
   /** moo points earned by payments the agent made for this user (see earnPoints) */
   points?: number;
@@ -162,6 +164,11 @@ export class AgentStore {
     }
     // The key never changes; a named account is just another account controlled by the same key.
     const w = this.wallet(u.id); return u.name ? { ...w, accountId: u.accountId } : w;
+  }
+  /** The server-held key of an account that is moving into the signer. Only the migration uses it, and it stops existing once the old key is deleted on chain. */
+  legacyKeyOf(u: UserRec): { accountId: string; secretKey: string; publicKey: string } {
+    if (u.tee) throw new MoopayError("INVALID_INPUT", "This wallet is already in the secure signer.");
+    const w = this.wallet(u.id); return { ...w, accountId: u.accountId };
   }
   /** The actual key text, for the few places that must show or seal it. A TEE account has none to give. */
   rawKeyOf(u: UserRec): { accountId: string; secretKey: string } {

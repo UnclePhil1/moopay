@@ -468,6 +468,7 @@ const COMMANDS = [
   { name: "/restore", desc: "Get your account back on a new browser", restore: true },
   { name: "/export", desc: "Show your wallet key", exportKey: true },
   { name: "/passkey", desc: "Approve payments with your fingerprint, face or PIN", act: () => addPasskey() },
+  { name: "/secure", desc: "Move your wallet into the secure enclave", act: () => secureWallet() },
   { name: "/recoverykey", desc: "Make a recovery key so you can always take your money out", act: () => addRecoveryKey() },
   { name: "/biometrics-web", desc: "Turn passkey approval on or off for this app", act: () => toggleBio("web") },
   { name: "/biometrics-x", desc: "Turn passkey approval on or off for X", act: () => toggleBio("x") },
@@ -552,6 +553,27 @@ async function addRecoveryKey() {
     await post("recovery/add", { publicKey: k.publicKey });
     clearEmpty(); await say(agent(), "Done. Your recovery key is on your wallet. If MooPay is ever down, import it into a NEAR wallet to take your money out.");
   } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't add the recovery key."); }
+}
+/** An older wallet, whose key MooPay's server holds: move it into the secure enclave. Same address and money; the old key is deleted on the blockchain at the end. */
+async function secureWallet() {
+  try {
+    const s = await (await api("state")).json();
+    if (!s.account?.legacy) return void (clearEmpty(), await say(agent(), "Your wallet is already held in the secure enclave."));
+    if (!(await ask({ title: "Secure your wallet?", text: "Your wallet's key moves into a locked enclave that even MooPay cannot open. Same address and same money. You add a passkey (fingerprint, face or PIN) and from then on every payment needs it. When it's done the old key is deleted from your wallet on the blockchain. It costs a tiny network fee (about 0.005 NEAR). Scheduled payments pause until they are supported there. Make a recovery key afterwards (/recoverykey) so you can always take your money out.", confirm: "Secure my wallet" }))) return;
+    const r = await post("migrate/start");
+    const resp = await window.moopayPasskey.register(r.options);
+    await post("migrate/finish", { response: resp });
+    clearEmpty();
+    const b = agent(); await say(b, "Done. Your wallet is now held in the secure enclave, and the old key is gone. Every payment needs your passkey. One more thing: make a recovery key, so you can always take your money out.");
+    b.append(h("button", { class: "chip", type: "button", onclick: () => void addRecoveryKey() }, "Make a recovery key")); down();
+  } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't secure the wallet. Nothing was lost; your old key still works. Try again."); }
+}
+/** Older wallets are offered the move every time the chat opens, until it is done. */
+async function secureNudge(s) {
+  if (!s?.account?.legacy) return;
+  const b = agent();
+  await say(b, "Your wallet's key is still held by MooPay's server. Move it into the secure enclave so that no one, not even MooPay, can spend without your passkey.");
+  b.append(h("button", { class: "chip", type: "button", onclick: () => void secureWallet() }, "Secure my wallet")); down();
 }
 /** Opening the chat without a passkey: say so, and offer to set one up right there. */
 async function bioNudge() {
@@ -722,7 +744,7 @@ async function boot() {
     if (s.chat?.length) { clearEmpty(); for (const m of s.chat) { if (m.role === "user") userMsg(m.content, m.id); else { const b = agent(m.id); { const tx = h("div", { class: "txt" }); setText(tx, m.content); b.append(tx); } } } }
     else if (s.account?.setupSteps?.length) { const b = agent(); await say(b, "Your private account is ready. No sign-up and no wallet to connect. This is a real NEAR wallet that you can inspect, withdraw from, or export. To start, add money (from any chain):"); b.append(card({ kind: "account", ...s.account })); }
     for (const a of s.approvals || []) agent().append(card(a));
-    nudge(s.account?.balanceUsd); await bioNudge();
+    nudge(s.account?.balanceUsd); if (s.account?.legacy) await secureNudge(s); else await bioNudge();
   } catch (e) { $("state").textContent = "Offline"; }
   try { const open = sessionStorage.getItem(SHEET_KEY); if (open && new URL(open, location.href).origin === location.origin) openSheet(open); } catch {}
   setInterval(() => { if (!busy) void poll(); }, 6000);

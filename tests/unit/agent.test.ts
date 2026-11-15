@@ -1902,3 +1902,74 @@ test("signer: the recovery code is shown only after the owner's passkey says yes
     assert.equal((await call("passkey/verify", T, { purpose: "showcode", assertion: await page(o.body.signer) })).status, 200);
   } finally { close(); sig.close(); }
 });
+
+test("migration: an old server-held wallet moves into the signer, and the old key is deleted only once the new key and passkey are in place", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n } }, unattended: {} };
+  const wallet = new WalletSigner(new FixedKeySource("migrate"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a); // no signer yet: the account below is an old, server-held one
+  const ph = phone(), T = "v".repeat(43);
+  try {
+    await call("state", T);
+    const u = m.store.open(T);
+    assert.ok(!u.tee, "an old account");
+    m.store.useSigner({ url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) });
+    const oldKey = m.store.legacyKeyOf(u).publicKey, address = u.accountId;
+    a.near.keys.set(address, [{ key: oldKey, full: true }]);
+    assert.equal((await call("state", T)).body["account"]["legacy"], true, "the app offers to secure it");
+
+    assert.equal((await call("migrate/start", T, {})).status, 400, "needs a little NEAR for the fee first");
+    assert.equal(a.near.addedKeys.length, 0);
+    a.near.nearBalances.set(address, 10n ** 23n);
+    const start = await call("migrate/start", T, {}) as unknown as { status: number; body: { options: { challenge: string } } };
+    assert.equal(start.status, 200, JSON.stringify(start.body));
+    assert.equal(a.near.addedKeys.length, 1);
+    const secureKey = a.near.addedKeys[0]!.newKey;
+    assert.equal(secureKey, (await wallet.pubkey(u.id)).publicKey, "the key added is the signer's own");
+    assert.equal(a.near.deletedKeys.length, 0, "the old key stays until the passkey is set");
+
+    assert.equal((await call("migrate/finish", T, {})).status, 400, "no passkey yet, nothing removed");
+    assert.equal(a.near.deletedKeys.length, 0);
+    const fin = await call("migrate/finish", T, { response: ph.create(start.body.options.challenge) });
+    assert.equal(fin.status, 200, JSON.stringify(fin.body));
+    assert.deepEqual(a.near.deletedKeys, [{ accountId: address, key: oldKey }]);
+    assert.deepEqual((await a.near.accessKeys(address)).map((k) => k.key), [secureKey], "only the signer's key is left");
+    assert.equal(u.accountId, address, "same address");
+    assert.equal(u.tee?.publicKey, secureKey);
+    assert.throws(() => m.store.rawKeyOf(u), /secure enclave/);
+    assert.equal((await call("state", T)).body["account"]["legacy"], false);
+    assert.equal((await call("migrate/start", T, {})).status, 400, "already secure");
+  } finally { close(); sig.close(); }
+});
+
+test("migration: the old key is never deleted when the signer's key is missing from the chain", async () => {
+  const a = await agent();
+  const wallet = new WalletSigner(new FixedKeySource("migrate2"), { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n } }, unattended: {} }, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, close } = await serve(a);
+  try {
+    const T = "w".repeat(43);
+    const u = m.store.open(T);
+    m.store.useSigner({ url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) });
+    const oldKey = m.store.legacyKeyOf(u).publicKey;
+    a.near.keys.set(u.accountId, [{ key: oldKey, full: true }]);
+    const ph = phone();
+    await wallet.addPasskey(u.id, ph.create((await wallet.registerOptions(u.id)).challenge)); // the passkey is in, the key never made it onto the chain
+    u.migrating = { publicKey: (await wallet.pubkey(u.id)).publicKey };
+    await assert.rejects(m.ops.migrateFinish(u), /left your old key in place/);
+    assert.equal(a.near.deletedKeys.length, 0);
+    assert.ok(!u.tee, "still an old account, still working");
+    // A key that is on the account but not full access does not count either.
+    a.near.keys.set(u.accountId, [{ key: oldKey, full: true }, { key: u.migrating.publicKey, full: false }]);
+    await assert.rejects(m.ops.migrateFinish(u), /left your old key in place/);
+    assert.equal(a.near.deletedKeys.length, 0);
+    // The network fails to delete: still an old account.
+    a.near.keys.set(u.accountId, [{ key: oldKey, full: true }, { key: u.migrating.publicKey, full: true }]);
+    a.near.failDeleteKey = true;
+    await assert.rejects(m.ops.migrateFinish(u));
+    assert.ok(!u.tee, "not marked secure until the old key is really gone");
+  } finally { close(); sig.close(); }
+});

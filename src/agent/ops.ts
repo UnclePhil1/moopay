@@ -254,7 +254,7 @@ export class AgentOps {
     else if (nat < MIN_GAS && tok > 0n && !this.sponsor) todo.push("To pay network fees automatically, MooPay needs the operator's fee sponsor, or about 0.1 NEAR sent to the same address");
     if (!u.rules.payoutAddress) todo.push("Tell me your own NEAR wallet so I can send back anything above your float");
     const data = {
-      address: hidden ? "" : u.accountId, explorer: hidden ? "" : "https://nearblocks.io/address/" + u.accountId, needsPasskey: hidden, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
+      address: hidden ? "" : u.accountId, explorer: hidden ? "" : "https://nearblocks.io/address/" + u.accountId, needsPasskey: hidden, legacy: this.store.usesSigner && !u.tee, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
       points: u.points ?? 0, spentToday: spentToday(u, this.now()), schedules: u.tasks.map((t) => ({ id: t.id, text: t.text })), pendingApprovals: u.approvals.filter((a) => a.status === "pending").length, setupSteps: todo,
     };
     return { result: { ...data, xLinked: u.x ? "@" + u.x.handle : null }, card: { kind: "account", ...data } };
@@ -669,6 +669,55 @@ export class AgentOps {
     this.spend(u, amt, this.recipientKey(chain, p.receiver), who.ak);
     u.payments.unshift(pay); this.store.save();
     return { result: { status: "created", claimLink: link, paymentId: pay.id, rule: chain === "near" ? "Only the receiver's wallet can claim, within 24 hours; otherwise it comes back to the user's agent wallet." : `Only that ${chain.toUpperCase()} wallet can claim, by signing with it, within 24 hours; they receive USDC on ${chain.toUpperCase()} (a small swap fee comes out of the amount). Otherwise it comes back to the user's agent wallet.` }, card: { kind: "claim", id: pay.id, amountUsd: amt, receiver: p.receiver, chain, link, fees: chain === "near" ? "none added" : "a small swap fee comes out of the amount", total: usd(amt) } };
+  }
+
+  /**
+   * Moves an old, server-held wallet into the secure signer. Same address, same money; only the key changes hands.
+   * Step 1 puts the signer's key on the account (signed with the old key). The passkey is then added in the signer, and only after that
+   * does step 2 delete the old key. The old key is never removed unless the signer's key is on the chain with full access, so a failure
+   * at any point leaves the owner with a working wallet.
+   */
+  async migrateStart(u: UserRec): Promise<{ publicKey: string; options: unknown }> {
+    this.active(u);
+    const api = this.store.signerApi();
+    if (!api) throw new MoopayError("INVALID_INPUT", "The secure signer isn't switched on here.");
+    if (u.tee) throw new MoopayError("INVALID_INPUT", "This wallet is already in the secure signer.");
+    if (u.payments.some((p) => !p.settled) || u.approvals.some((a) => a.status === "pending")) throw new MoopayError("INVALID_INPUT", "Let your payments in progress finish and answer any waiting approvals, then secure your wallet.");
+    const pub = u.migrating?.publicKey ?? (await api.pubkey(u.id)).publicKey, old = this.store.legacyKeyOf(u);
+    const keys = await this.near.accessKeys(u.accountId);
+    if (!keys.some((k) => k.key === pub && k.full)) {
+      if (!keys.some((k) => k.key === old.publicKey && k.full)) throw new MoopayError("INTERNAL", "This wallet's key isn't on its account, so nothing was changed. Contact support.");
+      if ((await this.near.nearBalance(u.accountId)) < 5n * 10n ** 21n) throw new MoopayError("NOTE_NOT_FUNDED", `Securing your wallet costs a tiny network fee, about 0.005 NEAR. Send a little NEAR to ${u.accountId} and try again.`);
+      await this.near.addFullAccessKey({ accountId: u.accountId, secretKey: old.secretKey, newKey: pub });
+      if (!(await this.near.accessKeys(u.accountId)).some((k) => k.key === pub && k.full)) throw new MoopayError("UPSTREAM_TIMEOUT", "I couldn't confirm the new key on the NEAR network yet. Nothing was removed. Try again in a minute.");
+    }
+    u.migrating = { publicKey: pub }; this.store.save();
+    return { publicKey: pub, options: await api.registerOptions(u.id) };
+  }
+
+  async migrateFinish(u: UserRec, response?: unknown): Promise<void> {
+    this.active(u);
+    const api = this.store.signerApi();
+    if (!api) throw new MoopayError("INVALID_INPUT", "The secure signer isn't switched on here.");
+    if (!u.migrating) throw new MoopayError("INVALID_INPUT", "Start securing your wallet first.");
+    let st = await api.status(u.id);
+    if (!st.active) {
+      if (!response) throw new MoopayError("INVALID_INPUT", "Add your passkey first.");
+      await api.register(u.id, response as never);
+      st = await api.status(u.id);
+      if (!st.active) throw new MoopayError("INVALID_INPUT", "Your passkey isn't active yet, so I left your old key in place. Try again.");
+    }
+    const old = this.store.legacyKeyOf(u);
+    const mine = (await this.near.accessKeys(u.accountId)).find((k) => k.key === u.migrating!.publicKey);
+    if (!mine || !mine.full) throw new MoopayError("INTERNAL", "The secure key isn't on your account, so I left your old key in place.");
+    if ((await this.near.accessKeys(u.accountId)).some((k) => k.key === old.publicKey)) {
+      await this.near.deleteKey({ accountId: u.accountId, secretKey: old.secretKey, key: old.publicKey });
+      if ((await this.near.accessKeys(u.accountId)).some((k) => k.key === old.publicKey)) throw new MoopayError("UPSTREAM_TIMEOUT", "I couldn't confirm the old key is gone yet. Your wallet still works. Try again in a minute.");
+    }
+    u.tee = { publicKey: u.migrating.publicKey, passkey: true, strict: st.strict };
+    delete u.migrating; delete u.passkeys; delete u.bio;
+    this.store.event(u, "Your wallet's key is now held in the secure enclave. Every payment needs your passkey, and the old key no longer exists.");
+    this.store.save();
   }
 
   /** Puts the owner's recovery key on the wallet's account. The passkey has already named this key to the signer, which signs nothing else like it. */
