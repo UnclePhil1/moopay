@@ -30,6 +30,8 @@ export interface SendParams {
   useAgentWallet?: boolean | undefined; fromChain?: string | undefined; fromSymbol?: string | undefined;
   /** true: through the private route (beta). false: the normal route. Unset: the user's setting. */
   private?: boolean | undefined;
+  /** A wallet held in the signer: the live quote the passkey approved (address, exact amount, when it runs out). Set when the approval is made, never by the caller. */
+  pinned?: { depositAddress: string; amountIn: string; expiresAt: string } | undefined;
 }
 
 const MAX_GROUP = 20;
@@ -258,6 +260,7 @@ export class AgentOps {
 
   /* ---- sending ---- */
   async send(u: UserRec, p: SendParams, approved = false, who: Who = {}, ctx?: Ctx): Promise<Out> {
+    if (!approved && p.pinned) p = { ...p, pinned: undefined }; // a pinned quote comes only from an approval this code made
     this.active(u);
     const chain = p.chain.toLowerCase();
     this.validate(chain, p.recipient);
@@ -321,8 +324,17 @@ export class AgentOps {
     if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Send ${what} to ${p.recipient} on ${chain.toUpperCase()}${priv ? " through the private route" : ""}` + (expected ? ` (they get ${priv ? "about" : "exactly"} ${expected}; fees are added on top)` : "");
     // For an account whose key is in the signer, a direct NEAR send lists exactly what the passkey will sign: this asset, to this wallet, this much.
-    const flows = u.tee && !priv && direct ? [{ asset: direct === "near" ? "NEAR" : direct === "usdc" ? usdc.contract : dest.contractAddress!, to: p.recipient, amount: (direct === "near" ? nearUnits : direct === "usdc" ? units : destUnits).toString() }] : undefined;
-    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio, undefined, flows);
+    let flows = u.tee && !priv && direct ? [{ asset: direct === "near" ? "NEAR" : direct === "usdc" ? usdc.contract : dest.contractAddress!, to: p.recipient, amount: (direct === "near" ? nearUnits : direct === "usdc" ? units : destUnits).toString() }] : undefined;
+    // A cross-chain send from a signer-held wallet: take the live quote now, so the passkey signs exactly this deposit address and amount, and the payment later uses this same quote.
+    let pinned: SendParams["pinned"];
+    if (u.tee && !priv && !direct && !approved && d.action === "ask") {
+      const live = await this.exactOut(u, usdc, destUnits, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, false);
+      if (!live.depositAddress || !live.expiresAt) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address and a deadline to pay. Nothing was sent. Try again.");
+      if ((await this.near.ftBalance(usdc.contract, u.accountId)) < live.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(live.amountIn) / 10 ** usdc.decimals));
+      pinned = { depositAddress: live.depositAddress, amountIn: live.amountIn.toString(), expiresAt: live.expiresAt };
+      flows = [{ asset: usdc.contract, to: pinned.depositAddress, amount: pinned.amountIn }];
+    }
+    if (d.action === "ask" && !approved) return this.ask(u, "send", { ...p, chain, private: priv, ...(pinned ? { pinned } : {}), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, pf, rk.stepUp || bio, undefined, flows);
     let pay: Payment;
     try {
       pay = priv ? await this.doPrivate(u, usdc, p, chain, sym, dest, destUnits, units, amt, who.ak) : direct === "near" ? await this.doSendNear(u, nearUnits, amt, p.recipient, who.ak) : direct === "usdt" ? await this.doSendToken(u, dest.contractAddress!, destUnits, amt, p.recipient, who.ak) : await this.doSend(u, usdc, units, amt, chain, { ...p, assetSymbol: sym, amountUsd: usdText }, expected, who.ak, direct === "usdc", destUnits);
@@ -430,8 +442,8 @@ export class AgentOps {
   /** A quote where the receiver gets `out` whole and the fees come on top of what the wallet pays. */
   private async exactOut(u: UserRec, usdc: { assetId: string }, out: bigint, chain: string, p: SendParams, dryRun: boolean) {
     const dest = await this.destAsset(chain, p.assetSymbol);
-    const r = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: out.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun, exactOutput: true })) as { amountIn: string; depositAddress?: string };
-    return { dest, amountIn: BigInt(r.amountIn), depositAddress: r.depositAddress };
+    const r = (await this.svc.directQuote({ originAssetId: usdc.assetId, amount: out.toString(), refundTo: u.accountId, destinationChain: chain as DestChain, destinationAssetId: dest.assetId, recipient: p.recipient, slippageBps: 100, dryRun, exactOutput: true })) as { amountIn: string; depositAddress?: string; quoteExpiresAt?: string };
+    return { dest, amountIn: BigInt(r.amountIn), depositAddress: r.depositAddress, expiresAt: r.quoteExpiresAt };
   }
   private async preview(u: UserRec, usdc: { assetId: string; decimals: number }, out: bigint, chain: string, p: SendParams): Promise<{ text: string; payUsd: number }> {
     const r = await this.exactOut(u, usdc, out, chain, p, true);
@@ -475,10 +487,11 @@ export class AgentOps {
 
   private async doSend(u: UserRec, usdc: { assetId: string; contract: string; decimals: number }, units: bigint, amt: number, chain: string, p: SendParams, expected?: string, ak?: AgentKey, direct = false, destUnits = units): Promise<Payment> {
     let pay = units;
-    if (!direct) pay = (await this.exactOut(u, usdc, destUnits, chain, p, true)).amountIn; // what the swap really costs with fees
-    // paying from NEAR or USDT in one swap is faster than converting to USDC first and then swapping again
-    const hop = direct ? undefined : await this.singleHop(u, pay, destUnits, chain, p);
-    if (!hop) await this.ensureUsdc(u, pay);
+    if (u.tee && !direct && !p.pinned) throw new MoopayError("INVALID_INPUT", "This wallet pays only the quote you approved with your passkey. Ask for the payment again.");
+    if (!direct) pay = p.pinned ? BigInt(p.pinned.amountIn) : (await this.exactOut(u, usdc, destUnits, chain, p, true)).amountIn; // what the swap really costs with fees
+    // paying from NEAR or USDT in one swap is faster than converting to USDC first and then swapping again; a signer-held wallet pays only the quote it approved, in USDC
+    const hop = direct || u.tee ? undefined : await this.singleHop(u, pay, destUnits, chain, p);
+    if (!hop && !u.tee) await this.ensureUsdc(u, pay);
     const b = await this.balances(u);
     if (b.nat < MIN_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this yet: the agent wallet needs about 0.05 NEAR. Send it to ${u.accountId} and try again.`);
     const k = this.store.keyOf(u);
@@ -489,7 +502,9 @@ export class AgentOps {
       this.svc.publicStatsStore?.record(r.txHash, amt, u.accountId);
     } else {
       const o = hop ?? usdc;
-      const q = await this.exactOut(u, o, destUnits, chain, p, false);
+      // The approved quote, if there is one, and only while it is still good: paying a deposit address after it expires can lose the money.
+      if (p.pinned && Date.parse(p.pinned.expiresAt) - this.now() < 30_000) throw new MoopayError("NOTE_EXPIRED", "That quote ran out of time before it was paid. Nothing was sent. Ask for the payment again.");
+      const q = p.pinned ? { depositAddress: p.pinned.depositAddress, amountIn: BigInt(p.pinned.amountIn) } : await this.exactOut(u, o, destUnits, chain, p, false);
       if (!q.depositAddress) throw new MoopayError("QUOTE_FAILED", "The swap service didn't give me an address to pay. Nothing was sent. Try again.");
       if ((await this.near.ftBalance(o.contract, u.accountId)) < q.amountIn) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, Number(pay) / 10 ** usdc.decimals));
       const r = await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: o.contract, to: q.depositAddress, amount: q.amountIn });

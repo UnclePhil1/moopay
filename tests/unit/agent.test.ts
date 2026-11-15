@@ -1753,3 +1753,54 @@ test("signer: a secure account's passkey flows run through the signer, and a hac
     assert.equal((await call("freeze", T, { on: false, assertion: await page(t2.body.signer) })).status, 200);
   } finally { close(); sig.close(); }
 });
+
+test("signer: a cross-chain send from a secure account pays the exact quote the passkey approved, and nothing once it has expired", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n }, [USDC_CONTRACT]: { perTx: 50_000_000n, daily: 100_000_000n } }, unattended: {} };
+  const wallet = new WalletSigner(new FixedKeySource("xchain"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  const ph = phone(), T = "r".repeat(43);
+  const page = async (prompt: Parameters<typeof signerChallenge>[0]) => ({ ...(ph.get(await signerChallenge(prompt)) as object), moopayNonce: prompt.nonce });
+  const approve = async (id: string, T2: string) => {
+    const o = await call("passkey/options", T2, { purpose: "approve:" + id }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    return call("approve", T2, { id, approve: true, assertion: await page(o.body.signer) });
+  };
+  try {
+    await call("state", T);
+    const u = m.store.open(T);
+    const reg = await call("passkey/register-options", T, {});
+    assert.equal((await call("passkey/register", T, { response: ph.create(String(reg.body["challenge"])) })).status, 200);
+    a.near.fund(u.accountId, 20_000_000n);
+
+    const out = await m.ops.send(u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" }, false, {}, { origin: "https://moopay.cash" });
+    const card = out.card as { id: string; flows: { asset: string; to: string; amount: string }[] };
+    assert.equal(card.flows.length, 1);
+    assert.equal(card.flows[0]!.asset, USDC_CONTRACT);
+    assert.match(card.flows[0]!.to, /^dep-/, "the passkey signs the swap service's deposit address");
+    assert.equal(a.near.transfers.length, 0, "nothing moves before the approval");
+
+    // Someone passing their own "pinned" quote with a request gets it thrown away.
+    const sneaky = await m.ops.send(u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC", pinned: { depositAddress: "mallory.near", amountIn: "1", expiresAt: "2999-01-01T00:00:00Z" } }, false, {}, { origin: "https://moopay.cash" });
+    assert.notEqual((sneaky.card as { flows: { to: string }[] }).flows[0]!.to, "mallory.near");
+
+    // The test clock is not the service clock, so give the quote a deadline on the test clock.
+    const setExpiry = (id: string, at: number) => { const pr = u.approvals.find((x) => x.id === id)!.params; pr["pinned"] = { ...(pr["pinned"] as object), expiresAt: new Date(at).toISOString() }; };
+    setExpiry(card.id, a.now() + 300_000);
+    const ok = await approve(card.id, T) as unknown as { status: number; body: { result: { status: string } } };
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.result.status, "sent");
+    const last = a.near.transfers.at(-1)!;
+    assert.equal(last.to, card.flows[0]!.to);
+    assert.equal(last.amount.toString(), card.flows[0]!.amount);
+
+    // A quote that has run out is never paid, because money sent to a dead deposit address can be lost.
+    const out2 = await m.ops.send(u, { amountUsd: "5", chain: "eth", recipient: ETH_ADDR, assetSymbol: "USDC" }, false, {}, { origin: "https://moopay.cash" });
+    const card2 = out2.card as { id: string };
+    setExpiry(card2.id, a.now() - 1000);
+    const before = a.near.transfers.length;
+    assert.notEqual((await approve(card2.id, T)).status, 200);
+    assert.equal(a.near.transfers.length, before, "nothing was sent");
+  } finally { close(); sig.close(); }
+});
