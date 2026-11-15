@@ -1804,3 +1804,37 @@ test("signer: a cross-chain send from a secure account pays the exact quote the 
     assert.equal(a.near.transfers.length, before, "nothing was sent");
   } finally { close(); sig.close(); }
 });
+
+test("signer: a private claim from a secure account pays the exact note account the passkey approved", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n }, [USDC_CONTRACT]: { perTx: 50_000_000n, daily: 100_000_000n } }, unattended: {} };
+  const wallet = new WalletSigner(new FixedKeySource("claim"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  const ph = phone(), T = "s".repeat(43);
+  const page = async (prompt: Parameters<typeof signerChallenge>[0]) => ({ ...(ph.get(await signerChallenge(prompt)) as object), moopayNonce: prompt.nonce });
+  try {
+    await call("state", T);
+    const u = m.store.open(T);
+    const reg = await call("passkey/register-options", T, {});
+    assert.equal((await call("passkey/register", T, { response: ph.create(String(reg.body["challenge"])) })).status, 200);
+    a.near.fund(u.accountId, 20_000_000n);
+    a.near.nearBalances.set(u.accountId, 10n ** 23n);
+
+    const out = await m.ops.claim(u, { amountUsd: "5", receiver: BOB }, { origin: "https://moopay.cash" });
+    const card = out.card as { id: string; flows: { asset: string; to: string; amount: string }[] };
+    assert.equal(card.flows.length, 2);
+    assert.equal(card.flows[0]!.asset, "NEAR");
+    assert.equal(card.flows[1]!.asset, USDC_CONTRACT);
+    assert.equal(card.flows[1]!.amount, "5000000");
+    assert.equal(card.flows[0]!.to, card.flows[1]!.to, "both go to the one note account");
+    assert.equal(a.near.transfers.length, 0, "nothing moves before the approval");
+
+    const o = await call("passkey/options", T, { purpose: "approve:" + card.id }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    const ok = await call("approve", T, { id: card.id, approve: true, assertion: await page(o.body.signer) }) as unknown as { status: number; body: { result: { status: string } } };
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.result.status, "created");
+    assert.equal(a.near.transfers.at(-1)!.to, card.flows[0]!.to);
+  } finally { close(); sig.close(); }
+});

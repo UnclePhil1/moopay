@@ -24,6 +24,8 @@ export interface Out { result: Record<string, unknown>; card?: Record<string, un
 export interface Ctx { origin: string; /** set for a request that came from a post on X, which gets tighter limits */ channel?: "x"; /** the post that started it, so the result can be answered there */ tweet?: string; /** the amount was not in the user's own words, so this must wait for their OK */ review?: boolean }
 /** Set when an outside agent (not the user) is asking. Its key is a second leash inside the user's rules. */
 export interface Who { ak?: AgentKey | undefined; /** a payment the user already approved when they set up the schedule */ sched?: boolean }
+/** A claim set up for a signer-held wallet when the approval was made: what the passkey signed. */
+export interface ClaimPin { fundKey: string; claimKey: string; noteAccountId: string; gasNear: string; until: number }
 export interface SendParams {
   amountUsd?: string | undefined; amount?: string | undefined; chain: string; recipient: string; assetSymbol?: string | undefined;
   /** true: pay from the agent wallet. false, or a fromChain: the user signs in their own wallet. Unset: the agent wallet only when it can cover it. */
@@ -623,8 +625,9 @@ export class AgentOps {
   }
 
   /* ---- private claims ---- */
-  async claim(u: UserRec, p: { amountUsd: string; receiver: string; chain?: string | undefined }, ctx: Ctx, approved = false, who: Who = {}): Promise<Out> {
+  async claim(u: UserRec, p: { amountUsd: string; receiver: string; chain?: string | undefined; pinned?: ClaimPin | undefined }, ctx: Ctx, approved = false, who: Who = {}): Promise<Out> {
     this.active(u);
+    if (!approved && p.pinned) p = { ...p, pinned: undefined }; // a pinned claim comes only from an approval this code made
     const chain = (p.chain ?? "near").toLowerCase();
     if (!isClaimChain(chain)) throw new MoopayError("INVALID_INPUT", "private claims can go to a NEAR, Solana or EVM wallet (eth, base, arb, op, pol, bsc, avax, gnosis, monad, xlayer). Bitcoin and other chains can't prove wallet ownership yet; send normally instead.");
     if (chain === "near" ? !isNearAccountId(p.receiver) : !validAddress(chain, p.receiver)) throw new MoopayError("BAD_RECIPIENT", chain === "near" ? "the receiver must be a NEAR wallet address, like alice.near" : `that is not a valid ${chain.toUpperCase()} wallet address`);
@@ -636,15 +639,27 @@ export class AgentOps {
     const bio = this.bio(u, ctx, who);
     if (bio && d.action === "auto") d = { action: "ask", reason: this.holdWhy(ctx) };
     const summary = (who.ak ? `${who.ak.name}: ` : "") + `Create a private claim of ${usd(amt)} that only ${p.receiver}${chain === "near" ? "" : ` (${chain.toUpperCase()})`} can open`;
-    if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", `about ${fmt(CLAIM_GAS, 24, 2)} NEAR, paid from the agent wallet`], ...(chain === "near" ? [] : [["Swap fee", "a small fee comes out of the amount"] as [string, string]]), ["Expires", "in 24 hours; unclaimed money comes back to you"]]));
+    // From a signer-held wallet the claim is set up now, so the passkey signs the exact note account, gas and USDC it will pay, and nothing else.
+    let pinned: ClaimPin | undefined, flows: Approval["flows"];
+    if (u.tee && !approved && d.action === "ask") {
+      const usdcA = await this.svc.usdcAsset(), want = parseDecimal(p.amountUsd, usdcA.decimals);
+      if ((await this.near.ftBalance(usdcA.contract, u.accountId)) < want) throw new MoopayError("NOTE_NOT_FUNDED", await this.lack(u, amt));
+      const made = await this.svc.claimDesk.create({ amount: p.amountUsd, receiver: p.receiver, symbol: "USDC", chain });
+      const plan = await this.svc.claimDesk.fundPlan(made.fundKey, u.accountId);
+      pinned = { fundKey: made.fundKey, claimKey: made.claimKey, noteAccountId: plan.noteAccountId, gasNear: plan.gasNear.toString(), until: this.now() + 25 * 60_000 };
+      flows = [{ asset: "NEAR", to: plan.noteAccountId, amount: plan.gasNear.toString() }, { asset: usdcA.contract, to: plan.noteAccountId, amount: want.toString() }];
+    }
+    if (d.action === "ask" && !approved) return this.ask(u, "claim", { ...p, ...(pinned ? { pinned } : {}), ...(who.ak ? { agentId: who.ak.id } : {}) }, summary, d.reason, undefined, bio, this.mooRows(amt, ctx, [["Network fee", `about ${fmt(CLAIM_GAS, 24, 2)} NEAR, paid from the agent wallet`], ...(chain === "near" ? [] : [["Swap fee", "a small fee comes out of the amount"] as [string, string]]), ["Expires", "in 24 hours; unclaimed money comes back to you"]]), flows);
     const usdc = await this.svc.usdcAsset();
     const units = parseDecimal(p.amountUsd, usdc.decimals);
-    await this.ensureUsdc(u, units);
+    if (u.tee && !p.pinned) throw new MoopayError("INVALID_INPUT", "This wallet pays only the claim you approved with your passkey. Ask for it again.");
+    if (p.pinned && this.now() > p.pinned.until) throw new MoopayError("NOTE_EXPIRED", "That claim ran out of time before it was paid. Nothing was sent. Ask for it again.");
+    if (!u.tee) await this.ensureUsdc(u, units);
     const b = await this.balances(u);
     if (b.nat < CLAIM_GAS) throw new MoopayError("NOTE_NOT_FUNDED", `I can't pay the network fee for this claim yet: the agent wallet needs about 0.1 NEAR. Send it to ${u.accountId} and try again.`);
     const desk = this.svc.claimDesk;
-    const c = await desk.create({ amount: p.amountUsd, receiver: p.receiver, symbol: "USDC", chain });
-    const plan = await desk.fundPlan(c.fundKey, u.accountId);
+    const c = p.pinned ? { fundKey: p.pinned.fundKey, claimKey: p.pinned.claimKey } : await desk.create({ amount: p.amountUsd, receiver: p.receiver, symbol: "USDC", chain });
+    const plan = p.pinned ? { noteAccountId: p.pinned.noteAccountId, gasNear: BigInt(p.pinned.gasNear) } : await desk.fundPlan(c.fundKey, u.accountId);
     const k = this.store.keyOf(u);
     await this.near.sendNear({ accountId: k.accountId, secretKey: k.secretKey, to: plan.noteAccountId, amount: BigInt(plan.gasNear) });
     await this.near.transferFromNote({ accountId: k.accountId, secretKey: k.secretKey, tokenContract: usdc.contract, to: plan.noteAccountId, amount: units });
