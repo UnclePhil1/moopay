@@ -18,6 +18,8 @@ export interface UserState {
   free: TallyData;
   /** Today's total moved to MooPay's fee account, per asset. */
   fee?: TallyData;
+  /** True once the signer has signed a payment (other than MooPay's fee) for this account. Never reset. */
+  moved?: boolean;
   /** What the owner's last passkey signature allows, for a few minutes. */
   mandate?: Mandate;
 }

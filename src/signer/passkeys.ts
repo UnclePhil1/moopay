@@ -41,8 +41,12 @@ export class SignerPasskeys {
 
   private get rpID(): string { return new URL(this.origin).hostname; }
   /** True once the user has a passkey that is in force. */
-  active(s: UserState): boolean { return s.credentials.length > 0 && this.now() >= s.activeAt; }
-  pending(s: UserState): boolean { return s.credentials.length > 0 && this.now() < s.activeAt; }
+  /**
+   * A passkey is in force at once while the account has never moved money: nothing it could protect is at risk, and an attacker who
+   * registers first gets nothing (the app shows no address before a passkey exists). Once money has moved, a first passkey waits.
+   */
+  active(s: UserState): boolean { return s.credentials.length > 0 && (!s.moved || this.now() >= s.activeAt); }
+  pending(s: UserState): boolean { return s.credentials.length > 0 && !this.active(s); }
   list(s: UserState) { return s.credentials.map((c) => ({ id: c.id, ...(c.transports ? { transports: c.transports } : {}) })); }
 
   /** A fresh one-time nonce. The browser hashes it with what it is about to sign. Nonces live in memory only: a restart voids them, which is safe. */
@@ -95,7 +99,7 @@ export class SignerPasskeys {
   }
 
   /**
-   * Adds a new passkey to `s`. With none yet, it starts counting after the delay; with one already, the caller must have passed
+   * Adds a new passkey to `s`. With none yet, it counts at once if the account never moved money, otherwise after the delay; with one already, the caller must have passed
    * `verifyAction(.., "addkey")` first, so a stolen server cannot enrol its own device.
    */
   async register(s: UserState, user: string, response: RegistrationResponseJSON): Promise<void> {
@@ -106,6 +110,6 @@ export class SignerPasskeys {
     const c = v.registrationInfo.credential;
     const first = s.credentials.length === 0;
     s.credentials = [...s.credentials, { id: c.id, publicKey: b64(c.publicKey), counter: c.counter, ...(c.transports ? { transports: c.transports } : {}), at: this.now() }].slice(-5);
-    if (first) s.activeAt = this.now() + this.delayMs;
+    if (first) s.activeAt = s.moved ? this.now() + this.delayMs : this.now();
   }
 }

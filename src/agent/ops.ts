@@ -243,11 +243,14 @@ export class AgentOps {
   async account(u: UserRec): Promise<Out> {
     const { totalUsd, tok, nat } = await this.balances(u);
     const todo: string[] = [];
-    if (totalUsd < 0.01) todo.push("Add money: tell me \"add $20 from my Solana (or Ethereum, Bitcoin) wallet\", or send NEAR, USDC or USDT on the NEAR network to the address");
+    /* A signer-held wallet shows no address until a passkey is in force, so no money can arrive before the owner has locked it. */
+    const hidden = Boolean(u.tee && !u.tee.passkey);
+    if (hidden) todo.push("Add a passkey (Settings, Secure this wallet) to get your wallet address. Nothing can be received until then, so no money is ever left unprotected");
+    else if (totalUsd < 0.01) todo.push("Add money: tell me \"add $20 from my Solana (or Ethereum, Bitcoin) wallet\", or send NEAR, USDC or USDT on the NEAR network to the address");
     else if (nat < MIN_GAS && tok > 0n && !this.sponsor) todo.push("To pay network fees automatically, MooPay needs the operator's fee sponsor, or about 0.1 NEAR sent to the same address");
     if (!u.rules.payoutAddress) todo.push("Tell me your own NEAR wallet so I can send back anything above your float");
     const data = {
-      address: u.accountId, explorer: "https://nearblocks.io/address/" + u.accountId, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
+      address: hidden ? "" : u.accountId, explorer: hidden ? "" : "https://nearblocks.io/address/" + u.accountId, needsPasskey: hidden, balanceUsd: totalUsd.toFixed(2), rules: u.rules,
       points: u.points ?? 0, spentToday: spentToday(u, this.now()), schedules: u.tasks.map((t) => ({ id: t.id, text: t.text })), pendingApprovals: u.approvals.filter((a) => a.status === "pending").length, setupSteps: todo,
     };
     return { result: { ...data, xLinked: u.x ? "@" + u.x.handle : null }, card: { kind: "account", ...data } };

@@ -104,13 +104,14 @@ export class WalletSigner {
           if (!this.passkeys.active(st)) {
             throw new Refused("passkey_required", this.passkeys.pending(st)
               ? "Your passkey is still in its waiting period, so larger payments are not available yet."
-              : "Add a passkey to send more than the small limit.");
+              : "Add a passkey to send from this wallet.");
           }
           if (!approval) throw new Refused("passkey_required", "This payment needs your fingerprint, face or PIN.");
           await this.passkeys.verifyPayment(st, userId, approval.nonce, rest, approval.assertion);
         }
       }
       for (const o of seen.outflows) total.add(o.asset, o.amount);
+      if (rest.length) st.moved = true; // from now on a first passkey waits before it counts (see SignerPasskeys.active)
       if (rest.length && isFree) for (const o of rest) free.add(o.asset, o.amount);
       for (const o of fees) fee.add(o.asset, o.amount);
       await save(); // on record before it is signed
@@ -169,7 +170,7 @@ export class WalletSigner {
     return this.open(userId, ({ state }) => this.passkeys.registerOptions(state, userId));
   }
 
-  /** Adds a passkey. The first one starts counting after the waiting period. Once any exists, adding another needs one of them. */
+  /** Adds a passkey. The first one counts at once while the account has never moved money, otherwise after the waiting period. Once any exists, adding another needs one of them. */
   async addPasskey(userId: string, response: RegistrationResponseJSON, a?: Approval): Promise<{ activeAt: number }> {
     await this.wallet(userId);
     return this.open(userId, async ({ state, save }) => {

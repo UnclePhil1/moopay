@@ -148,9 +148,20 @@ test("passkey: a signature needs a fingerprint or PIN, the right site, and a cou
   await assert.rejects(signer.sign("alice", encodeTransaction(tx), { nonce, assertion: ph.get(paymentChallenge("alice", nonce, flows), 1) as never }), code("bad_assertion"), "an old counter looks like a cloned key");
 });
 
-test("passkey: the first passkey waits before it counts, so a thief who adds one cannot use it at once", async () => {
-  let t = Date.parse("2026-11-14T10:00:00Z");
+test("passkey: on an account that never moved money, the first passkey counts at once", async () => {
+  const t = Date.parse("2026-11-14T10:00:00Z");
   const signer = setup(small, () => t, 24 * HOUR), me = await signer.pubkey("alice"), ph = await enrol(signer, "alice");
+  const tx = pay(me, "bob.near", "20000000");
+  assert.equal((await signer.status("alice")).active, true);
+  assert.equal((await signer.status("alice")).pending, false);
+  await signer.sign("alice", encodeTransaction(tx), await approve(signer, "alice", ph, tx));
+});
+
+test("passkey: once the account has moved money, the first passkey waits, so a thief who adds one cannot use it at once", async () => {
+  let t = Date.parse("2026-11-14T10:00:00Z");
+  const signer = setup(small, () => t, 24 * HOUR), me = await signer.pubkey("alice");
+  await signer.sign("alice", encodeTransaction(pay(me, "bob.near", "1000000")));
+  const ph = await enrol(signer, "alice");
   const tx = pay(me, "bob.near", "20000000");
   assert.equal((await signer.status("alice")).pending, true);
   await assert.rejects(signer.sign("alice", encodeTransaction(tx), await approve(signer, "alice", ph, tx)), (e) => e instanceof Refused && e.code === "passkey_required" && /waiting period/.test(e.message));
@@ -350,7 +361,9 @@ test("mandate: works in strict mode (it is a passkey approval), but not on a loc
   await signer.lock("alice");
   await assert.rejects(mandate(signer, "alice", ph, [{ asset: USDC, to: "bob.near", amount: 100n }]), code("locked"));
   const t0 = Date.parse("2026-11-14T10:00:00Z");
-  const fresh = setup(small, () => t0, 24 * HOUR), ph2 = await enrol(fresh, "carol");
+  const fresh = setup(small, () => t0, 24 * HOUR), me2 = await fresh.pubkey("carol");
+  await fresh.sign("carol", encodeTransaction(pay(me2, "bob.near", "1000000")));
+  const ph2 = await enrol(fresh, "carol");
   await assert.rejects(mandate(fresh, "carol", ph2, [{ asset: USDC, to: "bob.near", amount: 100n }]), code("passkey_required"));
 });
 
@@ -404,4 +417,15 @@ test("service: /v1/writer needs the token and returns only the state writer's ad
     const ok = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + "t".repeat(40) } });
     assert.deepEqual([ok.status, await ok.json()], [200, { writer: "abc123" }]);
   } finally { server.close(); }
+});
+
+const none: SignerPolicy = { caps, unattended: {} };
+
+test("no free allowance: with nothing unattended, every payment needs the passkey, and without one it is refused", async () => {
+  const signer = setup(none), me = await signer.pubkey("alice");
+  const tx = pay(me, "bob.near", "100");
+  await assert.rejects(signer.sign("alice", encodeTransaction(tx)), code("passkey_required"));
+  const ph = await enrol(signer, "alice");
+  await assert.rejects(signer.sign("alice", encodeTransaction(tx)), code("passkey_required"), "a registered passkey still has to approve");
+  await signer.sign("alice", encodeTransaction(tx), await approve(signer, "alice", ph, tx));
 });

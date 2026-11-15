@@ -178,7 +178,7 @@ export async function makeAgent(d: AgentDeps) {
         for (let i = 0; i < u.chat.length; i++) { const m = u.chat[i]!; if (!m.id) { m.id = randomUUID(); const n = u.chat[i + 1]; if (m.role === "user" && n && n.role === "assistant" && !n.id) n.id = m.id; } }
         const a = await ops.account(u).catch(() => undefined);
         const lastId = u.events.at(-1)?.id ?? 0;
-        json(res, 200, { frozen: Boolean(u.frozen), points: u.points ?? 0, names: ops.nameSuffix ? { suffix: ops.nameSuffix, needed: !u.name && !u.payments.length } : null, account: a?.result ?? { address: u.accountId }, saveChat: !u.noHistory, chat: (u.noHistory ? [] : u.chat).slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map(approvalCard), live: Boolean(d.llm), ai: d.ai ?? null });
+        json(res, 200, { frozen: Boolean(u.frozen), points: u.points ?? 0, names: ops.nameSuffix ? { suffix: ops.nameSuffix, needed: !u.name && !u.payments.length } : null, account: a?.result ?? { address: u.tee && !u.tee.passkey ? "" : u.accountId }, saveChat: !u.noHistory, chat: (u.noHistory ? [] : u.chat).slice(-20).map((m) => ({ ...m, content: m.role === "assistant" ? plain(m.content) : m.content })), lastEventId: lastId, approvals: u.approvals.filter((x) => x.status === "pending").map(approvalCard), live: Boolean(d.llm), ai: d.ai ?? null });
         return true;
       }
       if (op === "name" && req.method === "POST") {

@@ -1673,7 +1673,10 @@ test("signer: a new account opened through the real routes lives in the signer, 
     const fresh = "z".repeat(43);
     const st = await call("state", fresh);
     assert.equal(st.status, 200);
-    assert.equal(st.body["address"] ?? (st.body as Record<string, any>)["account"]?.["address"], (await wallet.pubkey(createHash("sha256").update("moopay.device|" + fresh).digest("hex"))).accountId, "the address is the one the signer derived");
+    const acct = (st.body as Record<string, any>)["account"];
+    assert.equal(acct?.["address"], "", "no address is shown until a passkey is added");
+    assert.equal(acct?.["needsPasskey"], true);
+    assert.ok((await wallet.pubkey(createHash("sha256").update("moopay.device|" + fresh).digest("hex"))).accountId, "the signer still derives one");
     for (const op of ["export", "backup"]) {
       const r = await call(op, fresh, {});
       assert.equal(r.status, 400, op);

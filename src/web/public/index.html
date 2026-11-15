@@ -297,8 +297,9 @@ function card(c) {
   switch (c.kind) {
     case "account": return h("div", { class: "card" }, h("div", { class: "sub" }, "Your agent wallet"),
       h("div", { class: "sub" }, "Balance"), h("div", { class: "big" }, "$" + Number(c.balanceUsd).toFixed(2)), row("Spent today", usd(c.spentToday || 0)), row("moo points", String(c.points || 0)),
+      c.needsPasskey ? h("div", { class: "sub", style: "margin-top:10px" }, "Your wallet address appears once you add a passkey (Face ID, fingerprint or screen lock). Until then nothing can be sent to this wallet, so no money is left unprotected.") : h("div", {},
       h("div", { class: "sub", style: "margin-top:10px" }, "Deposit address (NEAR network)"), h("div", { class: "code" }, h("code", {}, c.address), h("button", { onclick: (e) => copy(c.address, e.target) }, "Copy")),
-      h("div", { class: "sub", style: "margin-top:10px" }, "It's a real NEAR wallet. ", h("a", { href: c.explorer, target: "_blank", rel: "noopener noreferrer" }, "See it on the blockchain"), ". Take your money out any time with /withdraw."),
+      h("div", { class: "sub", style: "margin-top:10px" }, "It's a real NEAR wallet. ", h("a", { href: c.explorer, target: "_blank", rel: "noopener noreferrer" }, "See it on the blockchain"), ". Take your money out any time with /withdraw.")),
       c.setupSteps?.length ? h("div", { style: "margin-top:12px" }, c.setupSteps.map((s, i) => h("div", { class: "step" }, h("span", { class: "i" }, (i + 1) + "."), s))) : h("div", { style: "margin-top:10px" }, h("span", { class: "tag ok" }, "Ready")));
     case "payment": {
       const tone = /DELIVERED|CLAIMED/.test(c.status) ? "ok" : /FAIL|REFUND/.test(c.status) ? "bad" : "";
