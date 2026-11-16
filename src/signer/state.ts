@@ -74,13 +74,21 @@ export class NearStateStore implements StateStore {
 
   async save(user: string, state: UserState, expectedVersion: number): Promise<number> {
     const signer = typeof this.writerKey === "string" ? KeyPairSigner.fromSecretKey(this.writerKey as never) : this.writerKey;
-    try {
-      const out = await new Account(this.writerId, this.provider, signer).callFunctionRaw({
-        contractId: this.contractId, methodName: "set", args: { user, state: JSON.stringify(state), expected_version: expectedVersion }, deposit: 0n, gas: 30n * 10n ** 12n,
-      });
-      const status = (out as unknown as { status?: unknown }).status;
-      if (status && typeof status === "object" && "Failure" in (status as object)) throw new Error("failed");
-      return expectedVersion + 1;
-    } catch (e) { if (process.env['SIGNER_DEBUG']) console.error('[state.save]', e); throw unavailable(); }
+    // A write can fail on a stale access-key nonce when two RPC nodes disagree, or on a busy node. The contract only accepts the version
+    // we expect, so trying again is safe: if the first try did land, the second is refused and nothing is signed.
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, 600 * attempt));
+      try {
+        const out = await new Account(this.writerId, this.provider, signer).callFunctionRaw({
+          contractId: this.contractId, methodName: "set", args: { user, state: JSON.stringify(state), expected_version: expectedVersion }, deposit: 0n, gas: 30n * 10n ** 12n,
+        });
+        const status = (out as unknown as { status?: unknown }).status;
+        if (status && typeof status === "object" && "Failure" in (status as object)) throw new Error("failed");
+        return expectedVersion + 1;
+      } catch (e) { last = e; }
+    }
+    if (process.env['SIGNER_DEBUG']) console.error('[state.save]', last);
+    throw unavailable();
   }
 }
