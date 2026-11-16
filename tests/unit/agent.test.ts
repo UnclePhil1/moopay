@@ -1920,6 +1920,11 @@ test("migration: an old server-held wallet moves into the signer, and the old ke
     a.near.keys.set(address, [{ key: oldKey, full: true }]);
     assert.equal((await call("state", T)).body["account"]["legacy"], true, "the app offers to secure it");
 
+    u.payments.unshift({ id: "waiting-topup", kind: "fund", amountUsd: 5, chain: "near", recipient: address, status: "AWAITING_YOUR_SIGNATURE", createdAt: Date.now() });
+    u.payments.unshift({ id: "sent-one", kind: "send", amountUsd: 5, chain: "near", recipient: "x.near", status: "PROCESSING", createdAt: Date.now(), txHash: "h" });
+    assert.equal((await call("migrate/start", T, {})).status, 400, "a payment the wallet already sent still has to finish");
+    assert.equal(u.payments.find((p) => p.id === "waiting-topup")?.status, "CANCELLED", "a top-up nobody signed is closed");
+    u.payments.find((p) => p.id === "sent-one")!.settled = true;
     assert.equal((await call("migrate/start", T, {})).status, 400, "needs a little NEAR for the fee first");
     assert.equal(a.near.addedKeys.length, 0);
     a.near.nearBalances.set(address, 10n ** 23n);

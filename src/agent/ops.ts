@@ -682,7 +682,17 @@ export class AgentOps {
     const api = this.store.signerApi();
     if (!api) throw new MoopayError("INVALID_INPUT", "The secure signer isn't switched on here.");
     if (u.tee) throw new MoopayError("INVALID_INPUT", "This wallet is already in the secure signer.");
-    if (u.payments.some((p) => !p.settled) || u.approvals.some((a) => a.status === "pending")) throw new MoopayError("INVALID_INPUT", "Let your payments in progress finish and answer any waiting approvals, then secure your wallet.");
+    // Things still waiting for the user (an unsigned pay page, a deposit nobody made, an unanswered approval) have moved nothing out of the
+    // wallet, so they are closed here rather than blocking the move. Anything the wallet already sent still has to finish.
+    for (const p of u.payments) {
+      if (p.settled || p.txHash || p.pv) continue;
+      if (p.status !== "AWAITING_YOUR_SIGNATURE" && p.status !== "AWAITING_YOUR_DEPOSIT") continue;
+      if (p.payId) { try { this.svc.cancelCall(p.payId); } catch { /* an ordinary pay page: it lapses on its own and nothing was signed */ } }
+      p.status = "CANCELLED"; p.settled = true;
+    }
+    for (const a of u.approvals) if (a.status === "pending") a.status = "declined";
+    this.store.save();
+    if (u.payments.some((p) => !p.settled)) throw new MoopayError("INVALID_INPUT", "A payment is still in progress. Let it finish, then secure your wallet.");
     const pub = u.migrating?.publicKey ?? (await api.pubkey(u.id)).publicKey, old = this.store.legacyKeyOf(u);
     const keys = await this.near.accessKeys(u.accountId);
     if (!keys.some((k) => k.key === pub && k.full)) {
