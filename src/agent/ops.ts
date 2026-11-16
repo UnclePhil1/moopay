@@ -686,13 +686,15 @@ export class AgentOps {
     // wallet, so they are closed here rather than blocking the move. Anything the wallet already sent still has to finish.
     for (const p of u.payments) {
       if (p.settled || p.txHash || p.pv) continue;
-      if (p.status !== "AWAITING_YOUR_SIGNATURE" && p.status !== "AWAITING_YOUR_DEPOSIT") continue;
+      // a pay page is signed in the user's own wallet, never this one; anything else untouched for a day is stale
+      const waiting = p.status === "AWAITING_YOUR_SIGNATURE" || p.status === "AWAITING_YOUR_DEPOSIT" || !!p.payId || this.now() - p.createdAt > 864e5;
+      if (!waiting) continue;
       if (p.payId) { try { this.svc.cancelCall(p.payId); } catch { /* an ordinary pay page: it lapses on its own and nothing was signed */ } }
       p.status = "CANCELLED"; p.settled = true;
     }
     for (const a of u.approvals) if (a.status === "pending") a.status = "declined";
     this.store.save();
-    if (u.payments.some((p) => !p.settled)) throw new MoopayError("INVALID_INPUT", "A payment is still in progress. Let it finish, then secure your wallet.");
+    if (u.payments.some((p) => !p.settled)) throw new MoopayError("INVALID_INPUT", `A payment is still in progress (${u.payments.find((p) => !p.settled)?.kind}, ${u.payments.find((p) => !p.settled)?.status}). Let it finish, then secure your wallet.`);
     const pub = u.migrating?.publicKey ?? (await api.pubkey(u.id)).publicKey, old = this.store.legacyKeyOf(u);
     const keys = await this.near.accessKeys(u.accountId);
     if (!keys.some((k) => k.key === pub && k.full)) {
