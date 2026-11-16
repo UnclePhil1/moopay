@@ -192,6 +192,23 @@ export class WalletSigner {
     });
   }
 
+  /**
+   * Removes one passkey. Needs a passkey's signature on exactly this removal, and never leaves the wallet with none: replace a passkey
+   * by adding the new one first, then removing the old one. (If every passkey is lost, the recovery key is the way out.)
+   */
+  async removePasskey(userId: string, credentialId: string, a: Approval): Promise<void> {
+    await this.wallet(userId);
+    await this.open(userId, async ({ state, save }) => {
+      if (state.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
+      if (!this.passkeys.active(state)) throw new Refused("passkey_required", "Add a passkey first.");
+      if (!state.credentials.some((c) => c.id === credentialId)) throw new Refused("bad_transaction", "That passkey isn't on this wallet.");
+      if (state.credentials.length < 2) throw new Refused("bad_transaction", "That is your only passkey. Add another one first, then remove this one.");
+      await this.passkeys.verifyAction(state, userId, a.nonce, `removekey:${credentialId}`, a.assertion);
+      state.credentials = state.credentials.filter((c) => c.id !== credentialId);
+      await save();
+    });
+  }
+
   /** Locking is always allowed (it can only make the wallet safer). Unlocking needs the passkey. */
   async lock(userId: string): Promise<void> {
     await this.wallet(userId);
@@ -238,7 +255,7 @@ const same = (a: string, b: string): boolean => { const x = Buffer.from(a), y = 
 /** A small HTTP front for the signer. The bearer token only keeps strangers out; the policy and the passkey are the real checks. */
 export function signerServer(signer: WalletSigner, token: string, log: (m: string) => void = () => undefined, info: { writer?: string } = {}): Server {
   if (token.length < 32) throw new Error("SIGNER_TOKEN must be at least 32 characters");
-  type Body = { userId?: string; publicKey?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
+  type Body = { userId?: string; publicKey?: string; credentialId?: string; tx?: string; nonce?: string; assertion?: AuthenticationResponseJSON; response?: RegistrationResponseJSON; on?: boolean; flows?: { asset: unknown; to: unknown; amount: unknown }[] };
   return createServer((req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "GET" && req.url === "/health") return send(200, { ok: true });
@@ -268,6 +285,7 @@ export function signerServer(signer: WalletSigner, token: string, log: (m: strin
             }
             case "/v1/verify": await signer.verifyOwner(id, approval()); return send(200, { ok: true });
             case "/v1/recovery": await signer.recoveryKey(id, String(b.publicKey ?? ""), approval()); return send(200, { ok: true });
+            case "/v1/passkey/remove": await signer.removePasskey(id, String(b.credentialId ?? ""), approval()); return send(200, { ok: true });
             case "/v1/lock": await signer.lock(id); return send(200, { ok: true });
             case "/v1/unlock": await signer.unlock(id, approval()); return send(200, { ok: true });
             case "/v1/strict": await signer.setStrict(id, b.on === true, approval()); return send(200, { ok: true });

@@ -498,3 +498,18 @@ test("pinned calls: wrapping and staking are only signed on the official contrac
   void ph;
   assert.deepEqual(ok(call(USDC, "storage_deposit")).storageOn, [USDC]);
 });
+
+test("passkey removal: needs a passkey signing that exact removal, and the last passkey can never go", async () => {
+  const signer = setup(small, undefined, 24 * HOUR);
+  const mine = await enrol(signer, "alice"), second = phone(), thief = phone();
+  const [first] = (await signer.status("alice")).passkeys;
+  await assert.rejects(signer.removePasskey("alice", first!.id, await approveAction(signer, "alice", mine, `removekey:${first!.id}`)), code("bad_transaction"), "the only passkey stays");
+  await signer.addPasskey("alice", second.create((await signer.registerOptions("alice")).challenge), await approveAction(signer, "alice", mine, "addkey"));
+  const ids = (await signer.status("alice")).passkeys.map((p) => p.id), other = ids.find((i) => i !== first!.id)!;
+  await assert.rejects(signer.removePasskey("alice", first!.id, await approveAction(signer, "alice", thief, `removekey:${first!.id}`)), code("bad_assertion"), "a stranger's device cannot remove it");
+  await assert.rejects(signer.removePasskey("alice", first!.id, await approveAction(signer, "alice", mine, `removekey:${other}`)), code("bad_assertion"), "a signature for another passkey does not count");
+  await assert.rejects(signer.removePasskey("alice", "nope", await approveAction(signer, "alice", mine, "removekey:nope")), code("bad_transaction"));
+  await signer.removePasskey("alice", first!.id, await approveAction(signer, "alice", mine, `removekey:${first!.id}`));
+  assert.deepEqual((await signer.status("alice")).passkeys.map((p) => p.id), [other]);
+  await assert.rejects(signer.removePasskey("alice", other, await approveAction(signer, "alice", second, `removekey:${other}`)), code("bad_transaction"), "never down to none");
+});

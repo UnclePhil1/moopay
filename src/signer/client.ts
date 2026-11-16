@@ -5,7 +5,7 @@ import { MoopayError } from "../util/errors.js";
 /** A passkey signature and the one-time nonce it was made for (see `paymentChallenge` and `actionChallenge`). */
 export interface ApprovalProof { nonce: string; assertion: AuthenticationResponseJSON }
 
-export interface SignerStatus { passkeys: { id: string; transports?: string[] }[]; active: boolean; pending: boolean; activeAt: number; strict: boolean; locked: boolean; recovery?: { approved: string[]; added: string[] } }
+export interface SignerStatus { passkeys: { id: string; at?: number; transports?: string[] }[]; active: boolean; pending: boolean; activeAt: number; strict: boolean; locked: boolean; recovery?: { approved: string[]; added: string[] } }
 
 async function post(url: string, token: string, path: string, body: unknown): Promise<Record<string, unknown>> {
   let res: Response;
@@ -30,6 +30,7 @@ export class SignerApi {
   setStrict = async (userId: string, on: boolean, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/strict", { userId, on, ...proof }); };
   verifyOwner = async (userId: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/verify", { userId, ...proof }); };
   recoveryKey = async (userId: string, publicKey: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/recovery", { userId, publicKey, ...proof }); };
+  removePasskey = async (userId: string, credentialId: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/passkey/remove", { userId, credentialId, ...proof }); };
   lock = async (userId: string) => { await post(this.url, this.token, "/v1/lock", { userId }); };
   unlock = async (userId: string, proof: ApprovalProof) => { await post(this.url, this.token, "/v1/unlock", { userId, ...proof }); };
 }

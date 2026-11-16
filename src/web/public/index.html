@@ -467,6 +467,7 @@ const COMMANDS = [
   { name: "/recovery", desc: "Show your recovery code", recovery: true },
   { name: "/restore", desc: "Get your account back on a new browser", restore: true },
   { name: "/export", desc: "Show your wallet key", exportKey: true },
+  { name: "/removepasskey", desc: "Remove or replace a passkey", act: () => removePasskey() },
   { name: "/passkey", desc: "Approve payments with your fingerprint, face or PIN", act: () => addPasskey() },
   { name: "/secure", desc: "Move your wallet into the secure enclave", act: () => secureWallet() },
   { name: "/recoverykey", desc: "Make a recovery key so you can always take your money out", act: () => addRecoveryKey() },
@@ -535,6 +536,28 @@ async function addPasskey() {
     await post("passkey/register", { response: resp });
     clearEmpty(); await say(agent(), "Done. Your passkey is on. Payments that need your OK now ask for your fingerprint, face or PIN, on this app and on X."); if ((await (await api("passkey/status")).json()).secure) { const b = agent(); await say(b, "One more thing: make a recovery key, so you can always take your money out even if MooPay is down or you lose your passkey."); b.append(h("button", { class: "chip", type: "button", onclick: () => void addRecoveryKey() }, "Make a recovery key")); down(); }
   } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't add the passkey."); }
+}
+/** Remove one passkey. To replace one, add the new one first (/passkey), then remove the old one here. The last passkey can't be removed. */
+async function removePasskey() {
+  try {
+    const st = await (await api("passkey/status")).json();
+    if (!st.secure) return void (clearEmpty(), await say(agent(), "This is for wallets held in the secure enclave. Type /secure to move yours there."));
+    if (!st.active) return void (clearEmpty(), await say(agent(), "Add a passkey first. Type /passkey."));
+    clearEmpty();
+    const b = agent();
+    if ((st.list || []).length < 2) return void (await say(b, "You have one passkey, and it can't be removed because it is what protects your wallet. To replace it, type /passkey on the new device first, then come back here."));
+    await say(b, "Which passkey should I remove? To replace one, add the new passkey first (/passkey), then remove the old one. It will ask for your fingerprint, face or PIN.");
+    st.list.forEach((p, i) => b.append(h("button", { class: "chip", type: "button", onclick: () => void doRemovePasskey(p.id, i + 1) }, `Remove passkey ${i + 1}${p.at ? " (added " + new Date(p.at).toLocaleDateString() + ")" : ""}`)));
+    down();
+  } catch (e) { await fail(e, "I couldn't load your passkeys."); }
+}
+async function doRemovePasskey(id, n) {
+  try {
+    if (!(await ask({ title: `Remove passkey ${n}?`, text: "That device will no longer be able to approve payments for this wallet. Your other passkey keeps working.", confirm: "Remove it" }))) return;
+    const assertion = await strong("removekey", { credentialId: id });
+    await post("passkey/remove", { credentialId: id, ...(assertion ? { assertion } : {}) });
+    clearEmpty(); await say(agent(), `Passkey ${n} is removed.`);
+  } catch (e) { await fail({ message: passkeyWords(e) }, "I couldn't remove that passkey."); }
 }
 /** A recovery key: made here, shown once, named to the signer by the passkey. It lets the owner move their money with any NEAR wallet even if MooPay or the signer is down, or every passkey is lost. */
 async function addRecoveryKey() {

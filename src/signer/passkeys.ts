@@ -15,7 +15,7 @@ import type { UserState } from "./state.js";
  * What this does not cover: if the page the user is looking at is itself altered by an attacker who controls the MooPay
  * server, it can show one payment and sign another. A passkey proves "the owner's device approved this", not "the owner read it".
  */
-export type Action = "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}`;
+export type Action = "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}` | `removekey:${string}`;
 
 const TTL = 5 * 60_000;
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64url");
@@ -47,7 +47,7 @@ export class SignerPasskeys {
    */
   active(s: UserState): boolean { return s.credentials.length > 0 && (!s.moved || this.now() >= s.activeAt); }
   pending(s: UserState): boolean { return s.credentials.length > 0 && !this.active(s); }
-  list(s: UserState) { return s.credentials.map((c) => ({ id: c.id, ...(c.transports ? { transports: c.transports } : {}) })); }
+  list(s: UserState) { return s.credentials.map((c) => ({ id: c.id, at: c.at, ...(c.transports ? { transports: c.transports } : {}) })); }
 
   /** A fresh one-time nonce. The browser hashes it with what it is about to sign. Nonces live in memory only: a restart voids them, which is safe. */
   nonce(user: string): string {

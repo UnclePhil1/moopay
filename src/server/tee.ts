@@ -20,7 +20,7 @@ export interface SignerPrompt {
   /** for a payment: exactly what is being approved */
   flows?: { asset: string; to: string; amount: string }[];
   /** for anything else: what is being changed */
-  action?: "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}`;
+  action?: "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}` | `removekey:${string}`;
 }
 
 export const isTee = (u: UserRec): boolean => !!u.tee;

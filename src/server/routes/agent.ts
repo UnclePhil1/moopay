@@ -200,7 +200,7 @@ export async function makeAgent(d: AgentDeps) {
         return true;
       }
       if (op === "passkey/status" && req.method === "GET") {
-        if (u.tee) { const st = await tee.refresh(u); json(res, 200, { count: st.passkeys.length, active: st.active, pending: st.pending, activeAt: st.activeAt, bio: { web: st.strict, x: st.strict }, strict: st.strict, secure: true, recovery: st.recovery ?? { approved: [], added: [] } }); return true; }
+        if (u.tee) { const st = await tee.refresh(u); json(res, 200, { count: st.passkeys.length, list: st.passkeys.map((p) => ({ id: p.id, at: p.at })), active: st.active, pending: st.pending, activeAt: st.activeAt, bio: { web: st.strict, x: st.strict }, strict: st.strict, secure: true, recovery: st.recovery ?? { approved: [], added: [] } }); return true; }
         json(res, 200, { count: u.passkeys?.length ?? 0, bio: u.bio ?? { web: true, x: true } }); return true;
       }
       if (op === "passkey/register-options" && req.method === "POST") {
@@ -237,6 +237,12 @@ export async function makeAgent(d: AgentDeps) {
             if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pub)) throw new MoopayError("INVALID_INPUT", "That is not a recovery key the app made.");
             json(res, 200, st.active ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: `recoverykey:${pub}` }) } : { required: false }); return true;
           }
+          if (purpose === "removekey") {
+            const cid = String(b["credentialId"] ?? "");
+            if (!st.passkeys.some((p) => p.id === cid)) throw new MoopayError("INVALID_INPUT", "That passkey isn't on this wallet.");
+            if (st.passkeys.length < 2) throw new MoopayError("INVALID_INPUT", "That is your only passkey. Add another one first, then remove this one.");
+            json(res, 200, st.active ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: `removekey:${cid}` }) } : { required: false }); return true;
+          }
           const action = purpose === "toggle" ? (b["on"] === false ? "strict:off" : "strict:on") : purpose === "unlock" ? "unlock" : purpose === "addkey" ? "addkey" : purpose === "showcode" ? "showcode" : undefined;
           const needs = !!action && (action === "addkey" ? st.passkeys.length > 0 : st.active);
           json(res, 200, needs ? { required: true, signer: await tee.prompt(u, rpOf(origin), { kind: "action", action: action! }) } : { required: false }); return true;
@@ -271,6 +277,16 @@ export async function makeAgent(d: AgentDeps) {
         const r = await ops.addRecoveryKey(u, pub);
         security.add("recovery_key_added", { user: u.id.slice(0, 8) }, now());
         json(res, 200, { ok: true, txHash: r.txHash }); return true;
+      }
+      // Removing a passkey: one of the wallet's passkeys must sign this exact removal, and the last one can never be removed.
+      if (op === "passkey/remove" && req.method === "POST") {
+        needMaster("Removing a passkey");
+        if (!u.tee) throw new MoopayError("INVALID_INPUT", "Only a wallet held by the secure signer can do this here.");
+        const b = await bodyOf(req), cid = String(b["credentialId"] ?? "");
+        await tee.api().removePasskey(u.id, cid, tee.proofOf(b["assertion"]) ?? (() => { throw new MoopayError("INVALID_INPUT", "Confirm with your fingerprint, face or PIN first."); })());
+        security.add("passkey_removed", { user: u.id.slice(0, 8) }, now());
+        store.event(u, "A passkey was removed from your wallet.");
+        json(res, 200, { ok: true }); return true;
       }
       // Before the app shows the recovery code, the owner's passkey has to say yes. The page cannot show it on its own say-so, so a stolen session on a phone left open is not enough.
       if (op === "passkey/verify" && req.method === "POST") {

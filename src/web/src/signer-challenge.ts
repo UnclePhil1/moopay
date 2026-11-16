@@ -9,7 +9,7 @@
  * This module has no browser-only imports, so the same code runs in the page and in the tests.
  */
 export interface PayFlow { asset: string; to: string; amount: string }
-export type SignerAction = "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}`;
+export type SignerAction = "addkey" | "strict:on" | "strict:off" | "unlock" | "showcode" | `recoverykey:${string}` | `removekey:${string}`;
 export interface SignerPrompt {
   kind: "mandate" | "action";
   userId: string;
