@@ -34,6 +34,8 @@ export interface Outflow { asset: string; amount: bigint; to: string; method: st
 
 /** What the signer is willing to sign. Everything else (adding keys, deploying code, deleting accounts, staking directly) is refused. */
 const CALLS = new Set(["ft_transfer", "near_deposit", "near_withdraw", "storage_deposit", "deposit_and_stake"]);
+/** Each of these calls is only signed on its one contract, so a look-alike contract cannot be used: wrapping on wrap.near, staking on Rhea's rNEAR. */
+export const PINNED: Record<string, string> = { near_deposit: "wrap.near", near_withdraw: "wrap.near", deposit_and_stake: "lst.rhealab.near" };
 const big = (v: unknown): bigint => { try { return BigInt(String(v)); } catch { return -1n; } };
 
 export class Refused extends Error {
@@ -41,11 +43,11 @@ export class Refused extends Error {
 }
 
 /** Reads an unsigned transaction and lists every outflow, or refuses it. */
-export function inspect(bytes: Uint8Array): { signerId: string; receiverId: string; publicKey: string; outflows: Outflow[]; addKeys: { key: string; full: boolean }[] } {
+export function inspect(bytes: Uint8Array): { signerId: string; receiverId: string; publicKey: string; outflows: Outflow[]; addKeys: { key: string; full: boolean }[]; storageOn: string[] } {
   let tx: ReturnType<typeof decodeTransaction>;
   try { tx = decodeTransaction(bytes); } catch { throw new Refused("bad_transaction", "that is not a NEAR transaction"); }
   if (!tx.actions.length) throw new Refused("bad_transaction", "a transaction with no actions");
-  const outflows: Outflow[] = [], addKeys: { key: string; full: boolean }[] = [];
+  const outflows: Outflow[] = [], addKeys: { key: string; full: boolean }[] = [], storageOn: string[] = [];
   for (const a of tx.actions as unknown as Record<string, any>[]) { // eslint-disable-line @typescript-eslint/no-explicit-any
     if (a["transfer"]) {
       const amount = big(a["transfer"].deposit);
@@ -54,6 +56,9 @@ export function inspect(bytes: Uint8Array): { signerId: string; receiverId: stri
     } else if (a["functionCall"]) {
       const f = a["functionCall"], method = String(f.methodName);
       if (!CALLS.has(method)) throw new Refused("forbidden_action", `the call ${method} is not allowed`);
+      const pin = PINNED[method];
+      if (pin && tx.receiverId !== pin) throw new Refused("forbidden_action", `${method} is only signed on ${pin}`);
+      if (method === "storage_deposit") storageOn.push(tx.receiverId);
       let args: Record<string, unknown> = {};
       try { args = f.args?.length ? JSON.parse(Buffer.from(f.args).toString("utf8")) : {}; } catch { throw new Refused("bad_transaction", "unreadable call arguments"); }
       const deposit = big(f.deposit);
@@ -79,7 +84,7 @@ export function inspect(bytes: Uint8Array): { signerId: string; receiverId: stri
       throw new Refused("forbidden_action", "only transfers and approved contract calls can be signed");
     }
   }
-  return { signerId: tx.signerId, receiverId: tx.receiverId, publicKey: tx.publicKey.toString(), outflows, addKeys };
+  return { signerId: tx.signerId, receiverId: tx.receiverId, publicKey: tx.publicKey.toString(), outflows, addKeys, storageOn };
 }
 
 /** A day's running totals for one user, as stored on chain. It starts again when the UTC day changes. */

@@ -66,7 +66,7 @@ test("signer: reads transfers and token transfers, and refuses everything else",
 
 test("signer: NEAR attached to a call counts as money leaving", async () => {
   const me = await setup().pubkey("alice");
-  const stake = inspect(encodeTransaction(mk(me.accountId, me.publicKey, "rnear.near", [actions.functionCall("deposit_and_stake", {}, 1n, 5n * 10n ** 24n)])));
+  const stake = inspect(encodeTransaction(mk(me.accountId, me.publicKey, "lst.rhealab.near", [actions.functionCall("deposit_and_stake", {}, 1n, 5n * 10n ** 24n)])));
   assert.deepEqual(stake.outflows.map((o) => [o.asset, o.amount]), [["NEAR", 5n * 10n ** 24n]]);
 });
 
@@ -478,4 +478,23 @@ test("showcode: the owner's passkey can be checked without changing anything, an
   await signer.verifyOwner("alice", await approveAction(signer, "alice", ph, "showcode"));
   const fresh = setup(none);
   await assert.rejects(fresh.verifyOwner("bob", { nonce: fresh.nonce("bob"), assertion: {} as never }), code("passkey_required"), "no passkey, nothing to check");
+});
+
+test("pinned calls: wrapping and staking are only signed on the official contracts, and storage only on known tokens", async () => {
+  const signer = setup(none), me = await signer.pubkey("alice");
+  const call = (to: string, method: string, args: object = {}, deposit = 1n) => mk(me.accountId, me.publicKey, to, [actions.functionCall(method, args, 30n * 10n ** 12n, deposit)]);
+  const ok = (tx: Transaction) => inspect(encodeTransaction(tx));
+  // the right contract reads fine
+  ok(call("wrap.near", "near_deposit")); ok(call("wrap.near", "near_withdraw", { amount: "1" })); ok(call("lst.rhealab.near", "deposit_and_stake"));
+  // a look-alike does not
+  for (const [to, method] of [["wrap.near.evil.near", "near_deposit"], ["wrap.testnet", "near_withdraw"], ["lst.rhealab.near.x", "deposit_and_stake"], ["wrap.near", "deposit_and_stake"], ["lst.rhealab.near", "near_deposit"]] as const) {
+    assert.throws(() => ok(call(to, method)), code("forbidden_action"), `${method} on ${to}`);
+  }
+  // storage_deposit: a token on the signer's list, or one of the two pinned contracts; nothing else
+  const sign = (to: string) => signer.sign("alice", encodeTransaction(call(to, "storage_deposit", { account_id: me.accountId, registration_only: true })));
+  await assert.rejects(sign("evil.near"), code("forbidden_action"));
+  await assert.rejects(sign("usdc.token.near.evil"), code("forbidden_action"));
+  const ph = await enrol(signer, "alice");
+  void ph;
+  assert.deepEqual(ok(call(USDC, "storage_deposit")).storageOn, [USDC]);
 });

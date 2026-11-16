@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { deriveWallet, type KeySource } from "./keys.js";
-import { emptyTally, inspect, Refused, Tally, useMandate, withinCaps, type Flow, type Outflow, type SignerPolicy } from "./policy.js";
+import { emptyTally, inspect, PINNED, Refused, Tally, useMandate, withinCaps, type Flow, type Outflow, type SignerPolicy } from "./policy.js";
 import { SignerPasskeys } from "./passkeys.js";
 import type { StateStore, UserState } from "./state.js";
 
@@ -82,6 +82,8 @@ export class WalletSigner {
     const seen = inspect(unsigned);
     if (seen.publicKey !== w.publicKey) throw new Refused("bad_transaction", "that transaction names a different key");
     if (seen.addKeys.length) return this.signRecoveryKey(userId, w, unsigned, seen);
+    // Registering for storage is only done on a token the signer already measures, or on the two contracts pinned above.
+    for (const c of seen.storageOn) if (!(c in this.policy.caps) && !Object.values(PINNED).includes(c)) throw new Refused("forbidden_action", `storage_deposit is not signed on ${c}`);
     return this.open(userId, async ({ state: st, save }) => {
       if (st.locked) throw new Refused("locked", "This wallet is locked. Unlock it with your passkey first.");
       const now = this.now();
