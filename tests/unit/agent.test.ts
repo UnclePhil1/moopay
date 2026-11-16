@@ -1754,6 +1754,43 @@ test("signer: a secure account's passkey flows run through the signer, and a hac
   } finally { close(); sig.close(); }
 });
 
+test("signer: staking from a secure account needs the passkey, keeps the rNEAR in the wallet, and unstaking needs no approval", async () => {
+  const a = await agent();
+  const policy = { caps: { NEAR: { perTx: 10n ** 25n, daily: 10n ** 25n }, [USDC_CONTRACT]: { perTx: 50_000_000n, daily: 100_000_000n } }, unattended: {} };
+  const wallet = new WalletSigner(new FixedKeySource("stk"), policy, new SignerPasskeys("https://moopay.cash", 0), new MemoryStateStore());
+  const sig = signerServer(wallet, "k".repeat(40));
+  await new Promise<void>((r) => sig.listen(0, "127.0.0.1", r));
+  const { m, call, close } = await serve(a, { signer: { url: `http://127.0.0.1:${(sig.address() as { port: number }).port}`, token: "k".repeat(40) } });
+  const ph = phone(), T = "s".repeat(43);
+  const page = async (prompt: Parameters<typeof signerChallenge>[0]) => ({ ...(ph.get(await signerChallenge(prompt)) as object), moopayNonce: prompt.nonce });
+  try {
+    await call("state", T);
+    const u = m.store.open(T);
+    const reg = await call("passkey/register-options", T, {});
+    assert.equal((await call("passkey/register", T, { response: ph.create(String(reg.body["challenge"])) })).status, 200);
+    a.near.views.set("lst.rhealab.near.get_summary", { ft_price: "1250000000000000000000000" });
+    a.near.nearBalances.set(u.accountId, 3n * 10n ** 24n);
+    await assert.rejects(m.ops.stakeRnear(u, { amount: "5" }), code("NOTE_NOT_FUNDED"), "it stakes only NEAR the wallet holds");
+    const out = await m.ops.stakeRnear(u, { amount: "1" });
+    const card = out.card as { id: string; flows: { asset: string; to: string; amount: string }[] };
+    assert.equal(out.result["status"], "needs_approval");
+    assert.deepEqual(card.flows.map((f) => [f.asset, f.to, f.amount]), [["NEAR", "lst.rhealab.near", "1000000000000000000000000"], ["NEAR", "lst.rhealab.near", "1250000000000000000000"]]);
+    assert.equal(a.near.calls.length, 0, "nothing is staked before the passkey says yes");
+    const opt = await call("passkey/options", T, { purpose: "approve:" + card.id }) as unknown as { body: { signer: Parameters<typeof signerChallenge>[0] } };
+    const ok = await call("approve", T, { id: card.id, approve: true, assertion: await page(opt.body.signer) }) as unknown as { status: number; body: { result: { status: string } } };
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.result.status, "staked");
+    assert.deepEqual(a.near.calls.map((c) => c.method), ["storage_deposit", "deposit_and_stake"]);
+    assert.equal(a.near.calls.at(-1)!.deposit, 10n ** 24n);
+    assert.equal(a.near.calls.some((c) => c.method === "ft_transfer"), false, "the rNEAR is not sent anywhere");
+    // Unstaking brings the money back to the same wallet, so it is signed with no approval and nothing attached.
+    a.near.otherTokens.set(`lst.rhealab.near|${u.accountId}`, 10n ** 24n);
+    const un = await m.ops.unstakeRnear(u, {}, { origin: "https://moopay.cash" });
+    assert.equal(un.result["status"], "unstaking");
+    assert.deepEqual([a.near.calls.at(-1)!.method, a.near.calls.at(-1)!.deposit], ["unstake_all", 0n]);
+  } finally { await close(); sig.close(); }
+});
+
 test("signer: a cross-chain send from a secure account pays the exact quote the passkey approved, and nothing once it has expired", async () => {
   const a = await agent();
   const policy = { caps: { NEAR: { perTx: 10n ** 24n, daily: 10n ** 24n }, [USDC_CONTRACT]: { perTx: 50_000_000n, daily: 100_000_000n } }, unattended: {} };

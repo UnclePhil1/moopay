@@ -99,3 +99,7 @@ If the signer is down, or every passkey is lost, a signer-held wallet would othe
 3. The server sends that transaction. From then on the owner can import the key into any NEAR wallet and withdraw without MooPay.
 
 A recovery key skips the caps, because the signer is not involved when it is used. That is why only a passkey can approve one, and why it must be kept offline.
+
+## Staking (rNEAR on Rhea)
+
+For a wallet held by the signer, staking uses only the NEAR the wallet already holds (no swapping or unwrapping on the way). The approval card lists exactly what the passkey signs: the stake to `lst.rhealab.near`, plus the 0.00125 NEAR storage registration when needed. The rNEAR stays in the same wallet; the signer has no cap for it, so it can never send it anywhere. `unstake`, `unstake_all`, `withdraw` and `withdraw_all` are signed only on `lst.rhealab.near` and only with no NEAR attached. They bring money back to the wallet itself, so they need no passkey, and once the delay is over the agent withdraws by itself. Worst case for a stolen server: it can start an unstake (a delay and lost yield), but the NEAR still returns to the owner's wallet.

@@ -33,9 +33,11 @@ export function useMandate(m: Mandate | undefined, outflows: Outflow[], now: num
 export interface Outflow { asset: string; amount: bigint; to: string; method: string }
 
 /** What the signer is willing to sign. Everything else (adding keys, deploying code, deleting accounts, staking directly) is refused. */
-const CALLS = new Set(["ft_transfer", "near_deposit", "near_withdraw", "storage_deposit", "deposit_and_stake"]);
+const CALLS = new Set(["ft_transfer", "near_deposit", "near_withdraw", "storage_deposit", "deposit_and_stake", "unstake", "unstake_all", "withdraw", "withdraw_all"]);
 /** Each of these calls is only signed on its one contract, so a look-alike contract cannot be used: wrapping on wrap.near, staking on Rhea's rNEAR. */
-export const PINNED: Record<string, string> = { near_deposit: "wrap.near", near_withdraw: "wrap.near", deposit_and_stake: "lst.rhealab.near" };
+export const PINNED: Record<string, string> = { near_deposit: "wrap.near", near_withdraw: "wrap.near", deposit_and_stake: "lst.rhealab.near", unstake: "lst.rhealab.near", unstake_all: "lst.rhealab.near", withdraw: "lst.rhealab.near", withdraw_all: "lst.rhealab.near" };
+/** Taking money out of staking sends it back to the wallet itself, so these carry no NEAR and need no passkey; with any NEAR attached they are refused. */
+const NO_DEPOSIT = new Set(["unstake", "unstake_all", "withdraw", "withdraw_all"]);
 const big = (v: unknown): bigint => { try { return BigInt(String(v)); } catch { return -1n; } };
 
 export class Refused extends Error {
@@ -63,6 +65,7 @@ export function inspect(bytes: Uint8Array): { signerId: string; receiverId: stri
       try { args = f.args?.length ? JSON.parse(Buffer.from(f.args).toString("utf8")) : {}; } catch { throw new Refused("bad_transaction", "unreadable call arguments"); }
       const deposit = big(f.deposit);
       if (deposit < 0n) throw new Refused("bad_transaction", "bad deposit");
+      if (NO_DEPOSIT.has(method) && deposit !== 0n) throw new Refused("forbidden_action", `${method} is signed with no NEAR attached`);
       if (method === "ft_transfer") {
         const amount = big(args["amount"]);
         if (amount < 0n || typeof args["receiver_id"] !== "string") throw new Refused("bad_transaction", "a token transfer needs a receiver and an amount");

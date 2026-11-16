@@ -513,3 +513,14 @@ test("passkey removal: needs a passkey signing that exact removal, and the last 
   assert.deepEqual((await signer.status("alice")).passkeys.map((p) => p.id), [other]);
   await assert.rejects(signer.removePasskey("alice", other, await approveAction(signer, "alice", second, `removekey:${other}`)), code("bad_transaction"), "never down to none");
 });
+
+test("unstake and withdraw: signed on the rNEAR contract only, with nothing attached, and without a passkey", async () => {
+  const signer = setup(small), me = await signer.pubkey("alice");
+  const mkc = (to: string, method: string, deposit: bigint) => mk(me.accountId, me.publicKey, to, [actions.functionCall(method, {}, 30n * 10n ** 12n, deposit)]);
+  for (const m of ["unstake_all", "withdraw_all"]) {
+    assert.equal(inspect(encodeTransaction(mkc("lst.rhealab.near", m, 0n))).outflows.length, 0, m);
+    assert.throws(() => inspect(encodeTransaction(mkc("lst.rhealab.near.evil", m, 0n))), code("forbidden_action"), `${m} on a look-alike`);
+    assert.throws(() => inspect(encodeTransaction(mkc("lst.rhealab.near", m, 1n))), code("forbidden_action"), `${m} with NEAR attached`);
+  }
+  await signer.sign("alice", encodeTransaction(mkc("lst.rhealab.near", "withdraw_all", 0n))); // it only brings money back to the wallet
+});
