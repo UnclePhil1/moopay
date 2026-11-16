@@ -579,7 +579,18 @@ async function secureNudge(s) {
 async function bioNudge() {
   try {
     const st = await (await api("passkey/status")).json();
-    if (st.count) return;
+    if (st.count) {
+      // Held by the secure signer with a passkey, but no recovery key yet: if the signer or the passkey is ever lost, this is the way out.
+      let skipped = false; try { skipped = !!sessionStorage.getItem("moopay.recoverySkipped"); } catch {}
+      if (st.secure && st.active && !(st.recovery?.added?.length) && !skipped) {
+        const r = agent();
+        await say(r, "One thing left to do: make a recovery key. If MooPay's secure signer is ever down, or you lose your passkey, it is the only way to take your money out yourself. It takes a minute, and you keep it offline.");
+        r.append(h("button", { class: "chip", type: "button", onclick: () => void addRecoveryKey() }, "Make a recovery key"));
+        r.append(h("button", { class: "chip", type: "button", onclick: () => { try { sessionStorage.setItem("moopay.recoverySkipped", "1"); } catch {} r.remove(); } }, "Later"));
+        down();
+      }
+      return;
+    }
     const b = agent();
     await say(b, "Turn on biometric verification to keep your money safe. Add a passkey (fingerprint, face or PIN) and every payment that needs your OK has to be confirmed by you, here in the app and on X. Nobody else can approve a payment, even if someone gets into your X account.");
     b.append(h("button", { class: "chip", type: "button", onclick: () => void addPasskey() }, "Set up biometrics"));
