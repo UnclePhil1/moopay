@@ -2,7 +2,7 @@
 # The compose hash the on-chain key service approves covers this file, so changing anything here needs a new approval.
 services:
   signer:
-    image: ghcr.io/unclephil1/moopay-signer@sha256:162af8b525d345d643cf40b33c5ae8bb0c7d1ec0fe549492bbb036bca8f4f523
+    image: ghcr.io/unclephil1/moopay-signer@sha256:0c5ab40462ed9546da138a3a6fa884cc0c4ad4d814ba0281c2fb39eb4d198227
     restart: always
     ports: ["3000:3000"]
     volumes:
