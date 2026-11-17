@@ -24,6 +24,8 @@ Paying someone on another chain today means picking a bridge, holding gas on a c
 - **No sign-up.** The browser holds a random recovery code. Only its hash is stored server-side.
 - **The AI does not hold the rules.** Limits, approvals and allow-lists are plain TypeScript in [`src/agent/policy.ts`](src/agent/policy.ts), run before any money moves. The model only picks a tool.
 - **Two ways to pay.** A small pre-funded agent wallet for fast, rule-bound payments, or your own wallet signing in a pay window when you do not want to deposit anything.
+- **The key is held by hardware, not by us.** Wallets live in a Phala TEE (Intel TDX). The enclave signs only what your passkey approved, inside hard per-asset caps. MooPay's server, and its operator, cannot spend without your fingerprint, face or PIN. See [Custody](#custody-a-key-nobody-can-read).
+- **You can always get out.** A recovery key you keep offline lets you move your money with any NEAR wallet even if MooPay or the enclave is gone.
 - **Outside agents get a leash.** Third-party AI agents use scoped `mpk_` keys with per-payment, daily and total budgets, an allow-list and an expiry.
 
 ## Biometric verification: why an AI money agent needs it
@@ -76,9 +78,63 @@ MooPay uses **passkeys (WebAuthn)**. The private key lives in the owner's phone 
 - A passkey is tied to the site. One made on `localhost` does not work on `moopay.cash`.
 - A computer with no fingerprint reader or camera offers a QR code to scan with your phone, or a security key.
 - Lose the device and you still have your recovery code to get back in, then add a new passkey.
-- The tests sign with a software authenticator (real P-256 signatures). A passkey on a real phone and in X's in-app browser still needs a manual check. If X's browser shows nothing, open the link in the phone's own browser.
+- The tests sign with a software authenticator (real P-256 signatures). A passkey has been tried on a real phone; X's in-app browser still needs a manual check. If X's browser shows nothing, open the link in the phone's own browser.
 
 Code: [`src/security/passkeys.ts`](src/security/passkeys.ts), [`src/security/risk.ts`](src/security/risk.ts), [`src/web/src/approve.ts`](src/web/src/approve.ts), tests in [`tests/unit/passkeys.test.ts`](tests/unit/passkeys.test.ts).
+
+## Custody: a key nobody can read
+
+### The problem
+
+Most AI payment agents (ours included, at first) keep a seed on a server and derive every wallet from it. That makes the server the single biggest risk: one leaked secret, one rogue operator or one compromised host empties everyone's wallet, and no biometric check helps because the server can sign without asking.
+
+### What MooPay does
+
+The wallet key is made and kept inside a **Phala Cloud TEE** (Intel TDX, dstack) with Phala's on-chain key service on Base. The key only reaches code whose hash has been approved on chain, and it is never shown to anyone, including us. The app server only relays requests; the **signer** decides.
+
+| Layer inside the signer | What it enforces |
+| --- | --- |
+| Allow-list of calls | Only token transfers, wrap/unwrap on `wrap.near`, staking on `lst.rhealab.near`, storage registration on known tokens. Everything else (deploying code, adding keys, unknown contracts) is refused. |
+| Pinned contracts | A look-alike contract (`wrap.near.evil.near`) is refused. |
+| Hard caps per asset | Per payment and per day, even with a passkey. |
+| Passkey, checked inside the enclave | Every payment needs a WebAuthn signature over the exact payment (asset, recipient, amount) and a one-time nonce. A server that changes the recipient after you signed gets a refusal. |
+| State on chain, written first | Passkeys, limits and daily totals sit in a NEAR contract and are written before anything is signed, so a rolled-back disk cannot reset a limit. |
+| Fee allowance | MooPay's own fee is the only thing allowed without a passkey: at most $2 per transfer and $5 a day, to one fixed account. |
+| Quotes are pinned | A cross-chain send or claim is signed for the exact deposit address and amount you saw, and only until the quote expires. |
+
+### Getting out, and staying in control
+
+- **Recovery key (`/recoverykey`).** Made in your browser, shown once, named to the signer by your passkey. It is a second full-access key on your own NEAR account, so you can withdraw with any wallet if MooPay, Phala or every passkey is lost. It bypasses the caps, so keep it offline. Up to 3 keys. The chat reminds you until you have one.
+- **Biometrics before anything sensitive.** The recovery code and recovery key are shown only after your passkey says yes.
+- **Passkeys you can manage.** `/passkey` adds one (the existing passkey approves it). `/removepasskey` removes one, approved by another passkey. The last passkey can never be removed, so the wallet cannot end up unprotected.
+- **Turn biometrics on or off** with `/biometrics-web` and `/biometrics-x`; both directions need your passkey.
+- **Older accounts move in one step (`/secure`).** The signer's key is added to your account, your passkey is registered, the chain is checked, and only then is the old server-held key deleted from your account on chain. If any step fails the old key still works. Same address, same money.
+- **Staking from the enclave.** Your passkey approves the exact stake; the rNEAR stays in your wallet, because the signer has no permission to send it anywhere. Unstake and withdraw only bring money back to your own wallet, so the agent does them without asking. A compromised server can at worst start an unstake (a delay and lost yield), never move the money out.
+
+### What this changes
+
+| What the attacker has | Before | Now (wallet in the signer) |
+| --- | --- | --- |
+| The MooPay server or its secrets | Everything: it derived every key | No key to take. It can ask the signer, and the signer needs your passkey for each payment. |
+| The operator's laptop or cloud login | Everything | Cannot reach the key. Changing the enclave's code needs an on-chain approval of the new hash, which is public. |
+| A stolen browser session | Spend within limits | Nothing moves without your device's biometrics. |
+| A hijacked X account | Start requests | Same, and every payment still needs the passkey. |
+
+### Verified, and what is not
+
+Verified on mainnet with small amounts: allowance and hard-cap refusals, a payment refused without a passkey, a look-alike contract refused, state written on chain, a key that stays identical across approved code updates, a real phone passkey flow, cross-chain sends, private claims, recovery key and migration of a real old account. Each signer release is pinned in [`deploy/signer.compose.yml`](deploy/signer.compose.yml) by image digest.
+
+Not done, said plainly:
+- **No independent audit** (no funding yet).
+- **No reproducible build or user-facing attestation yet.** You trust that the approved image matches this source.
+- **One owner of the Phala app and one NEAR governance account.** Moving both behind a multisig with a timelock is next.
+- **A passkey proves your device was unlocked, not that you read the screen.** The first passkey on a brand-new account is trust-on-first-use.
+- **The recovery key bypasses the caps.** That is the point, and why it stays offline.
+- **Enclave staking is new.** It is covered by tests and the signer's rules are checked live, but it has not yet been run with real funds.
+- **Scheduled payments are paused for enclave wallets** until they can run under a standing approval with a hard limit.
+- **Public free RPC.** The signer's chain writes can fail and are retried; a paid RPC key is the fix.
+
+Code: [`src/signer/`](src/signer/) (policy, passkeys, state, service), [`contracts/signer-state`](contracts/signer-state), tests in [`tests/unit/signer.test.ts`](tests/unit/signer.test.ts), design notes in [`docs/developers/inside-the-code/tee-signer.md`](docs/developers/inside-the-code/tee-signer.md).
 
 ## Capabilities
 
@@ -94,7 +150,7 @@ Each row names where it lives in the code.
 | Scheduled payments | Repeat a payment daily, weekly or monthly. Every run goes through the same rules. Needs money in the agent wallet, since nobody is there to sign. | `schedule_payment`, `cancel_schedule` |
 | Private send (beta) | Routes USDC to a NEAR wallet through [OutLayer](https://outlayer.ai)'s private balance, so the chain does not link the payer's wallet to the receiver. Off unless `MOOPAY_PRIVATE_ROUTE=1`. | `src/agent/outlayer.ts` |
 | Privacy chat | With a NEAR AI key the model runs inside sealed enclaves on NEAR AI Cloud. Chat history is opt-in (`/history`) and expires (30 days default). | `src/ai/cloud/nearai.ts`, `src/ai/providers/` |
-| Stake rNEAR | Stakes NEAR with Rhea Finance and sends the rNEAR to your payout wallet. Unstake and withdraw open a window you sign. | `src/agent/rhea.ts`, `stake_rnear` and related tools |
+| Stake rNEAR | Stakes NEAR with Rhea Finance. Enclave wallets keep the rNEAR in the wallet, approved by passkey; older wallets send it to your payout wallet and unstake in a window you sign. | `src/agent/rhea.ts`, `stake_rnear` and related tools |
 | X agent | Mention the bot on X to send, split, stake or check a payment. Replies show only the start and end of addresses. Confirmation is a second post. Off unless the X keys are set. | `src/server/x.ts` |
 | Agent keys and API | `mpk_` bearer keys for outside agents: `POST /agent/api/delegate/send`, `/claim`, `GET /agent/api/delegate/me`. | `src/server/routes/agent.ts`, `src/agent/policy.ts` |
 | MCP connector | Five tools over HTTP or stdio for any MCP client: `route_cross_chain_intent`, `mint_private_claim_deposit`, `check_payment`, `check_claim`, `list_supported_assets`. | `src/ai/mcp/` |
@@ -239,7 +295,7 @@ The AI is treated as an untrusted translator. It turns a sentence into a typed r
 
 The last row is the main open risk. Moving key custody into a hardware-isolated TEE with the passkey checked inside it, and enforcing limits on chain with `contracts/guard`, is the next step. Until then, keep only what you need in the agent wallet (the float rule sweeps the rest to your own wallet).
 
-**Status of that work (live for new accounts only).** Since 15 Nov 2026, new accounts get their wallet from a signer that runs in a Phala Cloud TEE (Intel TDX), with Phala's on-chain key service on Base, so the enclave only receives its key when its code hash has been approved on chain. The signer keeps each user's passkeys, limits and daily totals on a NEAR contract (`contractmoopay.near`) and writes there before it signs, so a rolled-back disk cannot reset a limit. The 104 accounts that existed before that date still use a key derived on the MooPay server, and they are not migrated. Tested: the signer on mainnet with small amounts (allowance, hard cap and passkey refusals, state on chain), a key that stays the same across an approved code update, and a simulated phone for passkeys. Not tested: a real phone, and that the key service itself refuses a key to unapproved code. Phala's API does refuse to apply an unapproved compose hash (checked on a throwaway app). Not wired for signer accounts yet: cross-chain payments, private routes, claims, staking and schedules; above a small free allowance the signer refuses them. Not audited by anyone outside this project.
+**Status.** New accounts are created inside the signer, and older accounts can move in with `/secure`. See [Custody](#custody-a-key-nobody-can-read) for how it works, what is verified and what is not. Accounts that have not moved yet still use a key derived on the MooPay server and carry the risk in the last row above.
 
 ### Trust boundaries
 
@@ -250,8 +306,8 @@ This is experimental and unaudited. What you are trusting:
 - **The AI provider sees chat unless enclave mode is on.** Use a NEAR AI key for sealed-enclave inference. If both keys are set, NEAR AI is used.
 - **Private send hides less than it sounds.** The chain does not link the payer's wallet to the receiver, but receiver and amount are public, OutLayer and the solvers can see the payment, and timing can still correlate deposit and payout. OutLayer's own docs say its governance currently runs on single keys. Only USDC to a NEAR wallet has run against the real service; other routes are code-complete but off, after payouts to Solana failed three times in live tests.
 - **X and the wallet share one process.** The X bot holds X credentials and the server holds the wallet seed in the same process. Splitting them into two services is not done. The limits above cap what a hijacked X account can do.
-- **Passkeys are self-hosted** (SimpleWebAuthn), not a managed provider, and have not been tried on a real phone or in X's in-app browser yet. Some in-app browsers do not support passkeys; the link then needs to be opened in the phone's own browser.
-- **Keys are server-held for accounts made before 15 Nov 2026.** Newer accounts are signer-held (see above). The agent wallet still uses a full-access key, not a function-call key. The policy layer, the float cap and the guard contract are the mitigations for the older accounts.
+- **Passkeys are self-hosted** (SimpleWebAuthn), not a managed provider, and have been tried on a real phone but not yet in X's in-app browser. Some in-app browsers do not support passkeys; the link then needs to be opened in the phone's own browser.
+- **Keys are server-held until an older account runs `/secure`.** Newer accounts, and any account that has moved, are signer-held (see Custody). The agent wallet still uses a full-access key, not a function-call key. The policy layer, the float cap and the guard contract are the mitigations for the older accounts.
 - **Single machine.** State lives on one volume. Back up `SEED_KEY` separately; without it the wallets cannot be recovered. `scripts/backup.mjs` makes encrypted backups.
 - **Not covered by tests:** real wallet signatures, mainnet payments and staking with real funds, and the report-only CSP. Try small real payments before trusting a change.
 
@@ -296,7 +352,7 @@ The app defaults to NEAR mainnet. Use small amounts. Everything else in `.env.ex
 
 | Script | What it does |
 | --- | --- |
-| `npm test` | 127 unit tests with fake NEAR and fake 1Click. No network, no money. |
+| `npm test` | 208 unit tests with fake NEAR and fake 1Click. No network, no money. |
 | `npm run smoke` | MCP over stdio against a local fake 1Click. |
 | `npm run smoke:http` | MCP over HTTP against a local fake 1Click. |
 | `npm run testnet` | End-to-end on NEAR testnet (`scripts/testnet-e2e.ts`). |
@@ -307,7 +363,7 @@ The app defaults to NEAR mainnet. Use small amounts. Everything else in `.env.ex
 
 No keys or funds are needed for 1 to 3.
 
-1. **Build and unit tests.** `npm run build && npm test`. Expect `pass 127`, `fail 0`. The tests cover policy, claims, crypto, the gateway, staking, the X agent and the web security headers.
+1. **Build and unit tests.** `npm run build && npm test`. Expect `pass 208`, `fail 0`. The tests cover policy, claims, crypto, the gateway, staking, the X agent, the web security headers, and the signer (caps, passkeys, pinned contracts, recovery keys, migration).
 2. **MCP over stdio and HTTP.** `npm run smoke && npm run smoke:http`. Expect `SMOKE OK` and `HTTP SMOKE OK`. This exercises cross-chain routing, claim minting, bad-recipient rejection and wrong-token rejection.
 3. **Rules cannot be argued around.** Read `decide()` in `src/agent/policy.ts` and `tests/unit/agent.test.ts`. The tests check denial, ask and auto paths without a model in the loop.
 4. **Chat (needs an AI key).** Run `npm start`, open `http://127.0.0.1:3333/agent`, and try:
@@ -342,6 +398,9 @@ src/server/
   router.ts, routes/     pages, chat and account API, agent-key API, pay, claims
   middleware/            headers, CSP, rate limits, body parsing
   x.ts                   the X agent
+src/signer/              the TEE signer: call allow-list, caps, passkeys, on-chain state
+contracts/               signer-state (live), guard (not wired in)
+deploy/                  signer compose file, pinned by image digest
 src/storage/             encrypted atomic JSON files, schemas, ledger, seeds
 src/stat/                password-protected team numbers page (/stat)
 src/web/                 public pages and the wallet/pay/claim code bundled by build.js
