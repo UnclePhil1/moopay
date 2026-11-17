@@ -6,10 +6,22 @@ import type { AgentStore, UserRec } from "./store.js";
 const PERIOD = { day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000 } as const;
 const msg = (e: unknown) => (e instanceof Error ? e.message : "something went wrong");
 
-export async function tick(ops: AgentOps, store: AgentStore, origin: string, now: number): Promise<void> {
+/** How long an account with nothing going on (no chat open, no payment in flight, nothing scheduled) waits between looks at the chain. */
+export const IDLE_MS = 10 * 60_000;
+
+/**
+ * One round over every account. With `pace`, accounts that are idle are looked at every `IDLE_MS` instead of every round, so a
+ * hundred quiet accounts do not use up the node's rate limit and slow down the people who are using the app.
+ */
+export async function tick(ops: AgentOps, store: AgentStore, origin: string, now: number, pace?: Map<string, number>): Promise<void> {
   for (const u of store.all()) {
     store.settlePayout(u, now);
+    if (pace && (pace.get(u.id) ?? 0) > now) continue;
     try { await one(ops, store, u, origin, now); await ops.takeFees(u); } catch { /* try again next round */ }
+    if (pace) {
+      const busy = u.sessions.some((s) => s.expiresAt > now) || u.payments.some((p) => !p.settled) || u.tasks.length > 0 || u.approvals.some((a) => a.status === "pending");
+      if (busy) pace.delete(u.id); else pace.set(u.id, now + IDLE_MS);
+    }
   }
 }
 

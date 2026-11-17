@@ -2015,3 +2015,23 @@ test("migration: the old key is never deleted when the signer's key is missing f
     assert.ok(!u.tee, "not marked secure until the old key is really gone");
   } finally { close(); sig.close(); }
 });
+
+test("worker: idle accounts are looked at every ten minutes, accounts in use every round", async () => {
+  const a = await agent();
+  let looks = 0; const real = a.ops.balances.bind(a.ops);
+  (a.ops as unknown as { balances: typeof real }).balances = async (u) => { looks++; return real(u); };
+  const pace = new Map<string, number>(), t0 = a.now();
+  a.u.sessions = []; a.u.payments = []; a.u.tasks = []; a.u.approvals = [];
+  await tick(a.ops, a.store, "https://x", t0, pace);
+  const first = looks;
+  assert.ok(first > 0);
+  await tick(a.ops, a.store, "https://x", t0 + 60_000, pace);
+  assert.equal(looks, first, "a quiet account is skipped the next minute");
+  await tick(a.ops, a.store, "https://x", t0 + 11 * 60_000, pace);
+  assert.ok(looks > first, "and looked at again after ten minutes");
+  a.u.sessions = [{ hash: "h", createdAt: t0, expiresAt: t0 + 3_600_000 }];
+  const before = looks; pace.clear();
+  await tick(a.ops, a.store, "https://x", t0 + 12 * 60_000, pace);
+  await tick(a.ops, a.store, "https://x", t0 + 12 * 60_000 + 60_000, pace);
+  assert.ok(looks >= before + 2, "an account in use is looked at every round");
+});

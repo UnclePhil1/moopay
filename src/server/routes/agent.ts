@@ -445,7 +445,11 @@ export async function makeAgent(d: AgentDeps) {
     return true;
   }
 
-  const startWorker = (everyMs = 60_000) => setInterval(() => void tick(ops, store, lastOrigin, now()).catch(() => undefined), everyMs).unref();
+  // One round at a time: if the chain is slow, the next round waits instead of piling on top, and quiet accounts are looked at less often.
+  const startWorker = (everyMs = 60_000) => {
+    let running = false; const pace = new Map<string, number>();
+    return setInterval(() => { if (running) return; running = true; void tick(ops, store, lastOrigin, now(), pace).catch(() => undefined).finally(() => { running = false; }); }, everyMs).unref();
+  };
   /** Answers mentions on X, when the X_ settings are set and the AI is on. */
   let xPost: ((text: string, to: string) => Promise<void>) | undefined;
   /** After an approval that started on X goes through, the bot answers on that post with the amount and nothing else. */
