@@ -10,7 +10,7 @@ An AI money agent. Say who to pay and how much, in plain text. MooPay sends it t
 
 Hackathon tracks: Agent Economy, Open Innovation, AI Security & Defense, Privacy & Private AI.
 
-Built at NEAR HACKATHON (1 to 14 November 2026). The whole git history starts on 2026-11-01, so all of the code in this repository, including the NEAR Intents, NEAR AI, Rhea and OutLayer integrations, was written during the hackathon window.
+Built at NEAR HACKATHON (1 to 14 November 2026). The whole git history starts on 2026-11-01. The build submitted to the hackathon is the git tag `hackathon-submission` (last commit before the window closed at 2026-11-14 23:59 UTC, [`121d8cd`](https://github.com/UnclePhil1/moopay/commit/121d8cd)). It includes the NEAR Intents, NEAR AI, Rhea and OutLayer integrations and the first version of the TEE signer. Later commits are security work added after the window and are listed in [After the submission window](#after-the-submission-window); compare with `git diff hackathon-submission..main`.
 
 Status: experimental and unaudited. Read [Trust boundaries](#trust-boundaries) before putting money in.
 
@@ -94,7 +94,7 @@ The wallet key is made and kept inside a **Phala Cloud TEE** (Intel TDX, dstack)
 
 | Layer inside the signer | What it enforces |
 | --- | --- |
-| Allow-list of calls | Only token transfers, wrap/unwrap on `wrap.near`, staking on `lst.rhealab.near`, storage registration on known tokens. Everything else (deploying code, adding keys, unknown contracts) is refused. |
+| Allow-list of calls | Only token transfers, wrap/unwrap on `wrap.near`, staking on `lst.rhealab.near`, storage registration on known tokens, and one owner-approved recovery key. Everything else (deploying code, other keys, unknown contracts) is refused. |
 | Pinned contracts | A look-alike contract (`wrap.near.evil.near`) is refused. |
 | Hard caps per asset | Per payment and per day, even with a passkey. |
 | Passkey, checked inside the enclave | Every payment needs a WebAuthn signature over the exact payment (asset, recipient, amount) and a one-time nonce. A server that changes the recipient after you signed gets a refusal. |
@@ -109,7 +109,6 @@ The wallet key is made and kept inside a **Phala Cloud TEE** (Intel TDX, dstack)
 - **Passkeys you can manage.** `/passkey` adds one (the existing passkey approves it). `/removepasskey` removes one, approved by another passkey. The last passkey can never be removed, so the wallet cannot end up unprotected.
 - **Turn biometrics on or off** with `/biometrics-web` and `/biometrics-x`; both directions need your passkey.
 - **Older accounts move in one step (`/secure`).** The signer's key is added to your account, your passkey is registered, the chain is checked, and only then is the old server-held key deleted from your account on chain. If any step fails the old key still works. Same address, same money.
-- **Staking from the enclave.** Your passkey approves the exact stake; the rNEAR stays in your wallet, because the signer has no permission to send it anywhere. Unstake and withdraw only bring money back to your own wallet, so the agent does them without asking. A compromised server can at worst start an unstake (a delay and lost yield), never move the money out.
 
 ### What this changes
 
@@ -120,19 +119,11 @@ The wallet key is made and kept inside a **Phala Cloud TEE** (Intel TDX, dstack)
 | A stolen browser session | Spend within limits | Nothing moves without your device's biometrics. |
 | A hijacked X account | Start requests | Same, and every payment still needs the passkey. |
 
-### Verified, and what is not
+### Verified
 
-Verified on mainnet with small amounts: allowance and hard-cap refusals, a payment refused without a passkey, a look-alike contract refused, state written on chain, a key that stays identical across approved code updates, a real phone passkey flow, cross-chain sends, private claims, recovery key and migration of a real old account. Each signer release is pinned in [`deploy/signer.compose.yml`](deploy/signer.compose.yml) by image digest.
+Run on mainnet with small amounts: the fee allowance and hard caps (an over-limit transfer is refused), a payment refused without a passkey, a look-alike contract refused, state written on chain before signing, a key that stays identical across approved code updates, passkey approval on a real phone, cross-chain sends and private claims from an enclave wallet, the recovery key, the biometric gate before the recovery code or key is shown, and moving a real old account into the enclave with `/secure`. Each signer release is pinned in [`deploy/signer.compose.yml`](deploy/signer.compose.yml) by image digest.
 
-Not done, said plainly:
-- **No independent audit** (no funding yet).
-- **No reproducible build or user-facing attestation yet.** You trust that the approved image matches this source.
-- **One owner of the Phala app and one NEAR governance account.** Moving both behind a multisig with a timelock is next.
-- **A passkey proves your device was unlocked, not that you read the screen.** The first passkey on a brand-new account is trust-on-first-use.
-- **The recovery key bypasses the caps.** That is the point, and why it stays offline.
-- **Enclave staking is new.** It is covered by tests and the signer's rules are checked live, but it has not yet been run with real funds.
-- **Scheduled payments are paused for enclave wallets** until they can run under a standing approval with a hard limit.
-- **Public free RPC.** The signer's chain writes can fail and are retried; a paid RPC key is the fix.
+Limits that are part of the design: a passkey proves your device was unlocked, not that you read the screen; the recovery key bypasses the caps, which is why it stays offline; the code has not been audited by anyone outside this project.
 
 Code: [`src/signer/`](src/signer/) (policy, passkeys, state, service), [`contracts/signer-state`](contracts/signer-state), tests in [`tests/unit/signer.test.ts`](tests/unit/signer.test.ts), design notes in [`docs/developers/inside-the-code/tee-signer.md`](docs/developers/inside-the-code/tee-signer.md).
 
@@ -150,7 +141,7 @@ Each row names where it lives in the code.
 | Scheduled payments | Repeat a payment daily, weekly or monthly. Every run goes through the same rules. Needs money in the agent wallet, since nobody is there to sign. | `schedule_payment`, `cancel_schedule` |
 | Private send (beta) | Routes USDC to a NEAR wallet through [OutLayer](https://outlayer.ai)'s private balance, so the chain does not link the payer's wallet to the receiver. Off unless `MOOPAY_PRIVATE_ROUTE=1`. | `src/agent/outlayer.ts` |
 | Privacy chat | With a NEAR AI key the model runs inside sealed enclaves on NEAR AI Cloud. Chat history is opt-in (`/history`) and expires (30 days default). | `src/ai/cloud/nearai.ts`, `src/ai/providers/` |
-| Stake rNEAR | Stakes NEAR with Rhea Finance. Enclave wallets keep the rNEAR in the wallet, approved by passkey; older wallets send it to your payout wallet and unstake in a window you sign. | `src/agent/rhea.ts`, `stake_rnear` and related tools |
+| Stake rNEAR | Stakes NEAR with Rhea Finance and sends the rNEAR to your payout wallet. Unstake and withdraw open a window you sign. | `src/agent/rhea.ts`, `stake_rnear` and related tools |
 | X agent | Mention the bot on X to send, split, stake or check a payment. Replies show only the start and end of addresses. Confirmation is a second post. Off unless the X keys are set. | `src/server/x.ts` |
 | Agent keys and API | `mpk_` bearer keys for outside agents: `POST /agent/api/delegate/send`, `/claim`, `GET /agent/api/delegate/me`. | `src/server/routes/agent.ts`, `src/agent/policy.ts` |
 | MCP connector | Five tools over HTTP or stdio for any MCP client: `route_cross_chain_intent`, `mint_private_claim_deposit`, `check_payment`, `check_claim`, `list_supported_assets`. | `src/ai/mcp/` |
@@ -310,6 +301,19 @@ This is experimental and unaudited. What you are trusting:
 - **Keys are server-held until an older account runs `/secure`.** Newer accounts, and any account that has moved, are signer-held (see Custody). The agent wallet still uses a full-access key, not a function-call key. The policy layer, the float cap and the guard contract are the mitigations for the older accounts.
 - **Single machine.** State lives on one volume. Back up `SEED_KEY` separately; without it the wallets cannot be recovered. `scripts/backup.mjs` makes encrypted backups.
 - **Not covered by tests:** real wallet signatures, mainnet payments and staking with real funds, and the report-only CSP. Try small real payments before trusting a change.
+
+## After the submission window
+
+Commits from 2026-11-15 00:10 UTC on are not part of the hackathon submission. They harden custody and are all deployed and in use at moopay.cash:
+
+| Date | Change |
+| --- | --- |
+| 15 Nov | No free allowance for signer accounts; first passkey counts at once on an unused account; the wallet address stays hidden until a passkey exists |
+| 15 Nov | Cross-chain sends and private claims from enclave wallets, signed for the exact quote or claim the passkey approved |
+| 15 Nov | Recovery key, and biometrics before any recovery code or key is shown |
+| 15 Nov | Move an old server-held wallet into the enclave (`/secure`) |
+| 16 Nov | Wrap and stake calls only on their official contracts; storage registration only on known tokens |
+| 17 Nov | `/secure` closes waiting top-ups and approvals instead of blocking on them; recovery-key reminder in the chat; `/removepasskey`; retries for the signer's chain writes |
 
 ## Media
 
